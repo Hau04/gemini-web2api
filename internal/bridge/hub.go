@@ -10,11 +10,26 @@ import (
 	"time"
 )
 
+type Attachment struct {
+	Filename   string `json:"filename"`
+	MIME       string `json:"mime"`
+	DataBase64 string `json:"data_base64"`
+	Size       int    `json:"size,omitempty"`
+	Source     string `json:"source,omitempty"`
+}
+
 type Request struct {
-	ID        string    `json:"id"`
-	Prompt    string    `json:"prompt"`
-	Model     string    `json:"model,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID          string       `json:"id"`
+	Prompt      string       `json:"prompt"`
+	Model       string       `json:"model,omitempty"`
+	Attachments []Attachment `json:"attachments,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+}
+
+type GenerateOptions struct {
+	Prompt      string
+	Model       string
+	Attachments []Attachment
 }
 
 type Chunk struct {
@@ -33,24 +48,42 @@ type inFlightEntry struct {
 }
 
 type Hub struct {
-	mu               sync.Mutex
-	seq              atomic.Uint64
-	tabName          string
-	lastHeartbeat    time.Time
-	clientHeartbeats map[string]time.Time
-	pending          []*Request
-	inFlight         map[string]*inFlightEntry
-	waiters          map[string]chan Chunk
-	pollNotify       chan struct{}
+	mu                   sync.Mutex
+	seq                  atomic.Uint64
+	tabName              string
+	lastHeartbeat        time.Time
+	clientHeartbeats     map[string]time.Time
+	pending              []*Request
+	inFlight             map[string]*inFlightEntry
+	waiters              map[string]chan Chunk
+	pollNotify           chan struct{}
+	minInterval          time.Duration
+	lastCompletedAt      time.Time
+	activeClientID       string
+	activeConvGen        string
+	sessionFingerprints  []string
+	sessionUploadedFiles map[string]bool
 }
 
 func NewHub() *Hub {
 	return &Hub{
-		clientHeartbeats: make(map[string]time.Time),
-		inFlight:         make(map[string]*inFlightEntry),
-		waiters:          make(map[string]chan Chunk),
-		pollNotify:       make(chan struct{}, 1),
+		clientHeartbeats:     make(map[string]time.Time),
+		inFlight:             make(map[string]*inFlightEntry),
+		waiters:              make(map[string]chan Chunk),
+		pollNotify:           make(chan struct{}, 1),
+		sessionUploadedFiles: make(map[string]bool),
 	}
+}
+
+// SetMinInterval configures the anti-ban minimum cooldown between consecutive
+// browser-bridge generations to avoid rapid-fire automated request bursts.
+func (h *Hub) SetMinInterval(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	h.minInterval = d
 }
 
 // IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds,
@@ -79,6 +112,12 @@ func (h *Hub) Touch(tabName string) {
 
 // Heartbeat updates tab and client liveness timestamps.
 func (h *Hub) Heartbeat(tabName, clientID string) {
+	h.UpdateTabSession(tabName, clientID, "")
+}
+
+// UpdateTabSession records liveness and resets conversation delta state whenever
+// the browser tab reloads (new clientID) or starts a fresh chat (new convGen).
+func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 	now := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -87,8 +126,67 @@ func (h *Hub) Heartbeat(tabName, clientID string) {
 	}
 	if clientID != "" {
 		h.clientHeartbeats[clientID] = now
+		if h.activeClientID != "" && h.activeClientID != clientID {
+			h.sessionFingerprints = nil
+			h.sessionUploadedFiles = make(map[string]bool)
+		}
+		h.activeClientID = clientID
+	}
+	if convGen != "" {
+		if h.activeConvGen != "" && h.activeConvGen != convGen {
+			h.sessionFingerprints = nil
+			h.sessionUploadedFiles = make(map[string]bool)
+		}
+		h.activeConvGen = convGen
 	}
 	h.lastHeartbeat = now
+}
+
+// ActiveSession snapshots the active tab identity and previously uploaded file paths.
+func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make(map[string]bool, len(h.sessionUploadedFiles))
+	for k, v := range h.sessionUploadedFiles {
+		cp[k] = v
+	}
+	return h.activeClientID, h.activeConvGen, cp
+}
+
+// MatchDeltaPrefix returns the number of leading messages already present in the
+// active browser tab's live conversation if fingerprints strictly extend it.
+func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	prev := h.sessionFingerprints
+	if len(prev) == 0 || len(fingerprints) <= len(prev) {
+		return 0
+	}
+	for i := range prev {
+		if prev[i] != fingerprints[i] {
+			return 0
+		}
+	}
+	return len(prev)
+}
+
+// RecordTurnSuccess saves the conversation prefix and uploaded file paths for the
+// active tab session so subsequent follow-up turns can send compact deltas and avoid
+// re-uploading files already present in the open chat.
+func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string, uploadedPaths []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if clientID != h.activeClientID || convGen != h.activeConvGen {
+		return
+	}
+	cp := make([]string, len(fingerprints))
+	copy(cp, fingerprints)
+	h.sessionFingerprints = cp
+	for _, p := range uploadedPaths {
+		if p != "" {
+			h.sessionUploadedFiles[p] = true
+		}
+	}
 }
 
 // WaitForNextRequest blocks until a generation request is queued or timeout occurs.
@@ -99,7 +197,13 @@ func (h *Hub) WaitForNextRequest(ctx context.Context, tabName string, timeout ti
 // WaitForNextRequestForClient blocks until a generation request is queued or timeout occurs,
 // tracking the polling client ID to avoid duplicate dispatches across tabs.
 func (h *Hub) WaitForNextRequestForClient(ctx context.Context, tabName, clientID string, timeout time.Duration) (*Request, error) {
-	h.Heartbeat(tabName, clientID)
+	return h.WaitForNextRequestForSession(ctx, tabName, clientID, "", timeout)
+}
+
+// WaitForNextRequestForSession blocks until a generation request is queued or timeout occurs,
+// tracking both clientID and conversation generation.
+func (h *Hub) WaitForNextRequestForSession(ctx context.Context, tabName, clientID, convGen string, timeout time.Duration) (*Request, error) {
+	h.UpdateTabSession(tabName, clientID, convGen)
 
 	h.mu.Lock()
 	if len(h.pending) > 0 {
@@ -200,18 +304,50 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	}
 }
 
+func (h *Hub) remainingCooldown() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.minInterval <= 0 || h.lastCompletedAt.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(h.lastCompletedAt)
+	if elapsed >= h.minInterval {
+		return 0
+	}
+	return h.minInterval - elapsed
+}
+
 // GenerateStream queues a prompt to the browser extension and yields text chunks as they arrive.
 func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit func(string) error) error {
+	return h.GenerateStreamWithOptions(ctx, GenerateOptions{
+		Prompt: prompt,
+		Model:  model,
+	}, emit)
+}
+
+// GenerateStreamWithOptions queues a prompt (with optional direct file attachments) to the
+// browser extension, applying anti-ban cooldown pacing between consecutive requests.
+func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOptions, emit func(string) error) error {
 	if !h.IsConnected() {
 		return errors.New("no browser tab connected to the bridge")
 	}
 
+	// Anti-ban pacing: avoid rapid-fire back-to-back automated bursts
+	if waitDur := h.remainingCooldown(); waitDur > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(waitDur):
+		}
+	}
+
 	reqID := fmt.Sprintf("req_%d_%d", time.Now().UnixNano(), h.seq.Add(1))
 	req := &Request{
-		ID:        reqID,
-		Prompt:    prompt,
-		Model:     model,
-		CreatedAt: time.Now(),
+		ID:          reqID,
+		Prompt:      opts.Prompt,
+		Model:       opts.Model,
+		Attachments: opts.Attachments,
+		CreatedAt:   time.Now(),
 	}
 
 	ch := make(chan Chunk, 512)
@@ -235,6 +371,7 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 				break
 			}
 		}
+		h.lastCompletedAt = time.Now()
 		h.mu.Unlock()
 	}()
 
@@ -265,8 +402,16 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 
 // Generate collects all stream chunks and returns the complete text.
 func (h *Hub) Generate(ctx context.Context, prompt, model string) (string, error) {
+	return h.GenerateWithOptions(ctx, GenerateOptions{
+		Prompt: prompt,
+		Model:  model,
+	})
+}
+
+// GenerateWithOptions collects all stream chunks for opts and returns the complete text.
+func (h *Hub) GenerateWithOptions(ctx context.Context, opts GenerateOptions) (string, error) {
 	var sb strings.Builder
-	err := h.GenerateStream(ctx, prompt, model, func(chunk string) error {
+	err := h.GenerateStreamWithOptions(ctx, opts, func(chunk string) error {
 		sb.WriteString(chunk)
 		return nil
 	})

@@ -16,5 +16,8 @@
   "log_requests": true,
   "impersonate": "",
   "temporary_chats": false,
-  "base_url": "https://gemini.google.com"
+  "base_url": "https://gemini.google.com",
+  "bridge_min_interval_ms": 2500,
+  "bridge_auto_upload_local_files": true,
+  "bridge_delta_context": true
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -90,17 +91,6 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Upload images to Gemini storage.
-	var fileRefs []string
-	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
-		if err != nil {
-			a.Logf("Image upload error: %v", err)
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
-			return
-		}
-	}
-
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
 		ModelID:     resolved.Mode,
@@ -112,12 +102,29 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	var text string
 	if a.Bridge != nil && a.Bridge.IsConnected() {
 		a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
-		text, err = a.Bridge.Generate(r.Context(), prompt, resolved.Name)
+		prepared := a.prepareBridgeRequest(r, chatReq, prompt, images)
+		text, err = a.Bridge.GenerateWithOptions(r.Context(), bridge.GenerateOptions{
+			Prompt:      prepared.Prompt,
+			Model:       resolved.Name,
+			Attachments: prepared.Attachments,
+		})
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
 			return
 		}
+		if strings.TrimSpace(text) != "" {
+			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedPaths)
+		}
 	} else {
+		var fileRefs []string
+		if len(images) > 0 {
+			fileRefs, err = a.uploadImages(images)
+			if err != nil {
+				a.Logf("Image upload error: %v", err)
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+				return
+			}
+		}
 		text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
 		if err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})

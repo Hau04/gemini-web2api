@@ -296,6 +296,24 @@ To completely eliminate the risk of Google account or cookie bans, you do not ne
 4. A floating status badge will appear on your Gemini web page: `🟢 Web2API Bridge: Connected (:8081)`.
 5. Any request sent to `http://localhost:8081/v1/chat/completions` (from WorkBuddy, Cursor, or curl) is automatically routed through your live browser tab, streaming tokens straight from Google's web UI.
 
+#### Direct PDF / File Upload & Anti-Ban Protections (Bridge Mode)
+
+When running with the Live Web Bridge, `gemini-web2api` includes built-in protections against repetitive agent tool loops and Google rate-limiting:
+
+- **Direct File & PDF Upload**: OpenAI `file` / `input_file` / `document` / `image_url` parts are uploaded straight into your open Gemini tab (no cookies required). For direct `localhost` agent requests (such as WorkBuddy), referenced local PDFs, Office documents (`.docx`, `.pptx`, `.xlsx`, `.csv`, `.epub`), and images (up to 25 MB, max 5 files/turn) are automatically attached directly to Gemini so it reads them natively in one turn instead of issuing dozens of extraction tool calls.
+- **Delta-Turn Context (`bridge_delta_context: true`)**: Follow-up turns in the same open Gemini tab send only the newly appended user/tool messages rather than re-pasting the full conversation history and tool schemas every turn (automatically resets on tab reload or New Chat).
+- **Request Cooldown Pacing (`bridge_min_interval_ms: 2500`)**: Enforces a minimum 2.5s pacing interval between consecutive browser-bridge prompts (`--bridge-cooldown` flag to adjust).
+
+All three features can be tuned in `config.json`:
+
+```json
+{
+  "bridge_min_interval_ms": 2500,
+  "bridge_auto_upload_local_files": true,
+  "bridge_delta_context": true
+}
+```
+
 ### Gemini Enterprise (Vertex AI Search) Support
 
 If your organization uses **Gemini Enterprise** hosted at `https://vertexaisearch.cloud.google.com/`, configure `base_url`:

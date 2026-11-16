@@ -611,3 +611,103 @@ test("Shadow DOM + <slot> Vertex AI Search simulation NEVER returns 'Gemini 4 Hy
     "Here is the second answer."
   );
 });
+
+// ---------------------------------------------------------------------------
+// 6. Direct File Upload telemetry & DOM selectors tests
+// ---------------------------------------------------------------------------
+
+test("classifyUploadEndpoint matches Gemini Enterprise & Consumer file upload APIs", () => {
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetAddContextFile",
+      "POST"
+    ),
+    true
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://discoveryengine.googleapis.com/v1alpha/projects/123/locations/global/collections/default_collection/engines/eng/assistants/default_assistant:addContextFile",
+      "POST"
+    ),
+    true
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-push.clients6.google.com/upload/",
+      "POST"
+    ),
+    true
+  );
+  // GET requests and regular stream endpoints must NOT be classified as uploads
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetAddContextFile",
+      "GET"
+    ),
+    false
+  );
+  assert.equal(
+    netHook.classifyUploadEndpoint(
+      "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+      "POST"
+    ),
+    false
+  );
+});
+
+test("buildAttachedFileNote and base64ToUint8Array handle PDF attachments", () => {
+  const bytes = bridge.base64ToUint8Array("JVBERi0xLjQK");
+  assert.equal(Buffer.from(bytes).toString("utf8"), "%PDF-1.4\n");
+
+  const note = bridge.buildAttachedFileNote([
+    { filename: "report.pdf" },
+    { filename: "slides.pptx" }
+  ]);
+  assert.ok(note.includes("report.pdf, slides.pptx"));
+  assert.ok(note.includes("do NOT call local shell/python/file tools"));
+  assert.equal(bridge.buildAttachedFileNote([]), "");
+});
+
+test("Shadow DOM upload helpers locate attach button, menu option, and attachment chip", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  const chatHost = el("ucs-chat-app");
+  const shadow = chatHost.attachShadow();
+  doc.body.appendChild(chatHost);
+
+  const textarea = el("textarea");
+  const sendBtn = el("button", { "aria-label": "Send message" });
+  sendBtn.appendChild(txt("Send"));
+  const attachBtn = el("button", { "aria-label": "Add files" });
+  attachBtn.appendChild(txt("+"));
+
+  shadow.appendChild(textarea);
+  shadow.appendChild(attachBtn);
+  shadow.appendChild(sendBtn);
+
+  // Must pick the attach/add-files button, never Send
+  const foundAttach = bridge.findAttachButton(textarea, doc);
+  assert.equal(foundAttach, attachBtn);
+
+  // Upload popover menu with both Google Drive and Upload files
+  const driveItem = el("div", { role: "menuitem" });
+  driveItem.appendChild(txt("Add from Google Drive"));
+  const uploadItem = el("div", { role: "menuitem" });
+  uploadItem.appendChild(txt("Upload files"));
+  shadow.appendChild(driveItem);
+  shadow.appendChild(uploadItem);
+
+  const foundMenu = bridge.findUploadMenuOption(doc);
+  assert.equal(foundMenu, uploadItem);
+
+  // Before upload, no attachment chip exists
+  assert.equal(bridge.hasAttachmentChipInDom(["quarterly_report.pdf"], textarea, doc), false);
+
+  // After upload, chip renders filename in DOM
+  const chip = el("div", { class: "file-attachment-chip" });
+  chip.appendChild(txt("quarterly_report.pdf"));
+  shadow.appendChild(chip);
+
+  assert.equal(bridge.hasAttachmentChipInDom(["quarterly_report.pdf"], textarea, doc), true);
+});
+
