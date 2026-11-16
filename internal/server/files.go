@@ -16,6 +16,7 @@ import (
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
@@ -425,11 +426,11 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		}
 	}
 
-	var requester *http.Client
+	var requester gemini.Requester
 	if a.Gem != nil {
 		requester = a.Gem.HTTP
 	}
-	if requester == nil {
+	if requester == nil && a.HTTPClient != nil {
 		requester = a.HTTPClient
 	}
 	var fetchFn func(string) ([]byte, error)
