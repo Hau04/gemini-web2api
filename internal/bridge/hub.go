@@ -205,74 +205,72 @@ func (h *Hub) WaitForNextRequestForClient(ctx context.Context, tabName, clientID
 func (h *Hub) WaitForNextRequestForSession(ctx context.Context, tabName, clientID, convGen string, timeout time.Duration) (*Request, error) {
 	h.UpdateTabSession(tabName, clientID, convGen)
 
-	h.mu.Lock()
-	if len(h.pending) > 0 {
-		req := h.pending[0]
-		h.pending = h.pending[1:]
-		h.inFlight[req.ID] = &inFlightEntry{
-			req:        req,
-			tabName:    tabName,
-			clientID:   clientID,
-			assignedAt: time.Now(),
-		}
-		h.mu.Unlock()
-		return req, nil
-	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 
-	// Only re-dispatch an orphaned in-flight request if zero chunks have been streamed yet
-	// AND its assigned tab appears to have reloaded or stopped heartbeating.
-	for id, entry := range h.inFlight {
-		if _, exists := h.waiters[id]; !exists {
-			delete(h.inFlight, id)
-			continue
-		}
-		if entry.hasChunks {
-			continue
-		}
-		orphaned := false
-		if clientID != "" && entry.clientID != "" {
-			if entry.clientID != clientID {
-				lastSeen := h.clientHeartbeats[entry.clientID]
-				if time.Since(lastSeen) > 15*time.Second && time.Since(entry.assignedAt) > 10*time.Second {
-					orphaned = true
-				}
-			}
-		} else if time.Since(entry.assignedAt) > 20*time.Second {
-			orphaned = true
-		}
-		if orphaned {
-			entry.tabName = tabName
-			entry.clientID = clientID
-			entry.assignedAt = time.Now()
-			req := entry.req
-			h.mu.Unlock()
-			return req, nil
-		}
-	}
-
-	notify := h.pollNotify
-	h.mu.Unlock()
-
-	select {
-	case <-notify:
+	for {
 		h.mu.Lock()
-		defer h.mu.Unlock()
 		if len(h.pending) > 0 {
 			req := h.pending[0]
 			h.pending = h.pending[1:]
+			if len(h.pending) == 0 {
+				select {
+				case <-h.pollNotify:
+				default:
+				}
+			}
 			h.inFlight[req.ID] = &inFlightEntry{
 				req:        req,
 				tabName:    tabName,
 				clientID:   clientID,
 				assignedAt: time.Now(),
 			}
+			h.mu.Unlock()
 			return req, nil
 		}
-		return nil, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case <-time.After(timeout):
-		return nil, nil
+
+		// Only re-dispatch an orphaned in-flight request if zero chunks have been streamed yet
+		// AND its assigned tab appears to have reloaded or stopped heartbeating.
+		for id, entry := range h.inFlight {
+			if _, exists := h.waiters[id]; !exists {
+				delete(h.inFlight, id)
+				continue
+			}
+			if entry.hasChunks {
+				continue
+			}
+			orphaned := false
+			if clientID != "" && entry.clientID != "" {
+				if entry.clientID != clientID {
+					lastSeen := h.clientHeartbeats[entry.clientID]
+					if time.Since(lastSeen) > 15*time.Second && time.Since(entry.assignedAt) > 10*time.Second {
+						orphaned = true
+					}
+				}
+			} else if time.Since(entry.assignedAt) > 20*time.Second {
+				orphaned = true
+			}
+			if orphaned {
+				entry.tabName = tabName
+				entry.clientID = clientID
+				entry.assignedAt = time.Now()
+				req := entry.req
+				h.mu.Unlock()
+				return req, nil
+			}
+		}
+
+		notify := h.pollNotify
+		h.mu.Unlock()
+
+		select {
+		case <-notify:
+			// Re-check h.pending under lock; ignores stale or spurious wakeups.
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-timer.C:
+			return nil, nil
+		}
 	}
 }
 

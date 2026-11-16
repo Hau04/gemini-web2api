@@ -496,7 +496,9 @@ func TestBridgeOpenAIFileAttachmentForwardedWithoutCookies(t *testing.T) {
 	app.Bridge.UpdateTabSession("gemini.google.com", "tab_file", "1")
 
 	pollResult := make(chan map[string]any, 1)
+	workerDone := make(chan struct{})
 	go func() {
+		defer close(workerDone)
 		pollReq := httptest.NewRequest("GET", "/bridge/poll?tab=gemini.google.com&client=tab_file&conv_gen=1", nil)
 		pollRec := httptest.NewRecorder()
 		handler.ServeHTTP(pollRec, pollReq)
@@ -526,6 +528,7 @@ func TestBridgeOpenAIFileAttachmentForwardedWithoutCookies(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
+	<-workerDone
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 without cookies in bridge mode, got %d: %s", rec.Code, rec.Body.String())
