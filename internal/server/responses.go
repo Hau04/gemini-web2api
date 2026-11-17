@@ -140,6 +140,16 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		text = generateFastTitleResponse(prompt, sessionText)
 		a.Logf("Fast-tracking Responses API client title generation request locally: %s", text)
 	} else if a.Bridge != nil && a.Bridge.IsConnected() {
+		if a.Bridge.IsPaused() {
+			pErr := &bridge.PausedError{}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": map[string]any{
+					"message": pErr.Error(),
+					"type":    "bridge_paused",
+				},
+			})
+			return
+		}
 		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
 			rlErr := &bridge.RateLimitError{RetryAfter: rem}
 			writeBridgeRateLimitError(w, rem, rlErr.Error())
@@ -152,8 +162,14 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			Model:       resolved.Name,
 			Attachments: prepared.Attachments,
 			NewChat:     prepared.NewChat,
+			LoopPenalty: prepared.LoopPenalty,
 		})
 		if err != nil {
+			var pErr *bridge.PausedError
+			if errors.As(err, &pErr) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": pErr.Error(), "type": "bridge_paused"}})
+				return
+			}
 			var rlErr *bridge.RateLimitError
 			if errors.As(err, &rlErr) {
 				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())

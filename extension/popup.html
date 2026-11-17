@@ -145,6 +145,7 @@
 
   <div id="bridgeBox" class="status warn" style="margin-bottom: 8px;">
     <strong>Live Web Bridge:</strong> <span id="bridgeStatusText">Checking http://localhost:8081...</span>
+    <div id="bridgePacingText" style="margin-top: 4px; font-size: 11px; opacity: 0.9; display: none;"></div>
   </div>
 
   <div class="bridge-controls">
@@ -153,6 +154,7 @@
       Auto-refresh page after WorkBuddy response (Optional; use Refresh button if stuck)
     </label>
     <div class="btn-row">
+      <button id="pauseBridgeBtn" class="secondary" disabled>⏸️ Pause Bridge</button>
       <button id="refreshTabBtn" class="secondary">🔄 Refresh Page</button>
       <button id="forceFinishBtn" class="danger">⏹️ Force Finish</button>
     </div>

@@ -20,6 +20,8 @@
   "bridge_min_interval_ms": 3000,
   "bridge_jitter_ms": 2000,
   "bridge_max_per_10min": 15,
+  "bridge_max_per_hour": 50,
+  "bridge_pacing_state_file": ".bridge_pacing_state.json",
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 8192,
   "bridge_spillover_chars": 20000,

@@ -26,6 +26,8 @@ type Config struct {
 	BridgeMinIntervalMs        int      `json:"bridge_min_interval_ms"`
 	BridgeJitterMs             int      `json:"bridge_jitter_ms"`
 	BridgeMaxPer10Min          int      `json:"bridge_max_per_10min"`
+	BridgeMaxPerHour           int      `json:"bridge_max_per_hour"`
+	BridgePacingStateFile      string   `json:"bridge_pacing_state_file"`
 	BridgeAutoUploadLocalFiles bool     `json:"bridge_auto_upload_local_files"`
 	BridgeLargeCodeUploadBytes int      `json:"bridge_large_code_upload_bytes"`
 	BridgeSpilloverChars       int      `json:"bridge_spillover_chars"`
@@ -54,6 +56,8 @@ func Default() Config {
 		BridgeMinIntervalMs:        3000,
 		BridgeJitterMs:             2000,
 		BridgeMaxPer10Min:          15,
+		BridgeMaxPerHour:           50,
+		BridgePacingStateFile:      "",
 		BridgeAutoUploadLocalFiles: true,
 		BridgeLargeCodeUploadBytes: 8192,
 		BridgeSpilloverChars:       20000,
@@ -96,6 +100,8 @@ func Load(path string) (Config, error) {
 		BridgeMinIntervalMs        *int      `json:"bridge_min_interval_ms"`
 		BridgeJitterMs             *int      `json:"bridge_jitter_ms"`
 		BridgeMaxPer10Min          *int      `json:"bridge_max_per_10min"`
+		BridgeMaxPerHour           *int      `json:"bridge_max_per_hour"`
+		BridgePacingStateFile      *string   `json:"bridge_pacing_state_file"`
 		BridgeAutoUploadLocalFiles *bool     `json:"bridge_auto_upload_local_files"`
 		BridgeLargeCodeUploadBytes *int      `json:"bridge_large_code_upload_bytes"`
 		BridgeSpilloverChars       *int      `json:"bridge_spillover_chars"`
@@ -163,6 +169,12 @@ func Load(path string) (Config, error) {
 	}
 	if aux.BridgeMaxPer10Min != nil && *aux.BridgeMaxPer10Min >= 0 {
 		cfg.BridgeMaxPer10Min = *aux.BridgeMaxPer10Min
+	}
+	if aux.BridgeMaxPerHour != nil && *aux.BridgeMaxPerHour >= 0 {
+		cfg.BridgeMaxPerHour = *aux.BridgeMaxPerHour
+	}
+	if aux.BridgePacingStateFile != nil {
+		cfg.BridgePacingStateFile = *aux.BridgePacingStateFile
 	}
 	if aux.BridgeAutoUploadLocalFiles != nil {
 		cfg.BridgeAutoUploadLocalFiles = *aux.BridgeAutoUploadLocalFiles

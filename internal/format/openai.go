@@ -617,6 +617,37 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 	return compacted
 }
 
+// CompactToolDefinitionsJSON converts OpenAI tool declarations into the compact
+// schema JSON representation used in # Tool Use and additive mid-chat tool deltas.
+func CompactToolDefinitionsJSON(tools []models.OpenAITool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	defs := make([]models.OpenAIFunction, 0, len(tools))
+	for _, tool := range tools {
+		fn := tool.Function
+		if fn.Name == "" {
+			fn.Name = tool.Name
+		}
+		if fn.Description == "" {
+			fn.Description = tool.Description
+		}
+		if fn.Parameters == nil {
+			fn.Parameters = tool.Parameters
+		}
+		if fn.Parameters == nil {
+			fn.Parameters = map[string]any{}
+		}
+		if fn.Name != "" {
+			defs = append(defs, fn)
+		}
+	}
+	if len(defs) == 0 {
+		return ""
+	}
+	return string(compactToolDefinitions(defs))
+}
+
 // AllowedToolNames extracts the set of declared tool function names from an OpenAI request.
 func AllowedToolNames(tools []models.OpenAITool) map[string]bool {
 	if len(tools) == 0 {

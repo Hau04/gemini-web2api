@@ -8,29 +8,50 @@ import (
 	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
 )
 
-func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
+func (a *App) buildBridgeStatusPayload() map[string]any {
 	connected := a.Bridge != nil && a.Bridge.IsConnected()
 	tab := ""
-	cooldownSec := 0
-	recent10m := 0
-	maxPer10m := 0
+	var snap bridge.PacingSnapshot
 	if a.Bridge != nil {
 		tab = a.Bridge.TabName()
-		recent10m, maxPer10m = a.Bridge.PacingStats()
-		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
-			cooldownSec = int(rem.Round(time.Second).Seconds())
-			if cooldownSec < 1 {
-				cooldownSec = 1
-			}
-		}
+		snap = a.Bridge.DetailedPacingStats()
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	return map[string]any{
 		"connected":    connected,
 		"tab":          tab,
-		"cooldown_sec": cooldownSec,
-		"recent_10m":   recent10m,
-		"max_per_10m":  maxPer10m,
-	})
+		"paused":       snap.Paused,
+		"cooldown_sec": snap.CooldownSec,
+		"recent_10m":   snap.Recent10m,
+		"max_per_10m":  snap.MaxPer10m,
+		"recent_1h":    snap.Recent1h,
+		"max_per_hour": snap.MaxPerHour,
+	}
+}
+
+func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.buildBridgeStatusPayload())
+}
+
+func (a *App) handleBridgePause(w http.ResponseWriter, r *http.Request) {
+	if a.Bridge == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "bridge not initialized"})
+		return
+	}
+	var payload struct {
+		Paused *bool `json:"paused"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if payload.Paused != nil {
+		a.Bridge.SetPaused(*payload.Paused)
+	} else {
+		a.Bridge.SetPaused(!a.Bridge.IsPaused())
+	}
+	if a.Bridge.IsPaused() {
+		a.Logf("Browser bridge PAUSED by user via /bridge/pause")
+	} else {
+		a.Logf("Browser bridge RESUMED by user via /bridge/pause")
+	}
+	writeJSON(w, http.StatusOK, a.buildBridgeStatusPayload())
 }
 
 func (a *App) handleBridgeHeartbeat(w http.ResponseWriter, r *http.Request) {

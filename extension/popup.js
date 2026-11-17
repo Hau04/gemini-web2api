@@ -3,6 +3,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   const statusBox = document.getElementById("statusBox");
   const bridgeBox = document.getElementById("bridgeBox");
   const bridgeStatusText = document.getElementById("bridgeStatusText");
+  const bridgePacingText = document.getElementById("bridgePacingText");
+  const pauseBridgeBtn = document.getElementById("pauseBridgeBtn");
   const autoRefreshCheckbox = document.getElementById("autoRefreshCheckbox");
   const refreshTabBtn = document.getElementById("refreshTabBtn");
   const forceFinishBtn = document.getElementById("forceFinishBtn");
@@ -51,18 +53,77 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   });
 
+  let bridgePaused = false;
+
+  function renderBridgeStatus(bData) {
+    bridgePaused = Boolean(bData && bData.paused);
+    const cooldownSec = Number(bData && bData.cooldown_sec) || 0;
+    const recent10m = Number(bData && bData.recent_10m) || 0;
+    const max10m = Number(bData && bData.max_per_10m) || 0;
+    const recent1h = Number(bData && bData.recent_1h) || 0;
+    const max1h = Number(bData && bData.max_per_hour) || 0;
+
+    pauseBridgeBtn.disabled = false;
+    if (bridgePaused) {
+      pauseBridgeBtn.textContent = "▶️ Resume Bridge";
+      pauseBridgeBtn.className = "primary";
+    } else {
+      pauseBridgeBtn.textContent = "⏸️ Pause Bridge";
+      pauseBridgeBtn.className = "secondary";
+    }
+
+    const parts = [];
+    if (max10m > 0) parts.push(`${recent10m}/${max10m} (10m)`);
+    else parts.push(`${recent10m} (10m)`);
+    if (max1h > 0) parts.push(`${recent1h}/${max1h} (1h)`);
+    else if (recent1h > 0) parts.push(`${recent1h} (1h)`);
+    if (cooldownSec > 0) parts.push(`Cooldown: ${cooldownSec}s 🛡️`);
+
+    if (bridgePacingText) {
+      bridgePacingText.style.display = "block";
+      bridgePacingText.textContent = `Pacing: ${parts.join(" · ")}`;
+    }
+
+    if (bridgePaused) {
+      bridgeBox.className = "status warn";
+      bridgeStatusText.textContent = `Paused by user ⏸️ (${bData.tab || "bridge"})`;
+    } else if (cooldownSec > 0) {
+      bridgeBox.className = "status warn";
+      bridgeStatusText.textContent = `Rate-limit cooldown: ${cooldownSec}s 🛡️`;
+    } else if (bData.connected) {
+      bridgeBox.className = "status success";
+      bridgeStatusText.textContent = `Connected (${bData.tab || "tab active"})`;
+    } else {
+      bridgeBox.className = "status warn";
+      bridgeStatusText.textContent = "Server running on :8081 (Open Gemini page to connect)";
+    }
+  }
+
+  pauseBridgeBtn.addEventListener("click", async () => {
+    pauseBridgeBtn.disabled = true;
+    try {
+      const res = await fetch("http://localhost:8081/bridge/pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: !bridgePaused })
+      });
+      if (res.ok) {
+        const bData = await res.json();
+        renderBridgeStatus(bData);
+      } else {
+        pauseBridgeBtn.disabled = false;
+      }
+    } catch (e) {
+      pauseBridgeBtn.disabled = false;
+    }
+  });
+
   // Check bridge server connectivity
   try {
     const bridgeRes = await fetch("http://localhost:8081/bridge/status");
     if (bridgeRes.ok) {
       const bData = await bridgeRes.json();
-      if (bData.connected) {
-        bridgeBox.className = "status success";
-        bridgeStatusText.textContent = `Connected (${bData.tab || "tab active"})`;
-      } else {
-        bridgeBox.className = "status warn";
-        bridgeStatusText.textContent = "Server running on :8081 (Open Gemini page to connect)";
-      }
+      renderBridgeStatus(bData);
     } else {
       bridgeBox.className = "status error";
       bridgeStatusText.textContent = "Server returned error";

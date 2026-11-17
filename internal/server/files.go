@@ -373,10 +373,45 @@ func resolveAndReadLocalFile(candidate string, baseDirs []string, largeCodeMinBy
 	return "", "", bridge.Attachment{}, false
 }
 
+func codeFenceLangForFilename(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".js", ".mjs", ".cjs", ".jsx":
+		return "javascript"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".diff", ".patch":
+		return "diff"
+	case ".json", ".jsonl", ".ndjson":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".sql":
+		return "sql"
+	case ".sh", ".bash", ".zsh":
+		return "bash"
+	case ".md", ".markdown":
+		return "markdown"
+	case ".html", ".htm":
+		return "html"
+	case ".css", ".scss":
+		return "css"
+	case ".xml", ".svg":
+		return "xml"
+	default:
+		return ""
+	}
+}
+
 // DiscoverLocalUploadFiles inspects the latest message (when it is a user turn) for references
 // to existing local PDFs, Office documents, media files, or long source code files
 // (>= largeCodeMinBytes) and reads them for direct upload through the browser bridge.
 // Files already uploaded with the same size+mtime signature in this tab session are skipped.
+// When 2+ plain-text/code files are discovered in one turn, they are bundled into ONE single
+// workspace_files_bundle.md attachment to minimize browser upload HTTP calls (anti-ban).
 func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded map[string]string, largeCodeMinBytes int) ([]bridge.Attachment, map[string]string) {
 	if len(messages) == 0 {
 		return nil, nil
@@ -405,11 +440,16 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 
 	seenAbs := make(map[string]bool)
 	seenContent := make(map[string]bool)
-	var attachments []bridge.Attachment
+	var binaryAtts []bridge.Attachment
+	type codeEntry struct {
+		displayName string
+		att         bridge.Attachment
+	}
+	var codeEntries []codeEntry
 	uploadedSigs := make(map[string]string)
 
 	for _, cand := range candidates {
-		if len(attachments) >= maxLocalAutoUploadFiles {
+		if len(binaryAtts)+len(codeEntries) >= maxLocalAutoUploadFiles {
 			break
 		}
 		absKey, sig, att, ok := resolveAndReadLocalFile(cand, baseDirs, largeCodeMinBytes)
@@ -434,9 +474,51 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 		}
 		seenAbs[absKey] = true
 		seenContent[contentKey] = true
-		attachments = append(attachments, att)
 		uploadedSigs[absKey] = sig
 		uploadedSigs[contentKey] = "uploaded"
+		if att.Source == "local_large_code" {
+			codeEntries = append(codeEntries, codeEntry{displayName: cand, att: att})
+		} else {
+			binaryAtts = append(binaryAtts, att)
+		}
+	}
+
+	attachments := make([]bridge.Attachment, 0, len(binaryAtts)+len(codeEntries))
+	attachments = append(attachments, binaryAtts...)
+
+	if len(codeEntries) == 1 {
+		attachments = append(attachments, codeEntries[0].att)
+	} else if len(codeEntries) >= 2 {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "# Attached Workspace Files (%d files)\n\n", len(codeEntries))
+		for i, ce := range codeEntries {
+			rawBytes, err := base64.StdEncoding.DecodeString(ce.att.DataBase64)
+			if err != nil {
+				continue
+			}
+			lang := codeFenceLangForFilename(ce.att.Filename)
+			label := strings.TrimSpace(ce.displayName)
+			if label == "" {
+				label = ce.att.Filename
+			}
+			fmt.Fprintf(&sb, "## File %d: %s\n\n```%s\n%s\n```\n\n", i+1, label, lang, string(rawBytes))
+		}
+		bundleBytes := []byte(sb.String())
+		if len(bundleBytes) > 0 && len(bundleBytes) <= maxBridgeAttachmentBytes {
+			bundleAtt := bridge.Attachment{
+				Filename:   "workspace_files_bundle.md",
+				MIME:       "text/markdown",
+				DataBase64: base64.StdEncoding.EncodeToString(bundleBytes),
+				Size:       len(bundleBytes),
+				Source:     "local_large_code",
+			}
+			attachments = append(attachments, bundleAtt)
+			uploadedSigs["sha256:"+attachmentContentHash(bundleAtt)] = "uploaded"
+		} else {
+			for _, ce := range codeEntries {
+				attachments = append(attachments, ce.att)
+			}
+		}
 	}
 
 	return attachments, uploadedSigs
@@ -897,6 +979,99 @@ func extForMIME(mime string) string {
 	}
 }
 
+var (
+	reVolatileSystemLine = regexp.MustCompile(`(?im)^\s*(?:current\s+(?:date|time|datetime|timestamp)|today'?s\s+date|local\s+time|server\s+time|timestamp|now)\s*[:=].*$`)
+	reVolatileISODate    = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b`)
+	reVolatileClock      = regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|UTC|GMT)?\b`)
+)
+
+// normalizeSystemPromptForFingerprint strips volatile clock/date/timestamp metadata
+// from system prompts so routine per-turn clock updates do not break delta context.
+func normalizeSystemPromptForFingerprint(text string) string {
+	norm := reVolatileSystemLine.ReplaceAllString(text, "[volatile-time]")
+	norm = reVolatileISODate.ReplaceAllString(norm, "[date]")
+	norm = reVolatileClock.ReplaceAllString(norm, "[time]")
+	return norm
+}
+
+// DetectAgentToolLoop checks the trailing autonomous agent turns (since the last user
+// message) for 3+ consecutive identical tool calls or tool outputs, helping prevent
+// runaway retry storms that risk triggering Google frequency bans.
+func DetectAgentToolLoop(messages []models.OpenAIMessage) (repeatCount int, toolName string) {
+	if len(messages) < 6 {
+		return 0, ""
+	}
+	toolCallNames := format.BuildToolCallNameMap(messages)
+
+	var callSigs []string
+	var callNames []string
+	var outSigs []string
+	var outNames []string
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if role == "user" || role == "" {
+			break
+		}
+		if role == "assistant" && len(msg.ToolCalls) > 0 {
+			var parts []string
+			firstName := ""
+			for _, tc := range msg.ToolCalls {
+				n := strings.TrimSpace(tc.Function.Name)
+				if firstName == "" {
+					firstName = n
+				}
+				parts = append(parts, n+":"+strings.TrimSpace(tc.Function.Arguments))
+			}
+			callSigs = append(callSigs, strings.Join(parts, "|"))
+			callNames = append(callNames, firstName)
+		} else if role == "tool" {
+			tName := strings.TrimSpace(msg.Name)
+			if tName == "" && msg.ToolCallID != "" {
+				tName = toolCallNames[msg.ToolCallID]
+			}
+			text, _ := format.ExtractMessageContent(msg)
+			sum := sha256.Sum256([]byte(tName + "\x00" + strings.TrimSpace(text)))
+			outSigs = append(outSigs, hex.EncodeToString(sum[:]))
+			outNames = append(outNames, tName)
+		}
+	}
+
+	countPrefix := func(sigs []string) int {
+		if len(sigs) == 0 {
+			return 0
+		}
+		c := 1
+		for i := 1; i < len(sigs); i++ {
+			if sigs[i] == sigs[0] {
+				c++
+			} else {
+				break
+			}
+		}
+		return c
+	}
+
+	callRep := countPrefix(callSigs)
+	outRep := countPrefix(outSigs)
+	if callRep >= 3 && callRep >= outRep {
+		name := "tool"
+		if len(callNames) > 0 && callNames[0] != "" {
+			name = callNames[0]
+		}
+		return callRep, name
+	}
+	if outRep >= 3 {
+		name := "tool"
+		if len(outNames) > 0 && outNames[0] != "" {
+			name = outNames[0]
+		}
+		return outRep, name
+	}
+	return 0, ""
+}
+
 // ConversationFingerprints returns a deterministic slice of SHA-256 fingerprints
 // starting with the tool-definition digest followed by one digest per message.
 func ConversationFingerprints(req models.OpenAIChatRequest) []string {
@@ -912,6 +1087,7 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 
 	for _, msg := range req.Messages {
 		h := sha256.New()
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		h.Write([]byte(msg.Role))
 		h.Write([]byte{0})
 		h.Write([]byte(msg.Name))
@@ -919,6 +1095,9 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 		h.Write([]byte(msg.ToolCallID))
 		h.Write([]byte{0})
 		text, atts := format.ExtractMessageContent(msg)
+		if role == "system" || role == "developer" {
+			text = normalizeSystemPromptForFingerprint(text)
+		}
 		h.Write([]byte(text))
 		for _, att := range atts {
 			h.Write([]byte{1})
@@ -944,10 +1123,12 @@ type preparedBridgeTurn struct {
 	Prompt           string
 	Attachments      []bridge.Attachment
 	NewChat          bool
+	LoopPenalty      bool
 	SessionClient    string
 	SessionConv      string
 	Fingerprints     []string
 	UserFingerprints []string
+	ToolNames        map[string]bool
 	UploadedSigs     map[string]string
 }
 
@@ -971,11 +1152,12 @@ func ExtractUserFingerprints(req models.OpenAIChatRequest, allFingerprints []str
 }
 
 func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
-	a.Bridge.RecordTurnSuccessWithConversation(
+	a.Bridge.RecordTurnSuccessWithTools(
 		p.SessionClient,
 		p.SessionConv,
 		p.Fingerprints,
 		p.UserFingerprints,
+		p.ToolNames,
 		p.UploadedSigs,
 		p.NewChat,
 	)
@@ -985,6 +1167,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	sessClient, sessConvGen, alreadyUploaded := a.Bridge.ActiveSession()
 	fingerprints := ConversationFingerprints(req)
 	userFPs, hasAssistantOrTool := ExtractUserFingerprints(req, fingerprints)
+	currentToolNames := format.AllowedToolNames(req.Tools)
 
 	// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
 	// browser tab still holds an older conversation, so Gemini starts a clean New Chat
@@ -999,10 +1182,11 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	activeAtts := apiAttachments
 	isDelta := false
 
-	// Delta-context optimization: if the active browser tab already holds the exact
-	// tool definitions and leading conversation turns, send only the newly appended turns.
+	// Delta-context optimization: if the active browser tab already holds the leading
+	// conversation turns (including when only new tools were added mid-chat), send only
+	// the newly appended turns plus any newly added tool schemas.
 	if a.Cfg.BridgeDeltaContext && !newChat {
-		matchedPrefix := a.Bridge.MatchDeltaPrefix(fingerprints)
+		matchedPrefix, addedToolNames := a.Bridge.MatchDeltaPrefixWithTools(fingerprints, currentToolNames)
 		// Element 0 is the tools digest, so matchedPrefix > 1 means at least 1 message matched.
 		if matchedPrefix > 1 {
 			matchedMsgs := matchedPrefix - 1
@@ -1010,6 +1194,25 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 				priorToolNames := format.BuildToolCallNameMap(req.Messages[:matchedMsgs])
 				deltaPrompt, deltaAtts := format.MessagesToDeltaPromptWithNames(req.Messages[matchedMsgs:], req.ToolChoice, priorToolNames)
 				if strings.TrimSpace(deltaPrompt) != "" {
+					if len(addedToolNames) > 0 {
+						addedSet := make(map[string]bool, len(addedToolNames))
+						for _, n := range addedToolNames {
+							addedSet[n] = true
+						}
+						var addedDefs []models.OpenAITool
+						for _, t := range req.Tools {
+							n := strings.TrimSpace(t.Function.Name)
+							if n == "" {
+								n = strings.TrimSpace(t.Name)
+							}
+							if addedSet[n] {
+								addedDefs = append(addedDefs, t)
+							}
+						}
+						if compactAdded := format.CompactToolDefinitionsJSON(addedDefs); compactAdded != "" {
+							deltaPrompt = fmt.Sprintf("[Newly added tools available in this session]:\n%s\n\n%s", compactAdded, deltaPrompt)
+						}
+					}
 					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
 					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
 					// ```tool_call``` blocks instead of refusing as a cloud-only environment.
@@ -1036,8 +1239,8 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 					bridgePrompt = deltaPrompt
 					activeAtts = deltaAtts
 					isDelta = true
-					a.Logf("Bridge delta context active: sending %d/%d new message(s) (%d chars vs %d full)",
-						len(req.Messages)-matchedMsgs, len(req.Messages), len(deltaPrompt), len(fullPrompt))
+					a.Logf("Bridge delta context active: sending %d/%d new message(s) (%d chars vs %d full, +%d added tools)",
+						len(req.Messages)-matchedMsgs, len(req.Messages), len(deltaPrompt), len(fullPrompt), len(addedToolNames))
 				}
 			}
 		}
@@ -1146,6 +1349,18 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		uploadedSigs["sha256:"+attachmentContentHash(*spilledAtt)] = "uploaded"
 	}
 
+	// Runaway agent-loop detection: if the last 3+ autonomous tool turns repeated the exact
+	// same call or output, inject a clear loop-breaker hint and apply extra anti-ban pacing.
+	loopPenalty := false
+	if repeatCount, loopTool := DetectAgentToolLoop(req.Messages); repeatCount >= 3 {
+		loopPenalty = true
+		a.Logf("Bridge detected runaway agent loop (%d identical %s turns) — injecting loop-breaker & extra pacing", repeatCount, loopTool)
+		bridgePrompt = bridgePrompt + fmt.Sprintf(
+			"\n\n[Loop protection: the last %d consecutive tool turns repeated the exact same %s call/output. Do NOT repeat the same call again — change strategy, inspect what failed, or explain the blocker to the user.]",
+			repeatCount, loopTool,
+		)
+	}
+
 	// Final hard deduplication pass so duplicate bytes/files are never dispatched in a turn
 	attachments = DeduplicateBridgeAttachments(attachments)
 
@@ -1157,10 +1372,12 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		Prompt:           bridgePrompt,
 		Attachments:      attachments,
 		NewChat:          newChat,
+		LoopPenalty:      loopPenalty,
 		SessionClient:    sessClient,
 		SessionConv:      sessConvGen,
 		Fingerprints:     fingerprints,
 		UserFingerprints: userFPs,
+		ToolNames:        currentToolNames,
 		UploadedSigs:     uploadedSigs,
 	}
 }
