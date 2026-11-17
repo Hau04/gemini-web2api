@@ -232,6 +232,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			Prompt:      prepared.Prompt,
 			Model:       resolved.Name,
 			Attachments: prepared.Attachments,
+			NewChat:     prepared.NewChat,
 		}
 
 		if req.Stream {
@@ -372,7 +373,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 			if emitErr == nil {
 				if strings.TrimSpace(fullText.String()) != "" {
-					a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+					a.recordBridgeTurnSuccess(prepared)
 				}
 				if hasTools {
 					if isBufferingToolCall {
@@ -510,7 +511,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.TrimSpace(text) != "" {
-			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+			a.recordBridgeTurnSuccess(prepared)
 		}
 
 		var toolCalls []models.OpenAIToolCall

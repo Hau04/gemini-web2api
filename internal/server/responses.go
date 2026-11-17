@@ -113,6 +113,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			Prompt:      prepared.Prompt,
 			Model:       resolved.Name,
 			Attachments: prepared.Attachments,
+			NewChat:     prepared.NewChat,
 		})
 		if err != nil {
 			var rlErr *bridge.RateLimitError
@@ -124,7 +125,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.TrimSpace(text) != "" {
-			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
+			a.recordBridgeTurnSuccess(prepared)
 		}
 	} else {
 		var fileRefs []string

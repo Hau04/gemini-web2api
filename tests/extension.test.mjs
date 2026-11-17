@@ -991,6 +991,48 @@ test("cleanDiscoveryText strips Vertex AI Search [[section:...]] and internal su
   assert.ok(deltas.includes("```tool_call"));
 });
 
+test("findNewChatButton finds Shadow DOM New Chat button and ignores external/delete/message elements", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  // Decoys that MUST be ignored:
+  const extLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/new-chat/",
+    target: "_blank",
+    "aria-label": "New chat"
+  });
+  extLink.appendChild(txt("New chat"));
+  doc.body.appendChild(extLink);
+
+  const deleteBtn = el("button", { "aria-label": "Delete chat" });
+  deleteBtn.appendChild(txt("Delete chat"));
+  doc.body.appendChild(deleteBtn);
+
+  const msgResp = el("model-response");
+  const fakeBtnInMsg = el("button");
+  fakeBtnInMsg.appendChild(txt("New chat"));
+  msgResp.appendChild(fakeBtnInMsg);
+  doc.body.appendChild(msgResp);
+
+  // None of the decoys should match
+  assert.equal(bridge.findNewChatButton(doc), null);
+
+  // Genuine Shadow DOM sidebar New Chat button on Gemini Enterprise
+  const appHost = el("ucs-app-shell");
+  const shadow = appHost.attachShadow();
+  const nav = el("nav", { class: "sidebar-rail" });
+  const toggleBtn = el("button", { "aria-label": "Main menu" });
+  const newChatBtn = el("button", { "aria-label": "New chat" });
+  newChatBtn.appendChild(txt("New chat"));
+  nav.appendChild(toggleBtn);
+  nav.appendChild(newChatBtn);
+  shadow.appendChild(nav);
+  doc.body.appendChild(appHost);
+
+  assert.equal(bridge.findSidebarToggleButton(doc), toggleBtn);
+  assert.equal(bridge.findNewChatButton(doc), newChatBtn);
+});
+
+
 
 
 

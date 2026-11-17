@@ -615,17 +615,59 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 }
 
 type preparedBridgeTurn struct {
-	Prompt        string
-	Attachments   []bridge.Attachment
-	SessionClient string
-	SessionConv   string
-	Fingerprints  []string
-	UploadedSigs  map[string]string
+	Prompt           string
+	Attachments      []bridge.Attachment
+	NewChat          bool
+	SessionClient    string
+	SessionConv      string
+	Fingerprints     []string
+	UserFingerprints []string
+	UploadedSigs     map[string]string
+}
+
+// ExtractUserFingerprints returns the per-user-message digests from ConversationFingerprints
+// and reports whether the request contains any assistant or tool history.
+func ExtractUserFingerprints(req models.OpenAIChatRequest, allFingerprints []string) ([]string, bool) {
+	var userFPs []string
+	hasAssistantOrTool := false
+	for i, msg := range req.Messages {
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		switch role {
+		case "", "user":
+			if i+1 < len(allFingerprints) {
+				userFPs = append(userFPs, allFingerprints[i+1])
+			}
+		case "assistant", "tool":
+			hasAssistantOrTool = true
+		}
+	}
+	return userFPs, hasAssistantOrTool
+}
+
+func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
+	a.Bridge.RecordTurnSuccessWithConversation(
+		p.SessionClient,
+		p.SessionConv,
+		p.Fingerprints,
+		p.UserFingerprints,
+		p.UploadedSigs,
+		p.NewChat,
+	)
 }
 
 func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest, fullPrompt string, apiAttachments []format.Image) preparedBridgeTurn {
 	sessClient, sessConvGen, alreadyUploaded := a.Bridge.ActiveSession()
 	fingerprints := ConversationFingerprints(req)
+	userFPs, hasAssistantOrTool := ExtractUserFingerprints(req, fingerprints)
+
+	// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
+	// browser tab still holds an older conversation, so Gemini starts a clean New Chat
+	// with zero stale memory or leftover files from the previous chat.
+	newChat := a.Cfg.BridgeAutoNewChat && a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+	if newChat {
+		a.Logf("Bridge detected new client conversation — instructing browser tab to start a fresh chat")
+		alreadyUploaded = nil
+	}
 
 	bridgePrompt := fullPrompt
 	activeAtts := apiAttachments
@@ -633,7 +675,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 
 	// Delta-context optimization: if the active browser tab already holds the exact
 	// tool definitions and leading conversation turns, send only the newly appended turns.
-	if a.Cfg.BridgeDeltaContext {
+	if a.Cfg.BridgeDeltaContext && !newChat {
 		matchedPrefix := a.Bridge.MatchDeltaPrefix(fingerprints)
 		// Element 0 is the tools digest, so matchedPrefix > 1 means at least 1 message matched.
 		if matchedPrefix > 1 {
@@ -753,11 +795,13 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	}
 
 	return preparedBridgeTurn{
-		Prompt:        bridgePrompt,
-		Attachments:   attachments,
-		SessionClient: sessClient,
-		SessionConv:   sessConvGen,
-		Fingerprints:  fingerprints,
-		UploadedSigs:  uploadedSigs,
+		Prompt:           bridgePrompt,
+		Attachments:      attachments,
+		NewChat:          newChat,
+		SessionClient:    sessClient,
+		SessionConv:      sessConvGen,
+		Fingerprints:     fingerprints,
+		UserFingerprints: userFPs,
+		UploadedSigs:     uploadedSigs,
 	}
 }
