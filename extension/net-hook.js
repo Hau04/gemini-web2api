@@ -471,7 +471,12 @@
 
       promise.then((res) => {
         if (!res || !res.ok) {
-          postToBridge("error", streamId, url, { error: `HTTP ${res ? res.status : "error"}` });
+          const status = res ? res.status : 0;
+          postToBridge("error", streamId, url, {
+            error: `HTTP ${status || "error"}`,
+            status,
+            rateLimited: status === 429
+          });
           return;
         }
         let cloned;
@@ -587,7 +592,11 @@
                 }
                 streamObj.processor.finish();
               } else {
-                postToBridge("error", streamObj.streamId, url, { error: `HTTP ${this.status}` });
+                postToBridge("error", streamObj.streamId, url, {
+                  error: `HTTP ${this.status}`,
+                  status: this.status,
+                  rateLimited: this.status === 429
+                });
               }
             } catch (e) {}
           });

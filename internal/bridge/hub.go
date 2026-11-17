@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,10 +34,43 @@ type GenerateOptions struct {
 }
 
 type Chunk struct {
-	ID    string `json:"id"`
-	Text  string `json:"text,omitempty"`
-	Done  bool   `json:"done,omitempty"`
-	Error string `json:"error,omitempty"`
+	ID          string `json:"id"`
+	Text        string `json:"text,omitempty"`
+	Done        bool   `json:"done,omitempty"`
+	Error       string `json:"error,omitempty"`
+	RateLimited bool   `json:"rate_limited,omitempty"`
+}
+
+// RateLimitError is returned when the bridge circuit breaker is cooling down
+// after Google signaled HTTP 429 / quota / unusual traffic.
+type RateLimitError struct {
+	RetryAfter time.Duration
+	Cause      string
+}
+
+func (e *RateLimitError) Error() string {
+	secs := int(e.RetryAfter.Round(time.Second).Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	if e.Cause != "" {
+		return fmt.Sprintf("bridge rate-limit cooldown active (%s); retry after %ds", e.Cause, secs)
+	}
+	return fmt.Sprintf("bridge rate-limit cooldown active; retry after %ds", secs)
+}
+
+func looksLikeRateLimitError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "http 429") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "quota exceeded") ||
+		strings.Contains(lower, "resource_exhausted") ||
+		strings.Contains(lower, "unusual traffic")
 }
 
 type inFlightEntry struct {
@@ -48,21 +82,27 @@ type inFlightEntry struct {
 }
 
 type Hub struct {
-	mu                   sync.Mutex
-	seq                  atomic.Uint64
-	tabName              string
-	lastHeartbeat        time.Time
-	clientHeartbeats     map[string]time.Time
-	pending              []*Request
-	inFlight             map[string]*inFlightEntry
-	waiters              map[string]chan Chunk
-	pollNotify           chan struct{}
-	minInterval          time.Duration
-	lastCompletedAt      time.Time
-	activeClientID       string
-	activeConvGen        string
-	sessionFingerprints  []string
-	sessionUploadedFiles map[string]bool
+	mu                    sync.Mutex
+	seq                   atomic.Uint64
+	tabName               string
+	lastHeartbeat         time.Time
+	clientHeartbeats      map[string]time.Time
+	pending               []*Request
+	inFlight              map[string]*inFlightEntry
+	waiters               map[string]chan Chunk
+	pollNotify            chan struct{}
+	minInterval           time.Duration
+	jitterMax             time.Duration
+	maxPer10Min           int
+	recentDispatches      []time.Time
+	lastCompletedAt       time.Time
+	cooldownUntil         time.Time
+	lastRateLimitCause    string
+	consecutiveRateLimits int
+	activeClientID        string
+	activeConvGen         string
+	sessionFingerprints   []string
+	sessionUploadedFiles  map[string]string // canonical path -> "size:modTimeNano" signature
 }
 
 func NewHub() *Hub {
@@ -71,7 +111,7 @@ func NewHub() *Hub {
 		inFlight:             make(map[string]*inFlightEntry),
 		waiters:              make(map[string]chan Chunk),
 		pollNotify:           make(chan struct{}, 1),
-		sessionUploadedFiles: make(map[string]bool),
+		sessionUploadedFiles: make(map[string]string),
 	}
 }
 
@@ -84,6 +124,63 @@ func (h *Hub) SetMinInterval(d time.Duration) {
 		d = 0
 	}
 	h.minInterval = d
+}
+
+// SetPacing configures anti-ban pacing: base cooldown, human-like random jitter,
+// and maximum prompts allowed per rolling 10-minute window (0 disables cap).
+func (h *Hub) SetPacing(minInterval, jitter time.Duration, maxPer10Min int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if minInterval < 0 {
+		minInterval = 0
+	}
+	if jitter < 0 {
+		jitter = 0
+	}
+	if maxPer10Min < 0 {
+		maxPer10Min = 0
+	}
+	h.minInterval = minInterval
+	h.jitterMax = jitter
+	h.maxPer10Min = maxPer10Min
+}
+
+// RecordRateLimit trips the exponential cool-off circuit breaker (60s -> 180s -> 300s).
+func (h *Hub) RecordRateLimit(cause string) time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.recordRateLimitLocked(cause)
+}
+
+func (h *Hub) recordRateLimitLocked(cause string) time.Duration {
+	h.consecutiveRateLimits++
+	var backoff time.Duration
+	switch h.consecutiveRateLimits {
+	case 1:
+		backoff = 60 * time.Second
+	case 2:
+		backoff = 180 * time.Second
+	default:
+		backoff = 300 * time.Second
+	}
+	until := time.Now().Add(backoff)
+	if until.After(h.cooldownUntil) {
+		h.cooldownUntil = until
+	}
+	if cause != "" {
+		h.lastRateLimitCause = cause
+	}
+	return time.Until(h.cooldownUntil)
+}
+
+// CooldownRemaining returns any active rate-limit circuit-breaker remaining duration.
+func (h *Hub) CooldownRemaining() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Now().Before(h.cooldownUntil) {
+		return time.Until(h.cooldownUntil)
+	}
+	return 0
 }
 
 // IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds,
@@ -128,25 +225,25 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 		h.clientHeartbeats[clientID] = now
 		if h.activeClientID != "" && h.activeClientID != clientID {
 			h.sessionFingerprints = nil
-			h.sessionUploadedFiles = make(map[string]bool)
+			h.sessionUploadedFiles = make(map[string]string)
 		}
 		h.activeClientID = clientID
 	}
 	if convGen != "" {
 		if h.activeConvGen != "" && h.activeConvGen != convGen {
 			h.sessionFingerprints = nil
-			h.sessionUploadedFiles = make(map[string]bool)
+			h.sessionUploadedFiles = make(map[string]string)
 		}
 		h.activeConvGen = convGen
 	}
 	h.lastHeartbeat = now
 }
 
-// ActiveSession snapshots the active tab identity and previously uploaded file paths.
-func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]bool) {
+// ActiveSession snapshots the active tab identity and previously uploaded file signatures.
+func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	cp := make(map[string]bool, len(h.sessionUploadedFiles))
+	cp := make(map[string]string, len(h.sessionUploadedFiles))
 	for k, v := range h.sessionUploadedFiles {
 		cp[k] = v
 	}
@@ -170,10 +267,10 @@ func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
 	return len(prev)
 }
 
-// RecordTurnSuccess saves the conversation prefix and uploaded file paths for the
+// RecordTurnSuccess saves the conversation prefix and uploaded file signatures for the
 // active tab session so subsequent follow-up turns can send compact deltas and avoid
-// re-uploading files already present in the open chat.
-func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string, uploadedPaths []string) {
+// re-uploading unchanged files while automatically refreshing edited code files.
+func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string, uploadedSigs map[string]string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if clientID != h.activeClientID || convGen != h.activeConvGen {
@@ -182,9 +279,9 @@ func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string,
 	cp := make([]string, len(fingerprints))
 	copy(cp, fingerprints)
 	h.sessionFingerprints = cp
-	for _, p := range uploadedPaths {
-		if p != "" {
-			h.sessionUploadedFiles[p] = true
+	for path, sig := range uploadedSigs {
+		if path != "" {
+			h.sessionUploadedFiles[path] = sig
 		}
 	}
 }
@@ -279,6 +376,13 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	h.Touch("")
 
 	h.mu.Lock()
+	if c.RateLimited || looksLikeRateLimitError(c.Error) {
+		h.recordRateLimitLocked(c.Error)
+		c.RateLimited = true
+	} else if c.Done && c.Error == "" {
+		h.consecutiveRateLimits = 0
+	}
+
 	if entry, ok := h.inFlight[c.ID]; ok {
 		if c.Text != "" {
 			entry.hasChunks = true
@@ -302,17 +406,79 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 	}
 }
 
-func (h *Hub) remainingCooldown() time.Duration {
+func (h *Hub) pruneRecentLocked(now time.Time) {
+	cutoff := now.Add(-10 * time.Minute)
+	keep := 0
+	for _, ts := range h.recentDispatches {
+		if ts.After(cutoff) {
+			h.recentDispatches[keep] = ts
+			keep++
+		}
+	}
+	h.recentDispatches = h.recentDispatches[:keep]
+}
+
+// ComputePacingDelay calculates the adaptive anti-ban delay (base + progressive burst
+// scaling + human-like jitter + rolling 10-minute window pacing) or returns *RateLimitError
+// if the circuit breaker is active.
+func (h *Hub) ComputePacingDelay() (time.Duration, error) {
+	now := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.minInterval <= 0 || h.lastCompletedAt.IsZero() {
-		return 0
+
+	if now.Before(h.cooldownUntil) {
+		return 0, &RateLimitError{
+			RetryAfter: time.Until(h.cooldownUntil),
+			Cause:      h.lastRateLimitCause,
+		}
 	}
-	elapsed := time.Since(h.lastCompletedAt)
-	if elapsed >= h.minInterval {
-		return 0
+
+	h.pruneRecentLocked(now)
+
+	var waitDur time.Duration
+	if h.minInterval > 0 && !h.lastCompletedAt.IsZero() {
+		recent5m := 0
+		fiveMinAgo := now.Add(-5 * time.Minute)
+		for _, ts := range h.recentDispatches {
+			if ts.After(fiveMinAgo) {
+				recent5m++
+			}
+		}
+
+		// Progressive burst backoff during long coding loops
+		target := h.minInterval
+		jitterCap := h.jitterMax
+		switch {
+		case recent5m >= 10:
+			target = h.minInterval * 4
+			jitterCap = h.jitterMax * 2
+		case recent5m >= 5:
+			target = h.minInterval * 2
+		}
+
+		if jitterCap > 0 {
+			target += time.Duration(rand.Int64N(int64(jitterCap) + 1))
+		}
+
+		elapsed := now.Sub(h.lastCompletedAt)
+		if elapsed < target {
+			waitDur = target - elapsed
+		}
 	}
-	return h.minInterval - elapsed
+
+	// Smooth rolling 10-minute ceiling so heavy coding sessions pace naturally
+	// rather than triggering Google's hard frequency ban.
+	if h.maxPer10Min > 0 && len(h.recentDispatches) >= h.maxPer10Min {
+		oldestExpiry := h.recentDispatches[0].Add(10 * time.Minute)
+		if oldestExpiry.After(now) {
+			windowWait := oldestExpiry.Sub(now)
+			if windowWait > waitDur {
+				waitDur = windowWait
+			}
+		}
+	}
+
+	return waitDur, nil
 }
 
 // GenerateStream queues a prompt to the browser extension and yields text chunks as they arrive.
@@ -324,18 +490,27 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 }
 
 // GenerateStreamWithOptions queues a prompt (with optional direct file attachments) to the
-// browser extension, applying anti-ban cooldown pacing between consecutive requests.
+// browser extension, applying adaptive anti-ban pacing and 429 circuit-breaker protection.
 func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOptions, emit func(string) error) error {
 	if !h.IsConnected() {
 		return errors.New("no browser tab connected to the bridge")
 	}
 
-	// Anti-ban pacing: avoid rapid-fire back-to-back automated bursts
-	if waitDur := h.remainingCooldown(); waitDur > 0 {
+	waitDur, rlErr := h.ComputePacingDelay()
+	if rlErr != nil {
+		return rlErr
+	}
+	if waitDur > 0 {
+		timer := time.NewTimer(waitDur)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
-		case <-time.After(waitDur):
+		case <-timer.C:
+		}
+		// Re-check circuit breaker after pacing sleep in case another tab/request tripped it
+		if rem := h.CooldownRemaining(); rem > 0 {
+			return &RateLimitError{RetryAfter: rem}
 		}
 	}
 
@@ -353,6 +528,8 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	h.mu.Lock()
 	h.waiters[reqID] = ch
 	h.pending = append(h.pending, req)
+	h.recentDispatches = append(h.recentDispatches, time.Now())
+	h.pruneRecentLocked(time.Now())
 	select {
 	case h.pollNotify <- struct{}{}:
 	default:
@@ -380,6 +557,13 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		case chunk, ok := <-ch:
 			if !ok {
 				return nil
+			}
+			if chunk.RateLimited {
+				rem := h.CooldownRemaining()
+				if rem <= 0 {
+					rem = 60 * time.Second
+				}
+				return &RateLimitError{RetryAfter: rem, Cause: chunk.Error}
 			}
 			if chunk.Error != "" {
 				return errors.New(chunk.Error)

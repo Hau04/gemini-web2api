@@ -655,6 +655,208 @@
     return out;
   }
 
+  function isLinkOrPromoElement(el) {
+    if (!el || el.nodeType !== 1) return false;
+    const tag = String(el.tagName || "").toUpperCase();
+    if (tag === "A") return true;
+    const role = String((el.getAttribute && el.getAttribute("role")) || "").toLowerCase();
+    if (role === "link") return true;
+    if (el.getAttribute && (el.getAttribute("href") || el.getAttribute("target") === "_blank")) {
+      return true;
+    }
+    if (
+      closestDeep(
+        el,
+        'a, [href], [target="_blank"], [role="link"], [class*="banner"], [class*="promo"], [class*="announcement"], [class*="whats-new"], [class*="snackbar"], [class*="toast"], [role="alert"], [role="status"], header'
+      )
+    ) {
+      return true;
+    }
+    // Reject wrapper containers around an external/navigation <a> link
+    try {
+      const childLinks = queryDeep('a[href], a[target="_blank"], [role="link"]', el);
+      if (childLinks.length > 0) {
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function isRateLimitMessage(msg) {
+    if (!msg) return false;
+    const lower = String(msg).toLowerCase();
+    return (
+      lower.includes("http 429") ||
+      lower.includes("too many requests") ||
+      lower.includes("rate limit") ||
+      lower.includes("rate_limit") ||
+      lower.includes("quota exceeded") ||
+      lower.includes("resource_exhausted") ||
+      lower.includes("unusual traffic") ||
+      lower.includes("try again later")
+    );
+  }
+
+  function isElementVisible(el) {
+    if (!el || isElementHidden(el)) return false;
+    if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+      try {
+        const s = window.getComputedStyle(el);
+        if (s && (s.display === "none" || s.visibility === "hidden" || parseFloat(s.opacity) === 0)) {
+          return false;
+        }
+      } catch (e) {}
+    }
+    if (typeof el.getBoundingClientRect === "function") {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) return false;
+    }
+    return true;
+  }
+
+  const ALL_MODEL_FAMILIES = ["hydrogen", "carbon", "argon", "flash", "pro", "auto"];
+  const PROMO_LINK_TEXT_RE = /\b(introducing|learn more|read more|blog|what'?s new|announcement|explore now|discover)\b/i;
+
+  function findModelOption(target, triggerEl, root) {
+    if (!target) return null;
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    const competing = ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
+    const all = queryDeep("*", searchRoot);
+    const matches = [];
+
+    for (const el of all) {
+      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || isLinkOrPromoElement(el)) continue;
+      if (triggerEl && (el === triggerEl || containsDeep(triggerEl, el) || containsDeep(el, triggerEl))) {
+        continue;
+      }
+      if (!isElementVisible(el)) continue;
+
+      const t = String(extractControlLabel(el) || el.innerText || el.textContent || "").trim();
+      if (!t || t.length > 140) continue;
+      const lower = t.toLowerCase();
+
+      if (PROMO_LINK_TEXT_RE.test(lower)) continue;
+      if (!target.keywords.some((kw) => lower.includes(kw))) continue;
+
+      // Reject menu containers that list multiple competing models together
+      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(lower))) {
+        continue;
+      }
+
+      const clickable = closestDeep(
+        el,
+        'button, [role="menuitem"], [role="menuitemradio"], [role="option"], [role="button"], li, mat-option, md-menu-item, mwc-list-item, [class*="option"], [class*="menu-item"]'
+      );
+      if (!clickable) continue;
+      if (isOwnExtensionElement(clickable) || isLinkOrPromoElement(clickable) || !isElementVisible(clickable)) {
+        continue;
+      }
+      if (triggerEl && (clickable === triggerEl || containsDeep(triggerEl, clickable) || containsDeep(clickable, triggerEl))) {
+        continue;
+      }
+
+      const cText = String(extractControlLabel(clickable) || clickable.innerText || clickable.textContent || "").trim();
+      if (!cText || cText.length > 160 || PROMO_LINK_TEXT_RE.test(cText)) continue;
+      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(cText.toLowerCase()))) {
+        continue;
+      }
+
+      const cRole = String((clickable.getAttribute && clickable.getAttribute("role")) || "").toLowerCase();
+      const cTag = String(clickable.tagName || "").toLowerCase();
+      const hasMenuOptionRole =
+        cRole === "menuitem" ||
+        cRole === "menuitemradio" ||
+        cRole === "option" ||
+        cTag === "mat-option" ||
+        cTag === "md-menu-item" ||
+        cTag === "mwc-list-item";
+
+      const inMenuOverlay = !!closestDeep(
+        clickable,
+        '[role="menu"], [role="listbox"], .cdk-overlay-pane, [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="popover"], [class*="overlay"]'
+      );
+
+      // Strictly require an actual menu overlay or explicit menu-option role so
+      // non-dropdown page banners or announcements can NEVER be clicked!
+      if (!inMenuOverlay && !hasMenuOptionRole) continue;
+
+      matches.push({ el: clickable, inMenuOverlay, hasMenuOptionRole, len: cText.length });
+    }
+
+    if (matches.length === 0) return null;
+
+    matches.sort((a, b) => {
+      if (a.inMenuOverlay !== b.inMenuOverlay) return a.inMenuOverlay ? -1 : 1;
+      if (a.hasMenuOptionRole !== b.hasMenuOptionRole) return a.hasMenuOptionRole ? -1 : 1;
+      return a.len - b.len;
+    });
+
+    return matches[0].el;
+  }
+
+  function findModelTriggerElement(root) {
+    const searchRoot = root || (typeof document !== "undefined" ? document : null);
+    if (!searchRoot) return null;
+
+    // Strategy 1: Look near the mic icon (In Vertex AI Search, model selector is right next to mic)
+    const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]', searchRoot);
+    for (const mic of micIcons) {
+      if (isOwnExtensionElement(mic) || isNavigationOrSidebar(mic) || isLinkOrPromoElement(mic)) continue;
+      const t = String(extractControlLabel(mic) || mic.innerText || mic.textContent || "").trim().toLowerCase();
+      const n = String((mic.getAttribute && mic.getAttribute("data-mat-icon-name")) || "").toLowerCase();
+      if (t === "mic" || n === "mic") {
+        const container = closestDeep(mic, ".bottom-bar, form, discovery-engine-chat, div") || mic.parentElement;
+        if (container) {
+          const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select', container);
+          for (const b of candidates) {
+            if (isOwnExtensionElement(b) || isLinkOrPromoElement(b) || containsDeep(b, mic) || containsDeep(mic, b)) continue;
+            const txt = String(extractControlLabel(b) || b.innerText || b.textContent || "").trim().toLowerCase();
+            if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)(\s|$)/i.test(txt) && isElementVisible(b)) {
+              return b;
+            }
+          }
+        }
+      }
+    }
+
+    // Strategy 2: Explicit menu trigger / combobox / button matching model name
+    const candidates = queryDeep(
+      'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]',
+      searchRoot
+    );
+    for (const el of candidates) {
+      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || isLinkOrPromoElement(el) || !isElementVisible(el)) continue;
+      const t = String(extractControlLabel(el) || el.innerText || el.textContent || "").trim();
+      if (/^(auto|hydrogen|gemini(?:\s*\d+(?:\.\d+)?)?(?:\s*(?:hydrogen|carbon|argon|flash|pro))?|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
+        return el;
+      }
+    }
+
+    // Strategy 3: Dropdown arrow icon near model trigger text
+    const arrowIcons = queryDeep("mat-icon, md-icon, svg, [data-icon]", searchRoot);
+    for (const icon of arrowIcons) {
+      if (isOwnExtensionElement(icon) || isNavigationOrSidebar(icon) || isLinkOrPromoElement(icon)) continue;
+      const iconTxt = String(extractControlLabel(icon) || icon.innerText || icon.textContent || "").trim().toLowerCase();
+      const iconName = String((icon.getAttribute && icon.getAttribute("data-mat-icon-name")) || "").toLowerCase();
+      if (
+        iconTxt === "keyboard_arrow_down" || iconTxt === "expand_more" || iconTxt === "arrow_drop_down" ||
+        iconName.includes("arrow_down") || iconName.includes("expand_more")
+      ) {
+        const btn = closestDeep(icon, 'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select') || icon.parentElement;
+        if (btn && !isOwnExtensionElement(btn) && !isLinkOrPromoElement(btn) && isElementVisible(btn) && !isNavigationOrSidebar(btn)) {
+          const btnTxt = String(extractControlLabel(btn) || btn.innerText || btn.textContent || "").trim().toLowerCase();
+          if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)/i.test(btnTxt)) {
+            return btn;
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
   function findAttachButton(inputArea, root) {
     const searchRoot = root || (typeof document !== "undefined" ? document : null);
     if (!searchRoot) return null;
@@ -669,7 +871,7 @@
     let bestScore = -1;
 
     for (const btn of buttons) {
-      if (isOwnExtensionElement(btn)) continue;
+      if (isOwnExtensionElement(btn) || isLinkOrPromoElement(btn)) continue;
       if (btn.disabled || (btn.getAttribute && btn.getAttribute("aria-disabled") === "true")) continue;
       const rect = typeof btn.getBoundingClientRect === "function" ? btn.getBoundingClientRect() : { width: 24, height: 24, top: 0, left: 0 };
       if (rect.width === 0 && rect.height === 0) continue;
@@ -727,7 +929,7 @@
     let bestScore = -1;
 
     for (const el of items) {
-      if (isOwnExtensionElement(el)) continue;
+      if (isOwnExtensionElement(el) || isLinkOrPromoElement(el)) continue;
       if (excludeEl && (el === excludeEl || containsDeep(excludeEl, el))) continue;
       if (typeof el.getBoundingClientRect === "function") {
         const r = el.getBoundingClientRect();
@@ -795,6 +997,10 @@
       base64ToUint8Array,
       buildAttachedFileNote,
       hasAttachmentChipInDom,
+      isLinkOrPromoElement,
+      isRateLimitMessage,
+      findModelOption,
+      findModelTriggerElement,
       findAttachButton,
       findUploadMenuOption
     };
@@ -938,6 +1144,7 @@
       cap.active = false;
       cap.thinking = false;
       cap.error = data.error || "stream error";
+      cap.rateLimited = Boolean(data.rateLimited || isRateLimitMessage(data.error));
       cap.notify();
     }
   });
@@ -1231,141 +1438,28 @@
     }
   }
 
-  const ALL_MODEL_FAMILIES = ["hydrogen", "carbon", "argon", "flash", "pro", "auto"];
-
-  function findModelOption(target, triggerEl) {
-    if (!target) return null;
-    const competing = ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
-    const all = queryDeep("*");
-    const matches = [];
-
-    for (const el of all) {
-      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el)) continue;
-      if (triggerEl && (el === triggerEl || containsDeep(triggerEl, el) || containsDeep(el, triggerEl))) {
-        continue;
-      }
-      if (!isVisible(el)) continue;
-
-      const t = (el.innerText || el.textContent || "").trim();
-      if (!t || t.length > 140) continue;
-      const lower = t.toLowerCase();
-
-      if (!target.keywords.some((kw) => lower.includes(kw))) continue;
-
-      // Reject menu containers that list multiple competing models together
-      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(lower))) {
-        continue;
-      }
-
-      const clickable =
-        closestDeep(el, 'button, [role="menuitem"], [role="option"], [role="button"], li, mat-option, md-menu-item, [class*="option"], [class*="item"]') || el;
-
-      if (isOwnExtensionElement(clickable) || !isVisible(clickable)) continue;
-      if (triggerEl && (clickable === triggerEl || containsDeep(triggerEl, clickable) || containsDeep(clickable, triggerEl))) {
-        continue;
-      }
-
-      // Check clickable text too (don't climb into a multi-option menu container)
-      const cText = (clickable.innerText || clickable.textContent || "").trim();
-      if (cText.length > 160 || competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(cText.toLowerCase()))) {
-        continue;
-      }
-
-      const inMenuOverlay = !!closestDeep(
-        clickable,
-        '[role="menu"], [role="listbox"], .cdk-overlay-pane, [class*="menu"], [class*="dropdown"], [class*="popup"], [class*="popover"], [class*="overlay"]'
-      );
-
-      matches.push({ el: clickable, inMenuOverlay, len: cText.length });
-    }
-
-    if (matches.length === 0) return null;
-
-    // Prefer options inside an actual dropdown/menu overlay, then shortest/most specific option
-    matches.sort((a, b) => {
-      if (a.inMenuOverlay !== b.inMenuOverlay) return a.inMenuOverlay ? -1 : 1;
-      return a.len - b.len;
-    });
-
-    return matches[0].el;
-  }
-
-  function findModelTriggerElement() {
-    // Strategy 1: Look near the mic icon (In Vertex AI Search, model selector is right next to mic)
-    const micIcons = queryDeep('mat-icon, [data-mat-icon-name="mic"], button[aria-label*="mic" i], [data-icon*="mic"]');
-    for (const mic of micIcons) {
-      if (isOwnExtensionElement(mic) || isNavigationOrSidebar(mic)) continue;
-      const t = (mic.innerText || mic.textContent || "").trim().toLowerCase();
-      const n = (mic.getAttribute("data-mat-icon-name") || "").toLowerCase();
-      if (t === "mic" || n === "mic") {
-        const container = closestDeep(mic, ".bottom-bar, form, discovery-engine-chat, div") || mic.parentElement;
-        if (container) {
-          const candidates = queryDeep('button, [role="button"], [role="combobox"], [aria-haspopup], mat-select', container);
-          for (const b of candidates) {
-            if (isOwnExtensionElement(b) || containsDeep(b, mic) || containsDeep(mic, b)) continue;
-            const txt = (b.innerText || b.textContent || "").trim().toLowerCase();
-            if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)(\s|$)/i.test(txt) && isVisible(b)) {
-              return b;
-            }
-          }
-        }
-      }
-    }
-
-    // Strategy 2: Explicit menu trigger / combobox / button matching model name
-    const candidates = queryDeep(
-      'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select, .mat-mdc-menu-trigger, [class*="model-selector"], [class*="model-picker"]'
-    );
-    for (const el of candidates) {
-      if (isOwnExtensionElement(el) || isNavigationOrSidebar(el) || !isVisible(el)) continue;
-      const t = (el.innerText || el.textContent || "").trim();
-      if (/^(auto|hydrogen|gemini(?:\s*\d+(?:\.\d+)?)?(?:\s*(?:hydrogen|carbon|argon|flash|pro))?|carbon|argon|flash|pro)(\s+(keyboard_arrow_down|expand_more|arrow_drop_down|[\u25bc\u25bd\u2228\u2304v\u25be]))?$/i.test(t)) {
-        return el;
-      }
-    }
-
-    // Strategy 3: Dropdown arrow icon near model trigger text
-    const arrowIcons = queryDeep("mat-icon, md-icon, svg, [data-icon]");
-    for (const icon of arrowIcons) {
-      if (isOwnExtensionElement(icon) || isNavigationOrSidebar(icon)) continue;
-      const iconTxt = (icon.innerText || icon.textContent || "").trim().toLowerCase();
-      const iconName = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
-      if (
-        iconTxt === "keyboard_arrow_down" || iconTxt === "expand_more" || iconTxt === "arrow_drop_down" ||
-        iconName.includes("arrow_down") || iconName.includes("expand_more")
-      ) {
-        const btn = closestDeep(icon, 'button, [role="button"], [role="combobox"], [aria-haspopup], mat-select') || icon.parentElement;
-        if (btn && !isOwnExtensionElement(btn) && isVisible(btn) && !isNavigationOrSidebar(btn)) {
-          const btnTxt = (btn.innerText || btn.textContent || "").trim().toLowerCase();
-          if (/^(auto|hydrogen|gemini|carbon|argon|flash|pro)/i.test(btnTxt)) {
-            return btn;
-          }
-        }
-      }
-    }
-
-    return null;
-  }
-
   async function ensureModelSelected(requestedModel) {
     const target = resolveModelKeywords(requestedModel);
     if (!target) return false;
 
     const trigger = findModelTriggerElement();
-    if (trigger) {
-      const currentText = (trigger.innerText || trigger.textContent || "").trim().toLowerCase();
-      if (target.keywords.some((kw) => currentText.includes(kw))) {
-        console.log("[Web2API Bridge] Target model already selected:", currentText);
-        if (target.family === "hydrogen") {
-          modelBtn.textContent = "✅ Hydrogen";
-        }
-        return true;
-      }
+    if (!trigger) {
+      // Never blindly click elements on the page when no model dropdown trigger exists
+      return false;
     }
 
-    // 1. If a dropdown menu is already open with the option visible, click it directly
+    const currentText = String(extractControlLabel(trigger) || trigger.innerText || trigger.textContent || "").trim().toLowerCase();
+    if (target.keywords.some((kw) => currentText.includes(kw))) {
+      console.log("[Web2API Bridge] Target model already selected:", currentText);
+      if (target.family === "hydrogen") {
+        modelBtn.textContent = "✅ Hydrogen";
+      }
+      return true;
+    }
+
+    // 1. If a dropdown menu overlay is already open with the option visible, click it
     let item = findModelOption(target, trigger);
-    if (item && isVisible(item)) {
+    if (item && isVisible(item) && !isLinkOrPromoElement(item)) {
       console.log("[Web2API Bridge] Dropdown already open, clicking model option:", item);
       simulateClick(item);
       await new Promise((r) => setTimeout(r, 250));
@@ -1373,24 +1467,22 @@
       return true;
     }
 
-    // 2. Open dropdown via trigger button (click ONLY trigger, never parentElement)
-    if (trigger) {
-      console.log("[Web2API Bridge] Opening model dropdown via trigger:", trigger);
-      simulateClick(trigger);
-      await new Promise((r) => setTimeout(r, 250));
+    // 2. Open dropdown via verified model trigger button (never an <a> link or banner)
+    console.log("[Web2API Bridge] Opening model dropdown via trigger:", trigger);
+    simulateClick(trigger);
+    await new Promise((r) => setTimeout(r, 250));
 
-      const start = Date.now();
-      while (Date.now() - start < 2500) {
-        item = findModelOption(target, trigger);
-        if (item && isVisible(item)) {
-          console.log("[Web2API Bridge] Found model menu option, clicking:", item);
-          simulateClick(item);
-          await new Promise((r) => setTimeout(r, 250));
-          if (target.family === "hydrogen") modelBtn.textContent = "✅ Hydrogen";
-          return true;
-        }
-        await new Promise((r) => setTimeout(r, 100));
+    const start = Date.now();
+    while (Date.now() - start < 2500) {
+      item = findModelOption(target, trigger);
+      if (item && isVisible(item) && !isLinkOrPromoElement(item)) {
+        console.log("[Web2API Bridge] Found model menu option, clicking:", item);
+        simulateClick(item);
+        await new Promise((r) => setTimeout(r, 250));
+        if (target.family === "hydrogen") modelBtn.textContent = "✅ Hydrogen";
+        return true;
       }
+      await new Promise((r) => setTimeout(r, 100));
     }
 
     console.warn("[Web2API Bridge] Target model not found in dropdown:", target.label);
@@ -1911,6 +2003,7 @@
       accumulated: "",
       done: false,
       error: null,
+      rateLimited: false,
       skipped: false,
       skippedReasons: [],
       onUpdate(fn) {
@@ -1965,7 +2058,8 @@
 
     try {
       setInputValue(inputArea, effectivePrompt);
-      await new Promise((r) => setTimeout(r, 200));
+      // Small humanized jitter before clicking Send to avoid robotic fixed timing
+      await new Promise((r) => setTimeout(r, 220 + Math.floor(Math.random() * 280)));
 
       const submitSuccess = await submitPrompt(inputArea, netCapture);
       console.log("[Web2API Bridge] submitPrompt result:", submitSuccess, "netStarted:", netCapture.started);
@@ -2001,10 +2095,10 @@
       const startTime = Date.now();
       let chunkQueue = Promise.resolve();
 
-      function enqueueChunk(text, isDone, err) {
+      function enqueueChunk(text, isDone, err, rateLimited) {
         chunkQueue = chunkQueue.then(async () => {
           if (abortedByServer) return;
-          const res = await sendChunk(reqId, text, isDone, err);
+          const res = await sendChunk(reqId, text, isDone, err, rateLimited);
           if (res && res.gone) {
             console.log("[Web2API Bridge] Request cancelled by client (410 Gone), stopping observer.");
             abortedByServer = true;
@@ -2039,7 +2133,7 @@
         currentActiveStream = null;
       }
 
-      function finish(explicitError) {
+      function finish(explicitError, explicitRateLimited) {
         if (completed) return;
         cleanup();
 
@@ -2056,20 +2150,30 @@
         }
 
         if (!sentText.trim()) {
-          const errMsg = explicitError || "Model did not respond. Please verify the prompt was sent on the page or refresh.";
-          console.warn("[Web2API Bridge] Completing with error:", errMsg);
-          enqueueChunk("", true, errMsg).then(() => resolve()).catch(() => resolve());
+          const errMsg = explicitError || netCapture.error || "Model did not respond. Please verify the prompt was sent on the page or refresh.";
+          const rateLimited = Boolean(explicitRateLimited || netCapture.rateLimited || isRateLimitMessage(errMsg));
+          if (rateLimited) {
+            setStatus("disconnected", "Web2API: Rate limit detected — cooling down 🛡️");
+          }
+          console.warn("[Web2API Bridge] Completing with error:", errMsg, "rateLimited:", rateLimited);
+          enqueueChunk("", true, errMsg, rateLimited).then(() => resolve()).catch(() => resolve());
           return;
         }
 
         console.log(
           `[Web2API Bridge] Response completed (${sentText.length} chars, mode=${netCapture.receivedText ? "network" : "dom"})`
         );
-        enqueueChunk("", true).then(() => resolve()).catch(() => resolve());
+        enqueueChunk("", true, "", false).then(() => resolve()).catch(() => resolve());
       }
 
       function tick() {
         if (completed || abortedByServer) return;
+
+        // Immediately trip circuit breaker if Google returned HTTP 429 / rate limit
+        if (netCapture.rateLimited && !netCapture.receivedText) {
+          finish(netCapture.error || "HTTP 429 rate limited", true);
+          return;
+        }
 
         // 1. PRIMARY ENGINE: Transparent Network Stream Interception
         if (netCapture.receivedText) {
@@ -2248,17 +2352,21 @@
     }
   }
 
-  async function sendChunk(id, chunkText, isDone, err) {
+  async function sendChunk(id, chunkText, isDone, err, rateLimited) {
     try {
+      const payload = {
+        id: id,
+        text: chunkText,
+        done: isDone,
+        error: err || ""
+      };
+      if (rateLimited) {
+        payload.rate_limited = true;
+      }
       const res = await fetch(`${BRIDGE_URL}/bridge/chunk`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          id: id,
-          text: chunkText,
-          done: isDone,
-          error: err || ""
-        })
+        body: JSON.stringify(payload)
       });
       if (res.status === 410) {
         return { gone: true };
@@ -2270,15 +2378,7 @@
     }
   }
 
-  // On Vertex AI Search / Gemini Enterprise, auto-select Hydrogen on startup
-  if (
-    location.hostname.includes("vertexaisearch.cloud.google.com") ||
-    location.hostname.includes("business.gemini.google")
-  ) {
-    setTimeout(() => {
-      ensureModelSelected("hydrogen").catch(() => {});
-    }, 1500);
-  }
-
+  // Note: Model switching happens on-demand right before submitting a request (or via the
+  // badge button), never via unsolicited page-load clicks that could trigger banners/links.
   pollServer();
 })(typeof window !== "undefined" ? window : globalThis);

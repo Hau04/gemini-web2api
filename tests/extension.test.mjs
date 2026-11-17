@@ -711,3 +711,66 @@ test("Shadow DOM upload helpers locate attach button, menu option, and attachmen
   assert.equal(bridge.hasAttachmentChipInDom(["quarterly_report.pdf"], textarea, doc), true);
 });
 
+// ---------------------------------------------------------------------------
+// 7. Regression tests: never click blog.google announcement links + rate-limit detection
+// ---------------------------------------------------------------------------
+
+test("findModelOption and findModelTriggerElement NEVER click blog.google announcement links or promo banners", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  const target = bridge.resolveModelKeywords("gemini-4-hydrogen");
+
+  // 1. Exact announcement link on Gemini Enterprise that used to pop open a new tab
+  const promoBanner = el("div", { class: "announcement-banner" });
+  const blogLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+    target: "_blank"
+  });
+  const blogSpan = el("span");
+  blogSpan.appendChild(txt("Gemini 4 Hydrogen"));
+  blogLink.appendChild(blogSpan);
+  promoBanner.appendChild(blogLink);
+  doc.body.appendChild(promoBanner);
+
+  // 2. Standalone external link without banner wrapper
+  const bareLink = el("a", {
+    href: "https://blog.google/innovation-and-ai/models-and-research/gemini-models/introducing-gemini-4-hydrogen/",
+    target: "_blank",
+    role: "button"
+  });
+  bareLink.appendChild(txt("Gemini 4 Hydrogen"));
+  doc.body.appendChild(bareLink);
+
+  // 3. Non-menu page card containing "Introducing Gemini 4 Hydrogen"
+  const promoCard = el("button");
+  promoCard.appendChild(txt("Introducing Gemini 4 Hydrogen - Learn more"));
+  doc.body.appendChild(promoCard);
+
+  assert.equal(bridge.isLinkOrPromoElement(blogLink), true);
+  assert.equal(bridge.isLinkOrPromoElement(blogSpan), true);
+  assert.equal(bridge.isLinkOrPromoElement(bareLink), true);
+
+  // With NO open dropdown menu, neither trigger nor option may match any of the above!
+  assert.equal(bridge.findModelTriggerElement(doc), null);
+  assert.equal(bridge.findModelOption(target, null, doc), null);
+
+  // 4. Once a genuine dropdown overlay menu opens with a real menuitem, select ONLY that menuitem
+  const overlay = el("div", { class: "cdk-overlay-pane", role: "menu" });
+  const realOption = el("button", { role: "menuitem" });
+  realOption.appendChild(txt("Gemini 4 Hydrogen"));
+  overlay.appendChild(realOption);
+  doc.body.appendChild(overlay);
+
+  assert.equal(bridge.findModelOption(target, null, doc), realOption);
+});
+
+test("isRateLimitMessage detects Google 429 / quota / traffic warnings", () => {
+  assert.equal(bridge.isRateLimitMessage("HTTP 429"), true);
+  assert.equal(bridge.isRateLimitMessage("Too many requests, please try again later"), true);
+  assert.equal(bridge.isRateLimitMessage("RESOURCE_EXHAUSTED: quota exceeded"), true);
+  assert.equal(bridge.isRateLimitMessage("Unusual traffic detected"), true);
+  assert.equal(bridge.isRateLimitMessage("HTTP 500 internal error"), false);
+  assert.equal(bridge.isRateLimitMessage(""), false);
+});
+
+

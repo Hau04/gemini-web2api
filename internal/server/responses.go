@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -101,6 +102,11 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	var text string
 	if a.Bridge != nil && a.Bridge.IsConnected() {
+		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
+			rlErr := &bridge.RateLimitError{RetryAfter: rem}
+			writeBridgeRateLimitError(w, rem, rlErr.Error())
+			return
+		}
 		a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
 		prepared := a.prepareBridgeRequest(r, chatReq, prompt, images)
 		text, err = a.Bridge.GenerateWithOptions(r.Context(), bridge.GenerateOptions{
@@ -109,11 +115,16 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			Attachments: prepared.Attachments,
 		})
 		if err != nil {
+			var rlErr *bridge.RateLimitError
+			if errors.As(err, &rlErr) {
+				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
+				return
+			}
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
 			return
 		}
 		if strings.TrimSpace(text) != "" {
-			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedPaths)
+			a.Bridge.RecordTurnSuccess(prepared.SessionClient, prepared.SessionConv, prepared.Fingerprints, prepared.UploadedSigs)
 		}
 	} else {
 		var fileRefs []string

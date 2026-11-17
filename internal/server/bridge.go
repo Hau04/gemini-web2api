@@ -11,12 +11,20 @@ import (
 func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
 	connected := a.Bridge != nil && a.Bridge.IsConnected()
 	tab := ""
+	cooldownSec := 0
 	if a.Bridge != nil {
 		tab = a.Bridge.TabName()
+		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
+			cooldownSec = int(rem.Round(time.Second).Seconds())
+			if cooldownSec < 1 {
+				cooldownSec = 1
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"connected": connected,
-		"tab":       tab,
+		"connected":    connected,
+		"tab":          tab,
+		"cooldown_sec": cooldownSec,
 	})
 }
 

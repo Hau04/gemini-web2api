@@ -24,7 +24,11 @@ type Config struct {
 	TemporaryChats             bool     `json:"temporary_chats"`
 	BaseURL                    string   `json:"base_url"`
 	BridgeMinIntervalMs        int      `json:"bridge_min_interval_ms"`
+	BridgeJitterMs             int      `json:"bridge_jitter_ms"`
+	BridgeMaxPer10Min          int      `json:"bridge_max_per_10min"`
 	BridgeAutoUploadLocalFiles bool     `json:"bridge_auto_upload_local_files"`
+	BridgeLargeCodeUploadBytes int      `json:"bridge_large_code_upload_bytes"`
+	BridgeSpilloverChars       int      `json:"bridge_spillover_chars"`
 	BridgeDeltaContext         bool     `json:"bridge_delta_context"`
 }
 
@@ -47,7 +51,11 @@ func Default() Config {
 		TemporaryChats:             false,
 		BaseURL:                    "https://gemini.google.com",
 		BridgeMinIntervalMs:        2500,
+		BridgeJitterMs:             1500,
+		BridgeMaxPer10Min:          18,
 		BridgeAutoUploadLocalFiles: true,
+		BridgeLargeCodeUploadBytes: 12288,
+		BridgeSpilloverChars:       18000,
 		BridgeDeltaContext:         true,
 	}
 }
@@ -84,7 +92,11 @@ func Load(path string) (Config, error) {
 		TemporaryChats             *bool     `json:"temporary_chats"`
 		BaseURL                    *string   `json:"base_url"`
 		BridgeMinIntervalMs        *int      `json:"bridge_min_interval_ms"`
+		BridgeJitterMs             *int      `json:"bridge_jitter_ms"`
+		BridgeMaxPer10Min          *int      `json:"bridge_max_per_10min"`
 		BridgeAutoUploadLocalFiles *bool     `json:"bridge_auto_upload_local_files"`
+		BridgeLargeCodeUploadBytes *int      `json:"bridge_large_code_upload_bytes"`
+		BridgeSpilloverChars       *int      `json:"bridge_spillover_chars"`
 		BridgeDeltaContext         *bool     `json:"bridge_delta_context"`
 	}
 
@@ -143,8 +155,20 @@ func Load(path string) (Config, error) {
 	if aux.BridgeMinIntervalMs != nil && *aux.BridgeMinIntervalMs >= 0 {
 		cfg.BridgeMinIntervalMs = *aux.BridgeMinIntervalMs
 	}
+	if aux.BridgeJitterMs != nil && *aux.BridgeJitterMs >= 0 {
+		cfg.BridgeJitterMs = *aux.BridgeJitterMs
+	}
+	if aux.BridgeMaxPer10Min != nil && *aux.BridgeMaxPer10Min >= 0 {
+		cfg.BridgeMaxPer10Min = *aux.BridgeMaxPer10Min
+	}
 	if aux.BridgeAutoUploadLocalFiles != nil {
 		cfg.BridgeAutoUploadLocalFiles = *aux.BridgeAutoUploadLocalFiles
+	}
+	if aux.BridgeLargeCodeUploadBytes != nil && *aux.BridgeLargeCodeUploadBytes >= 0 {
+		cfg.BridgeLargeCodeUploadBytes = *aux.BridgeLargeCodeUploadBytes
+	}
+	if aux.BridgeSpilloverChars != nil && *aux.BridgeSpilloverChars >= 0 {
+		cfg.BridgeSpilloverChars = *aux.BridgeSpilloverChars
 	}
 	if aux.BridgeDeltaContext != nil {
 		cfg.BridgeDeltaContext = *aux.BridgeDeltaContext

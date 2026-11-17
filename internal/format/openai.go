@@ -403,8 +403,9 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"When calling tools:\n"+
 					"- Output ONLY the tool_call block(s).\n"+
-					"- You may output multiple tool_call blocks in a SINGLE response to batch independent reads/checks and avoid excessive round-trips.\n"+
-					"- If a PDF, document, or image is already attached directly to this message, read the attached file directly instead of calling local tools to extract it.\n\n"+
+					"- Batch all independent reads, searches, or edits as multiple tool_call blocks in a SINGLE response to minimize round-trips.\n"+
+					"- For long code files: read directly attached files natively, or use search tools (grep) to jump to target lines instead of paginating chunk-by-chunk; prefer targeted edits over full-file rewrites, and avoid re-reading an entire file after an edit succeeds.\n"+
+					"- If a PDF, document, image, or source code file is already attached directly to this message, read the attached file directly instead of calling local tools to re-read or extract it.\n\n"+
 					"Available tools:\n%s%s",
 				string(defsJSON),
 				constraint,

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -542,5 +543,213 @@ func TestBridgeOpenAIFileAttachmentForwardedWithoutCookies(t *testing.T) {
 	att0, _ := atts[0].(map[string]any)
 	if att0["filename"] != "deck.pdf" || att0["mime"] != "application/pdf" {
 		t.Errorf("unexpected polled attachment: %#v", att0)
+	}
+}
+
+func TestBridgeLargeCodeAutoUploadAndRefreshOnEdit(t *testing.T) {
+	tmpDir := t.TempDir()
+	smallGo := filepath.Join(tmpDir, "tiny.go")
+	largeTS := filepath.Join(tmpDir, "big_service.ts")
+
+	if err := os.WriteFile(smallGo, []byte("package main\nfunc main() {}\n"), 0600); err != nil {
+		t.Fatalf("write small go: %v", err)
+	}
+	v1Code := "// version 1\n" + strings.Repeat("export const line = 'hello world';\n", 450) // ~15.7 KB
+	if err := os.WriteFile(largeTS, []byte(v1Code), 0600); err != nil {
+		t.Fatalf("write large ts: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeLargeCodeUploadBytes = 12288
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_code", "1")
+
+	sendTurn := func(userPrompt string) *bridge.Request {
+		ch := make(chan *bridge.Request, 1)
+		go func() {
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_code", "1", 2*time.Second)
+			ch <- req
+			if req != nil {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "ok", Done: true})
+			}
+		}()
+
+		body, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   false,
+			"messages": []any{map[string]any{"role": "user", "content": userPrompt}},
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+		httpReq.RemoteAddr = "127.0.0.1:54321"
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return <-ch
+	}
+
+	// Turn 1: auto-uploads large big_service.ts verbatim, skips tiny.go (< 12 KB)
+	req1 := sendTurn("Refactor " + largeTS + " and check " + smallGo)
+	if req1 == nil || len(req1.Attachments) != 1 {
+		t.Fatalf("expected 1 large code attachment, got %+v", req1)
+	}
+	if req1.Attachments[0].Filename != "big_service.ts" || req1.Attachments[0].Source != "local_large_code" {
+		t.Errorf("unexpected attachment: %+v", req1.Attachments[0])
+	}
+	decoded1, _ := base64.StdEncoding.DecodeString(req1.Attachments[0].DataBase64)
+	if string(decoded1) != v1Code {
+		t.Errorf("uploaded code content mismatch (len %d vs %d)", len(decoded1), len(v1Code))
+	}
+
+	// Turn 2: unchanged file on disk must NOT be re-uploaded
+	req2 := sendTurn("Explain function 2 in " + largeTS)
+	if req2 == nil {
+		t.Fatal("expected turn 2 request")
+	}
+	if len(req2.Attachments) != 0 {
+		t.Errorf("expected 0 duplicate uploads for unchanged large code file, got %d", len(req2.Attachments))
+	}
+
+	// Turn 3: after editing big_service.ts on disk (new size/mtime), it MUST re-upload fresh version!
+	v2Code := "// version 2 edited\n" + v1Code + "export const added = true;\n"
+	if err := os.WriteFile(largeTS, []byte(v2Code), 0600); err != nil {
+		t.Fatalf("rewrite large ts: %v", err)
+	}
+	req3 := sendTurn("Now review updated " + largeTS)
+	if req3 == nil || len(req3.Attachments) != 1 {
+		t.Fatalf("expected edited large code file to re-upload fresh version, got %+v", req3)
+	}
+	decoded3, _ := base64.StdEncoding.DecodeString(req3.Attachments[0].DataBase64)
+	if string(decoded3) != v2Code {
+		t.Errorf("expected updated v2 code in re-upload")
+	}
+}
+
+func TestBridgeOversizedToolResultSpillover(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeSpilloverChars = 1000
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_spill", "1")
+
+	ch := make(chan *bridge.Request, 1)
+	go func() {
+		req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_spill", "1", 2*time.Second)
+		ch <- req
+		if req != nil {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "Reviewed attached code!", Done: true})
+		}
+	}()
+
+	hugeCode := strings.Repeat("func compute(x int) int { return x * 2 }\n", 100) // ~4100 chars > 1000 threshold
+	body, _ := json.Marshal(map[string]any{
+		"model":  "gemini-4-hydrogen",
+		"stream": false,
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "edit_file", "description": "Edit file"}},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Review this code:\n" + hugeCode},
+		},
+	})
+	httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	got := <-ch
+	if got == nil {
+		t.Fatal("expected bridge request")
+	}
+	if len(got.Prompt) > 1400 {
+		t.Errorf("expected compact prompt after spillover, got %d chars", len(got.Prompt))
+	}
+	if !strings.Contains(got.Prompt, "# Tool Use") {
+		t.Errorf("expected # Tool Use header to remain inline, got %q", got.Prompt)
+	}
+	if len(got.Attachments) != 1 || got.Attachments[0].Source != "spillover" {
+		t.Fatalf("expected 1 spillover attachment, got %+v", got.Attachments)
+	}
+	decoded, _ := base64.StdEncoding.DecodeString(got.Attachments[0].DataBase64)
+	if !strings.Contains(string(decoded), "func compute(x int) int") {
+		t.Errorf("spillover attachment missing verbatim code body")
+	}
+}
+
+func TestBridgeRateLimitCircuitBreakerAnd429(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_rl", "1")
+
+	// 1. First request receives HTTP 429 rate-limited chunk from extension -> returns 429 + Retry-After
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_rl", "1", 2*time.Second)
+		if req != nil {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{
+				ID:          req.ID,
+				Done:        true,
+				Error:       "HTTP 429 Too Many Requests",
+				RateLimited: true,
+			})
+		}
+	}()
+
+	chatBody := `{"model":"gemini-4-hydrogen","stream":false,"messages":[{"role":"user","content":"hi"}]}`
+	req1 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	req1.Header.Set("Content-Type", "application/json")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	<-workerDone
+
+	if rec1.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected 429 on rate-limited bridge error, got %d: %s", rec1.Code, rec1.Body.String())
+	}
+	if rec1.Header().Get("Retry-After") == "" {
+		t.Errorf("expected Retry-After header on 429 response")
+	}
+
+	// 2. Immediate second request must fail fast with 429 WITHOUT hitting the browser tab
+	req2 := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	req2.Header.Set("Content-Type", "application/json")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected immediate circuit-breaker 429, got %d: %s", rec2.Code, rec2.Body.String())
+	}
+
+	// 3. /bridge/status exposes active cooldown_sec > 0
+	statusReq := httptest.NewRequest("GET", "/bridge/status", nil)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+	var statusResp map[string]any
+	_ = json.Unmarshal(statusRec.Body.Bytes(), &statusResp)
+	if sec, ok := statusResp["cooldown_sec"].(float64); !ok || sec <= 0 {
+		t.Errorf("expected cooldown_sec > 0 in /bridge/status, got %#v", statusResp)
 	}
 }

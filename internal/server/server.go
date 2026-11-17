@@ -48,9 +48,11 @@ func New(cfg config.Config, version string) *App {
 
 	httpClient := createHTTPClient(cfg)
 	hub := bridge.NewHub()
-	if cfg.BridgeMinIntervalMs > 0 {
-		hub.SetMinInterval(time.Duration(cfg.BridgeMinIntervalMs) * time.Millisecond)
-	}
+	hub.SetPacing(
+		time.Duration(cfg.BridgeMinIntervalMs)*time.Millisecond,
+		time.Duration(cfg.BridgeJitterMs)*time.Millisecond,
+		cfg.BridgeMaxPer10Min,
+	)
 
 	app := &App{
 		Cfg:        cfg,

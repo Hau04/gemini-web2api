@@ -26,9 +26,8 @@ const (
 	maxLocalAutoUploadFiles  = 5        // max auto-detected local files per turn
 )
 
-// allowedUploadExts restricts local auto-upload strictly to rich document and media files
-// (excluding source code, configs, keys, and secrets).
-var allowedUploadExts = map[string]string{
+// allowedBinaryDocExts are always auto-uploaded when referenced on localhost (> 0 bytes).
+var allowedBinaryDocExts = map[string]string{
 	".pdf":  "application/pdf",
 	".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
 	".doc":  "application/msword",
@@ -51,7 +50,69 @@ var allowedUploadExts = map[string]string{
 	".m4a":  "audio/mp4",
 }
 
-const allowedExtPattern = `(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|rtf|odt|epub|png|jpe?g|webp|gif|bmp|mp3|wav|m4a)`
+// allowedCodeTextExts are auto-uploaded verbatim when their size >= largeCodeMinBytes
+// (eliminating chunk-by-chunk read_file tool loops on long code files).
+var allowedCodeTextExts = map[string]string{
+	".go":       "text/plain",
+	".py":       "text/plain",
+	".js":       "text/javascript",
+	".mjs":      "text/javascript",
+	".cjs":      "text/javascript",
+	".ts":       "text/plain",
+	".tsx":      "text/plain",
+	".jsx":      "text/plain",
+	".java":     "text/plain",
+	".kt":       "text/plain",
+	".kts":      "text/plain",
+	".cs":       "text/plain",
+	".cpp":      "text/plain",
+	".cc":       "text/plain",
+	".cxx":      "text/plain",
+	".c":        "text/plain",
+	".h":        "text/plain",
+	".hpp":      "text/plain",
+	".rs":       "text/plain",
+	".rb":       "text/plain",
+	".php":      "text/plain",
+	".swift":    "text/plain",
+	".scala":    "text/plain",
+	".dart":     "text/plain",
+	".lua":      "text/plain",
+	".r":        "text/plain",
+	".sh":       "text/plain",
+	".bash":     "text/plain",
+	".zsh":      "text/plain",
+	".ps1":      "text/plain",
+	".bat":      "text/plain",
+	".sql":      "text/plain",
+	".html":     "text/html",
+	".htm":      "text/html",
+	".css":      "text/css",
+	".scss":     "text/plain",
+	".sass":     "text/plain",
+	".less":     "text/plain",
+	".vue":      "text/plain",
+	".svelte":   "text/plain",
+	".json":     "application/json",
+	".jsonl":    "text/plain",
+	".yaml":     "text/yaml",
+	".yml":      "text/yaml",
+	".toml":     "text/plain",
+	".xml":      "application/xml",
+	".md":       "text/markdown",
+	".markdown": "text/markdown",
+	".txt":      "text/plain",
+	".log":      "text/plain",
+	".proto":    "text/plain",
+	".graphql":  "text/plain",
+	".tf":       "text/plain",
+	".gradle":   "text/plain",
+	".cmake":    "text/plain",
+	".ini":      "text/plain",
+	".cfg":      "text/plain",
+}
+
+const allowedExtPattern = `(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|rtf|odt|epub|png|jpe?g|webp|gif|bmp|mp3|wav|m4a|go|py|mjs|cjs|js|tsx|ts|jsx|java|kts|kt|cs|cpp|cc|cxx|c|hpp|h|rs|rb|php|swift|scala|dart|lua|r|sh|bash|zsh|ps1|bat|sql|html|htm|css|scss|sass|less|vue|svelte|jsonl|json|yaml|yml|toml|xml|markdown|md|txt|log|proto|graphql|tf|gradle|cmake|ini|cfg)`
 
 var (
 	reQuotedPath   = regexp.MustCompile("(?i)[\"'`]" + `([^"'` + "`" + `\r\n]+?\.` + allowedExtPattern + `)` + "[\"'`]")
@@ -108,7 +169,7 @@ func ExtractWorkspaceDir(messages []models.OpenAIMessage) string {
 	return ""
 }
 
-// ExtractCandidatePaths extracts candidate local document/media file paths mentioned in text.
+// ExtractCandidatePaths extracts candidate local document, media, or code file paths mentioned in text.
 func ExtractCandidatePaths(text string) []string {
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -123,7 +184,6 @@ func ExtractCandidatePaths(text string) []string {
 		if p == "" {
 			return
 		}
-		// Skip HTTP/HTTPS URLs
 		lower := strings.ToLower(p)
 		if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
 			return
@@ -142,7 +202,6 @@ func ExtractCandidatePaths(text string) []string {
 		if unesc, err := url.PathUnescape(raw); err == nil {
 			raw = unesc
 		}
-		// Convert file:///C:/... -> C:/... on Windows-style URIs
 		if len(raw) >= 3 && raw[0] == '/' && raw[2] == ':' {
 			raw = raw[1:]
 		}
@@ -166,7 +225,7 @@ func isSensitiveFilename(base string) bool {
 	if strings.HasPrefix(lower, ".") {
 		return true
 	}
-	for _, bad := range []string{"cookie", "secret", "credential", "password", "id_rsa", "private_key"} {
+	for _, bad := range []string{"cookie", "secret", "credential", "password", "id_rsa", "private_key", "token"} {
 		if strings.Contains(lower, bad) {
 			return true
 		}
@@ -174,11 +233,19 @@ func isSensitiveFilename(base string) bool {
 	return false
 }
 
-func resolveAndReadLocalFile(candidate string, baseDirs []string) (absPath string, att bridge.Attachment, ok bool) {
+func fileVersionSignature(info os.FileInfo) string {
+	return fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
+}
+
+func resolveAndReadLocalFile(candidate string, baseDirs []string, largeCodeMinBytes int) (absPath string, sig string, att bridge.Attachment, ok bool) {
 	ext := strings.ToLower(filepath.Ext(candidate))
-	mime, allowed := allowedUploadExts[ext]
-	if !allowed {
-		return "", bridge.Attachment{}, false
+	mime, isDocOrMedia := allowedBinaryDocExts[ext]
+	isCodeText := false
+	if !isDocOrMedia {
+		mime, isCodeText = allowedCodeTextExts[ext]
+		if !isCodeText || largeCodeMinBytes <= 0 {
+			return "", "", bridge.Attachment{}, false
+		}
 	}
 
 	var tryPaths []string
@@ -208,26 +275,35 @@ func resolveAndReadLocalFile(candidate string, baseDirs []string) (absPath strin
 		if info.Size() <= 0 || info.Size() > maxBridgeAttachmentBytes {
 			continue
 		}
+		if isCodeText && info.Size() < int64(largeCodeMinBytes) {
+			// Keep short code files inline via normal agent tools; auto-upload only long code files.
+			continue
+		}
 		data, err := os.ReadFile(cleaned)
 		if err != nil || len(data) == 0 {
 			continue
 		}
-		return cleaned, bridge.Attachment{
+		src := "local_auto"
+		if isCodeText {
+			src = "local_large_code"
+		}
+		return cleaned, fileVersionSignature(info), bridge.Attachment{
 			Filename:   base,
 			MIME:       mime,
 			DataBase64: base64.StdEncoding.EncodeToString(data),
 			Size:       len(data),
-			Source:     "local_auto",
+			Source:     src,
 		}, true
 	}
 
-	return "", bridge.Attachment{}, false
+	return "", "", bridge.Attachment{}, false
 }
 
 // DiscoverLocalUploadFiles inspects the latest message (when it is a user turn) for references
-// to existing local PDFs, Office documents, or media files and reads them for direct
-// upload through the browser bridge. Already-uploaded paths in this tab session are skipped.
-func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded map[string]bool) ([]bridge.Attachment, []string) {
+// to existing local PDFs, Office documents, media files, or long source code files
+// (>= largeCodeMinBytes) and reads them for direct upload through the browser bridge.
+// Files already uploaded with the same size+mtime signature in this tab session are skipped.
+func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded map[string]string, largeCodeMinBytes int) ([]bridge.Attachment, map[string]string) {
 	if len(messages) == 0 {
 		return nil, nil
 	}
@@ -255,25 +331,87 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 
 	seenAbs := make(map[string]bool)
 	var attachments []bridge.Attachment
-	var uploadedPaths []string
+	uploadedSigs := make(map[string]string)
 
 	for _, cand := range candidates {
 		if len(attachments) >= maxLocalAutoUploadFiles {
 			break
 		}
-		absPath, att, ok := resolveAndReadLocalFile(cand, baseDirs)
+		absPath, sig, att, ok := resolveAndReadLocalFile(cand, baseDirs, largeCodeMinBytes)
 		if !ok {
 			continue
 		}
-		if seenAbs[absPath] || (alreadyUploaded != nil && alreadyUploaded[absPath]) {
+		if seenAbs[absPath] {
+			continue
+		}
+		if alreadyUploaded != nil && alreadyUploaded[absPath] == sig {
 			continue
 		}
 		seenAbs[absPath] = true
 		attachments = append(attachments, att)
-		uploadedPaths = append(uploadedPaths, absPath)
+		uploadedSigs[absPath] = sig
 	}
 
-	return attachments, uploadedPaths
+	return attachments, uploadedSigs
+}
+
+// SpilloverOversizedPrompt moves oversized code / tool-result prompts (> maxChars)
+// into a UTF-8 file attachment so Gemini receives 100% verbatim text without hitting
+// browser composer character limits or triggering giant DOM paste slowdowns.
+func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compactPrompt string, att *bridge.Attachment) {
+	if maxChars <= 0 || len(prompt) <= maxChars {
+		return prompt, nil
+	}
+
+	// On a full prompt that starts with # Tool Use, keep the # Tool Use header inline
+	// (if reasonably sized) and spill only the oversized conversation/code body to a file.
+	if !isDelta && strings.HasPrefix(prompt, "# Tool Use") {
+		if availIdx := strings.Index(prompt, "\nAvailable tools:\n"); availIdx != -1 {
+			afterAvail := availIdx + len("\nAvailable tools:\n")
+			if splitRel := strings.Index(prompt[afterAvail:], "\n\n"); splitRel != -1 {
+				headerEnd := afterAvail + splitRel
+				header := prompt[:headerEnd]
+				body := strings.TrimSpace(prompt[headerEnd+2:])
+				if len(body) > maxChars/2 && len(header) <= maxChars {
+					data := []byte(body)
+					if len(data) <= maxBridgeAttachmentBytes {
+						filename := "code_context.txt"
+						return fmt.Sprintf(
+								"%s\n\n[The full prompt / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full before responding or calling tools.]",
+								header, len(body), filename,
+							), &bridge.Attachment{
+								Filename:   filename,
+								MIME:       "text/plain",
+								DataBase64: base64.StdEncoding.EncodeToString(data),
+								Size:       len(data),
+								Source:     "spillover",
+							}
+					}
+				}
+			}
+		}
+	}
+
+	// Delta turns (e.g. massive [Tool result for read_file]) or oversized single prompts:
+	data := []byte(prompt)
+	if len(data) > maxBridgeAttachmentBytes {
+		return prompt, nil
+	}
+	filename := "tool_output_context.txt"
+	if !isDelta {
+		filename = "full_prompt_context.txt"
+	}
+	compact := fmt.Sprintf(
+		"[Full tool output / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full and continue — do NOT re-read it with local tools.]",
+		len(prompt), filename,
+	)
+	return compact, &bridge.Attachment{
+		Filename:   filename,
+		MIME:       "text/plain",
+		DataBase64: base64.StdEncoding.EncodeToString(data),
+		Size:       len(data),
+		Source:     "spillover",
+	}
 }
 
 // FormatAttachmentsToBridge converts explicit API attachments (image_url, file, input_file, document)
@@ -337,6 +475,8 @@ func extForMIME(mime string) string {
 		return ".gif"
 	case "text/csv":
 		return ".csv"
+	case "text/plain":
+		return ".txt"
 	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
 		return ".docx"
 	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
@@ -350,8 +490,6 @@ func extForMIME(mime string) string {
 
 // ConversationFingerprints returns a deterministic slice of SHA-256 fingerprints
 // starting with the tool-definition digest followed by one digest per message.
-// Matching prefixes allow the bridge hub to send compact delta turns safely only
-// when both the tool definitions and earlier messages are unchanged.
 func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 	fps := make([]string, 0, len(req.Messages)+1)
 
@@ -397,7 +535,7 @@ type preparedBridgeTurn struct {
 	SessionClient string
 	SessionConv   string
 	Fingerprints  []string
-	UploadedPaths []string
+	UploadedSigs  map[string]string
 }
 
 func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest, fullPrompt string, apiAttachments []format.Image) preparedBridgeTurn {
@@ -406,6 +544,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 
 	bridgePrompt := fullPrompt
 	activeAtts := apiAttachments
+	isDelta := false
 
 	// Delta-context optimization: if the active browser tab already holds the exact
 	// tool definitions and leading conversation turns, send only the newly appended turns.
@@ -419,6 +558,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 				if strings.TrimSpace(deltaPrompt) != "" {
 					bridgePrompt = deltaPrompt
 					activeAtts = deltaAtts
+					isDelta = true
 					a.Logf("Bridge delta context active: sending %d/%d new message(s) (%d chars vs %d full)",
 						len(req.Messages)-matchedMsgs, len(req.Messages), len(deltaPrompt), len(fullPrompt))
 				}
@@ -441,13 +581,13 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	}
 
 	attachments := FormatAttachmentsToBridge(activeAtts, fetchFn)
-	var localPaths []string
+	var uploadedSigs map[string]string
 
-	// Local document auto-upload: for localhost requests (e.g. WorkBuddy on the same machine),
-	// automatically attach referenced local PDFs/Office docs/images directly to the Gemini tab
-	// so Gemini reads them natively instead of running multi-turn extraction tool loops.
+	// Local file auto-upload: for localhost requests (e.g. WorkBuddy on the same machine),
+	// automatically attach referenced local PDFs/Office docs/images AND long source code files
+	// (>= bridge_large_code_upload_bytes) directly to the Gemini tab so Gemini reads them natively.
 	if a.Cfg.BridgeAutoUploadLocalFiles && isLoopbackRequest(r) {
-		localAtts, discoveredPaths := DiscoverLocalUploadFiles(req.Messages, alreadyUploaded)
+		localAtts, discoveredSigs := DiscoverLocalUploadFiles(req.Messages, alreadyUploaded, a.Cfg.BridgeLargeCodeUploadBytes)
 		if len(localAtts) > 0 {
 			var names []string
 			for _, att := range localAtts {
@@ -455,7 +595,20 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 			}
 			a.Logf("Bridge auto-attaching %d local file(s) directly to Gemini: %s", len(localAtts), strings.Join(names, ", "))
 			attachments = append(attachments, localAtts...)
-			localPaths = append(localPaths, discoveredPaths...)
+			uploadedSigs = discoveredSigs
+		}
+	}
+
+	// Spillover oversized code / tool-result prompts to a .txt file upload so Gemini gets
+	// 100% verbatim content without browser input truncation or sluggish DOM paste.
+	if a.Cfg.BridgeSpilloverChars > 0 && len(bridgePrompt) > a.Cfg.BridgeSpilloverChars {
+		origLen := len(bridgePrompt)
+		compactPrompt, spillAtt := SpilloverOversizedPrompt(bridgePrompt, a.Cfg.BridgeSpilloverChars, isDelta)
+		if spillAtt != nil {
+			bridgePrompt = compactPrompt
+			attachments = append(attachments, *spillAtt)
+			a.Logf("Bridge spilled oversized prompt (%d chars) into attachment %s (%d KB)",
+				origLen, spillAtt.Filename, (spillAtt.Size+1023)/1024)
 		}
 	}
 
@@ -465,6 +618,6 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		SessionClient: sessClient,
 		SessionConv:   sessConvGen,
 		Fingerprints:  fingerprints,
-		UploadedPaths: localPaths,
+		UploadedSigs:  uploadedSigs,
 	}
 }
