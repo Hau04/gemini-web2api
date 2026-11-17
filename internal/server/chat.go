@@ -21,6 +21,7 @@ const toolCallFence = "```tool_call"
 
 var toolCallFences = []string{
 	"```tool_call",
+	"```function_call",
 	"<tool_call>",
 	"```json",
 }

@@ -43,6 +43,33 @@ func ResponsesInputToMessages(input any, instructions string) ([]map[string]any,
 						"name":         name,
 						"content":      output,
 					})
+				} else if itemType == "function_call" {
+					callID, _ := mapItem["call_id"].(string)
+					if callID == "" {
+						callID, _ = mapItem["id"].(string)
+					}
+					if callID == "" {
+						callID = fmt.Sprintf("call_%s", RandHex(8))
+					}
+					name, _ := mapItem["name"].(string)
+					args, _ := mapItem["arguments"].(string)
+					if args == "" {
+						args = "{}"
+					}
+					messages = append(messages, map[string]any{
+						"role":    "assistant",
+						"content": "",
+						"tool_calls": []map[string]any{
+							{
+								"id":   callID,
+								"type": "function",
+								"function": map[string]any{
+									"name":      name,
+									"arguments": args,
+								},
+							},
+						},
+					})
 				} else if itemRole == "assistant" || (itemType == "message" && itemRole == "assistant") {
 					rawContent := mapItem["content"]
 					var textAcc string
