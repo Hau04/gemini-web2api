@@ -131,7 +131,6 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	strChoice, isStr := req.ToolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
-	allowedTools := format.AllowedToolNames(req.Tools)
 
 	// Intercept automatic client title / topic generation requests (e.g. WorkBuddy)
 	// and fulfill them instantly without tying up the browser tab or polluting chat history.
@@ -378,7 +377,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 				if hasTools {
 					if isBufferingToolCall {
-						_, toolCalls := format.ParseToolCallsWithAllowed(fullText.String(), allowedTools)
+						_, toolCalls := format.ParseToolCallsWithContext(fullText.String(), req.Tools, req.Messages)
 						if len(toolCalls) > 0 {
 							tcChunk := models.OpenAIChatResponse{
 								ID:      cid,
@@ -517,7 +516,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 		var toolCalls []models.OpenAIToolCall
 		if len(req.Tools) > 0 && text != "" && !isToolNone {
-			text, toolCalls = format.ParseToolCallsWithAllowed(text, allowedTools)
+			text, toolCalls = format.ParseToolCallsWithContext(text, req.Tools, req.Messages)
 		}
 
 		msg := models.OpenAIMessage{
@@ -637,7 +636,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {
-		text, toolCalls = format.ParseToolCallsWithAllowed(text, allowedTools)
+		text, toolCalls = format.ParseToolCallsWithContext(text, req.Tools, req.Messages)
 	}
 
 	msg := models.OpenAIMessage{

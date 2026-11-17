@@ -184,7 +184,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	var toolCalls []models.OpenAIToolCall
 	if len(reqTools) > 0 && text != "" && !isToolNone {
-		text, toolCalls = format.ParseToolCallsWithAllowed(text, format.AllowedToolNames(reqTools))
+		text, toolCalls = format.ParseToolCallsWithContext(text, reqTools, reqMessages)
 	}
 
 	rid := fmt.Sprintf("resp_%s", format.RandHex(16))

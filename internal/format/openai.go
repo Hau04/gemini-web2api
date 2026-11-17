@@ -638,6 +638,148 @@ func AllowedToolNames(tools []models.OpenAITool) map[string]bool {
 	return allowed
 }
 
+// DeferredToolConfig describes WorkBuddy's deferred connector/MCP loading tools
+// (ToolSearch + DeferExecuteTool) when present in an OpenAI request.
+type DeferredToolConfig struct {
+	HasToolSearch bool
+	HasDeferExec  bool
+	DeferExecName string
+	ToolNameKey   string
+	ParamsKey     string
+}
+
+// DetectDeferredToolConfig inspects declared OpenAI tools to detect WorkBuddy's
+// ToolSearch + DeferExecuteTool connector bridge and its exact schema parameter keys.
+func DetectDeferredToolConfig(tools []models.OpenAITool) DeferredToolConfig {
+	cfg := DeferredToolConfig{
+		DeferExecName: "DeferExecuteTool",
+		ToolNameKey:   "toolName",
+		ParamsKey:     "params",
+	}
+	for _, tool := range tools {
+		name := strings.TrimSpace(tool.Function.Name)
+		if name == "" {
+			name = strings.TrimSpace(tool.Name)
+		}
+		switch name {
+		case "ToolSearch":
+			cfg.HasToolSearch = true
+		case "DeferExecuteTool":
+			cfg.HasDeferExec = true
+			cfg.DeferExecName = name
+			paramsMap, _ := tool.Function.Parameters.(map[string]any)
+			if paramsMap == nil {
+				paramsMap, _ = tool.Parameters.(map[string]any)
+			}
+			if props, ok := paramsMap["properties"].(map[string]any); ok {
+				for _, k := range []string{"toolName", "tool_name", "name", "tool"} {
+					if _, exists := props[k]; exists {
+						cfg.ToolNameKey = k
+						break
+					}
+				}
+				for _, k := range []string{"params", "arguments", "parameters", "args", "input"} {
+					if _, exists := props[k]; exists {
+						cfg.ParamsKey = k
+						break
+					}
+				}
+			}
+		}
+	}
+	return cfg
+}
+
+var (
+	reMCPToolIdent          = regexp.MustCompile(`\bmcp__[A-Za-z0-9_.-]+\b`)
+	reDeferredToolsTagBlock = regexp.MustCompile(`(?is)<available[-_]deferred[-_]tools>\s*(.*?)\s*</available[-_]deferred[-_]tools>`)
+	reJSONToolNameField     = regexp.MustCompile(`"(?:name|toolName|tool_name)"\s*:\s*"([A-Za-z][A-Za-z0-9_.:-]{2,128})"`)
+	reSimpleToolIdentLine   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.:-]{2,128}$`)
+)
+
+// ExtractDeferredToolNames discovers deferred connector/MCP tool names mentioned in
+// system prompts (<available-deferred-tools> or mcp__* identifiers) and prior
+// ToolSearch tool results so direct calls to those tools can be auto-wrapped into
+// DeferExecuteTool even when they don't use an `mcp__` prefix.
+func ExtractDeferredToolNames(messages []models.OpenAIMessage) map[string]bool {
+	if len(messages) == 0 {
+		return nil
+	}
+	toolCallNames := BuildToolCallNameMap(messages)
+	var discovered map[string]bool
+	addName := func(n string) {
+		n = strings.TrimSpace(n)
+		if n == "" || n == "ToolSearch" || n == "DeferExecuteTool" {
+			return
+		}
+		if discovered == nil {
+			discovered = make(map[string]bool)
+		}
+		discovered[n] = true
+	}
+
+	for _, msg := range messages {
+		text, _ := ExtractMessageContent(msg)
+		if strings.TrimSpace(text) == "" {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+
+		// Always capture explicit mcp__* names in system prompts or tool results
+		if role == "system" || role == "developer" || role == "tool" {
+			for _, m := range reMCPToolIdent.FindAllString(text, -1) {
+				addName(m)
+			}
+		}
+
+		// Parse <available-deferred-tools> lists in system prompts
+		if role == "system" || role == "developer" {
+			for _, block := range reDeferredToolsTagBlock.FindAllStringSubmatch(text, -1) {
+				for _, line := range strings.Split(block[1], "\n") {
+					line = strings.TrimSpace(strings.TrimLeft(line, "-*• "))
+					if idx := strings.IndexAny(line, " \t:("); idx != -1 {
+						line = strings.TrimSpace(line[:idx])
+					}
+					if reSimpleToolIdentLine.MatchString(line) {
+						addName(line)
+					}
+				}
+			}
+		}
+
+		// Parse ToolSearch results (even for deferred tools that don't start with mcp__)
+		if role == "tool" {
+			toolName := strings.TrimSpace(msg.Name)
+			if toolName == "" && msg.ToolCallID != "" {
+				toolName = toolCallNames[msg.ToolCallID]
+			}
+			if toolName == "ToolSearch" {
+				for _, match := range reJSONToolNameField.FindAllStringSubmatch(text, -1) {
+					addName(match[1])
+				}
+			}
+		}
+	}
+	return discovered
+}
+
+// BuildToolSearchFollowUpReminder returns a concise one-line execution reminder
+// to append right after a delta ToolSearch tool result so Gemini invokes discovered
+// WorkBuddy connector tools via DeferExecuteTool with exact target verification.
+func BuildToolSearchFollowUpReminder(tools []models.OpenAITool, toolChoice any) string {
+	if strChoice, ok := toolChoice.(string); ok && strChoice == "none" {
+		return ""
+	}
+	cfg := DetectDeferredToolConfig(tools)
+	if !cfg.HasToolSearch || !cfg.HasDeferExec {
+		return ""
+	}
+	return fmt.Sprintf(
+		"[Invoke discovered connector/MCP tools using ```tool_call\n{\"name\": %q, \"arguments\": {%q: \"<exact_tool_name>\", %q: {...}}}\n``` — verify exact target identifiers (e.g. exact GitHub owner/repo, never an upstream parent repo unless asked) before mutative actions.]",
+		cfg.DeferExecName, cfg.ToolNameKey, cfg.ParamsKey,
+	)
+}
+
 // BuildDeltaToolReminder returns a compact one-line reminder for follow-up user messages
 // in a delta-context session so Gemini Enterprise keeps emitting ```tool_call``` blocks
 // for both local tools and connected WorkBuddy apps/connectors (GitHub, Gmail, etc.).
@@ -674,8 +816,17 @@ func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 	if extra > 0 {
 		list += fmt.Sprintf(" (+%d more)", extra)
 	}
+	cfg := DetectDeferredToolConfig(tools)
+	extraHint := ""
+	if cfg.HasToolSearch && cfg.HasDeferExec {
+		extraHint = fmt.Sprintf(
+			" For WorkBuddy connectors/MCP tools (Gmail, GitHub, mcp__*), call ToolSearch first, then %s with {%q: \"<exact_name>\", %q: {...}} — always verify exact target repo/owner before write actions.",
+			cfg.DeferExecName, cfg.ToolNameKey, cfg.ParamsKey,
+		)
+	}
 	return fmt.Sprintf(
-		"[Local client bridge active: to use local tools or connected WorkBuddy apps/connectors (GitHub, Gmail, files, shell, etc.), output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
+		"[Local client bridge active: to use local tools or connected WorkBuddy apps/connectors (GitHub, Gmail, files, shell, etc.), output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result.%s Available tools: %s]",
+		extraHint,
 		list,
 	)
 }
@@ -706,17 +857,28 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 		}
 
 		if len(toolDefs) > 0 {
+			deferCfg := DetectDeferredToolConfig(req.Tools)
+			connectorNote := ""
+			if deferCfg.HasToolSearch && deferCfg.HasDeferExec {
+				connectorNote = fmt.Sprintf(
+					"- WorkBuddy connectors & MCP tools (e.g. Gmail, GitHub, Drive, mcp__*): call `ToolSearch` first to load the tool's exact schema, then invoke it via `%s` with `{%q: \"<exact_name>\", %q: {...}}` (do not guess parameters or call deferred tools directly).\n"+
+						"- Connector safety: before mutative external actions (creating PRs, deleting/sending emails, editing remote repos), verify exact target identifiers (e.g. exact GitHub `owner`/`repo` — never open a PR against an upstream/parent fork repo unless explicitly requested).\n",
+					deferCfg.DeferExecName, deferCfg.ToolNameKey, deferCfg.ParamsKey,
+				)
+			}
 			constraint := BuildToolChoiceInstruction(req.ToolChoice)
 			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
 					"An external local client bridge (WorkBuddy) is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that local tool or connected app connector (e.g. GitHub, Gmail, local files, shell) on the user's behalf and returns the output in the next turn as `[Tool result for <name>]`.\n"+
 					"- You DO have execution access to ALL tools & connectors listed below through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files, shell, GitHub, email, or external apps — call the matching declared tools below instead.\n"+
+					"%s"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch independent calls in one response.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
 					"Available tools:\n%s%s",
+				connectorNote,
 				string(defsJSON),
 				constraint,
 			))
@@ -879,7 +1041,133 @@ func decodeToolCallItems(raw json.RawMessage) ([]rawToolCallPayload, bool) {
 	return nil, false
 }
 
-func decodeToolCallPayload(content string, requireAllowed bool, allowed map[string]bool) []models.OpenAIToolCall {
+type toolParseOpts struct {
+	requireAllowed bool
+	allowed        map[string]bool
+	deferCfg       DeferredToolConfig
+	deferredNames  map[string]bool
+}
+
+func unwrapJSONObject(val any) any {
+	if val == nil {
+		return map[string]any{}
+	}
+	if str, ok := val.(string); ok {
+		trimmed := strings.TrimSpace(str)
+		if trimmed == "" {
+			return map[string]any{}
+		}
+		var parsed any
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			return parsed
+		}
+		cleaned := reTrailingJSONCommas.ReplaceAllString(trimmed, "$1")
+		if cleaned != trimmed {
+			if err := json.Unmarshal([]byte(cleaned), &parsed); err == nil {
+				return parsed
+			}
+		}
+		return str
+	}
+	return val
+}
+
+func marshalArgsValue(val any) string {
+	if str, ok := val.(string); ok {
+		if strings.TrimSpace(str) == "" {
+			return "{}"
+		}
+		return str
+	}
+	if val != nil {
+		b, _ := json.Marshal(val)
+		return string(b)
+	}
+	return "{}"
+}
+
+func shouldAutoWrapDeferred(name string, opts toolParseOpts) bool {
+	if !opts.deferCfg.HasDeferExec || name == "" || name == opts.deferCfg.DeferExecName {
+		return false
+	}
+	if opts.allowed != nil && opts.allowed[name] {
+		return false
+	}
+	if strings.HasPrefix(name, "mcp__") || strings.Contains(name, "__") {
+		return true
+	}
+	if opts.deferredNames != nil && opts.deferredNames[name] {
+		return true
+	}
+	return false
+}
+
+func normalizeDeferExecuteArgs(rawArgs any, cfg DeferredToolConfig) string {
+	unwrapped := unwrapJSONObject(rawArgs)
+	m, ok := unwrapped.(map[string]any)
+	if !ok {
+		return marshalArgsValue(rawArgs)
+	}
+
+	nameKeys := []string{cfg.ToolNameKey, "toolName", "tool_name", "name", "tool", "function_name", "function"}
+	paramKeys := []string{cfg.ParamsKey, "params", "arguments", "parameters", "args", "input"}
+
+	targetName := ""
+	matchedNameKey := ""
+	for _, k := range nameKeys {
+		if k == "" {
+			continue
+		}
+		if v, exists := m[k]; exists {
+			if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+				targetName = strings.TrimSpace(s)
+				matchedNameKey = k
+				break
+			}
+		}
+	}
+	if targetName == "" {
+		return marshalArgsValue(rawArgs)
+	}
+
+	var paramsVal any
+	hasParamsKey := false
+	for _, k := range paramKeys {
+		if k == "" || k == matchedNameKey {
+			continue
+		}
+		if v, exists := m[k]; exists {
+			paramsVal = unwrapJSONObject(v)
+			hasParamsKey = true
+			break
+		}
+	}
+
+	// If Gemini flattened the connector's parameters alongside toolName instead of
+	// nesting them inside `params` (e.g. {"toolName":"mcp__github__...","owner":"Hau04","repo":"..."}),
+	// automatically collect those remaining fields into `params`.
+	if !hasParamsKey {
+		extra := make(map[string]any)
+		for k, v := range m {
+			if k == matchedNameKey {
+				continue
+			}
+			extra[k] = v
+		}
+		paramsVal = extra
+	}
+	if paramsVal == nil {
+		paramsVal = map[string]any{}
+	}
+
+	b, _ := json.Marshal(map[string]any{
+		cfg.ToolNameKey: targetName,
+		cfg.ParamsKey:   paramsVal,
+	})
+	return string(b)
+}
+
+func decodeToolCallPayload(content string, opts toolParseOpts) []models.OpenAIToolCall {
 	trimmed := strings.TrimSpace(content)
 	if trimmed == "" {
 		return nil
@@ -904,23 +1192,38 @@ func decodeToolCallPayload(content string, requireAllowed bool, allowed map[stri
 			for _, data := range items {
 				name := data.resolvedName()
 				if name == "" {
-					if requireAllowed {
+					if opts.requireAllowed {
 						return nil
 					}
 					continue
 				}
-				if requireAllowed && !allowed[name] {
+				canWrapDeferred := shouldAutoWrapDeferred(name, opts)
+				if opts.requireAllowed && !opts.allowed[name] && !canWrapDeferred {
 					return nil
 				}
+
 				argsVal := data.resolvedArgs()
+				if canWrapDeferred {
+					wrapped, _ := json.Marshal(map[string]any{
+						opts.deferCfg.ToolNameKey: name,
+						opts.deferCfg.ParamsKey:   unwrapJSONObject(argsVal),
+					})
+					out = append(out, models.OpenAIToolCall{
+						ID:   fmt.Sprintf("call_%s", RandHex(8)),
+						Type: "function",
+						Function: models.OpenAIToolCallFunction{
+							Name:      opts.deferCfg.DeferExecName,
+							Arguments: string(wrapped),
+						},
+					})
+					continue
+				}
+
 				var argsStr string
-				if str, ok := argsVal.(string); ok {
-					argsStr = str
-				} else if argsVal != nil {
-					b, _ := json.Marshal(argsVal)
-					argsStr = string(b)
+				if opts.deferCfg.HasDeferExec && name == opts.deferCfg.DeferExecName {
+					argsStr = normalizeDeferExecuteArgs(argsVal, opts.deferCfg)
 				} else {
-					argsStr = "{}"
+					argsStr = marshalArgsValue(argsVal)
 				}
 				out = append(out, models.OpenAIToolCall{
 					ID:   fmt.Sprintf("call_%s", RandHex(8)),
@@ -945,7 +1248,7 @@ func decodeToolCallPayload(content string, requireAllowed bool, allowed map[stri
 	return nil
 }
 
-func extractBlocksWithRegex(text string, re *regexp.Regexp, requireAllowed bool, allowed map[string]bool) (string, []models.OpenAIToolCall) {
+func extractBlocksWithRegex(text string, re *regexp.Regexp, opts toolParseOpts) (string, []models.OpenAIToolCall) {
 	matches := re.FindAllStringSubmatchIndex(text, -1)
 	if len(matches) == 0 {
 		return text, nil
@@ -956,10 +1259,10 @@ func extractBlocksWithRegex(text string, re *regexp.Regexp, requireAllowed bool,
 	lastEnd := 0
 
 	for _, m := range matches {
-		blockCalls := decodeToolCallPayload(text[m[2]:m[3]], requireAllowed, allowed)
+		blockCalls := decodeToolCallPayload(text[m[2]:m[3]], opts)
 		if len(blockCalls) == 0 {
 			// Leave non-tool-call blocks (e.g. ordinary ```json``` snippets) intact in text
-			if requireAllowed {
+			if opts.requireAllowed {
 				continue
 			}
 			cleanParts = append(cleanParts, text[lastEnd:m[0]])
@@ -971,7 +1274,7 @@ func extractBlocksWithRegex(text string, re *regexp.Regexp, requireAllowed bool,
 		toolCalls = append(toolCalls, blockCalls...)
 	}
 
-	if len(toolCalls) == 0 && requireAllowed {
+	if len(toolCalls) == 0 && opts.requireAllowed {
 		return text, nil
 	}
 
@@ -987,27 +1290,59 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 	return ParseToolCallsWithAllowed(text, nil)
 }
 
-// ParseToolCallsWithAllowed extracts structured tool calls from model output.
-// In addition to ```tool_call``` and <tool_call> blocks, if allowedTools is non-empty
-// and no explicit tool_call blocks were found, it also accepts ```json``` blocks whose
-// "name" matches a declared tool in allowedTools.
-func ParseToolCallsWithAllowed(text string, allowedTools map[string]bool) (string, []models.OpenAIToolCall) {
-	clean, calls := extractBlocksWithRegex(text, reToolCall, false, nil)
+func parseToolCallsInternal(text string, allowedTools map[string]bool, deferCfg DeferredToolConfig, deferredNames map[string]bool) (string, []models.OpenAIToolCall) {
+	explicitOpts := toolParseOpts{
+		requireAllowed: false,
+		allowed:        allowedTools,
+		deferCfg:       deferCfg,
+		deferredNames:  deferredNames,
+	}
+
+	clean, calls := extractBlocksWithRegex(text, reToolCall, explicitOpts)
 	if len(calls) > 0 {
 		return clean, calls
 	}
 
-	cleanXML, xmlCalls := extractBlocksWithRegex(text, reXMLToolCall, false, nil)
+	cleanXML, xmlCalls := extractBlocksWithRegex(text, reXMLToolCall, explicitOpts)
 	if len(xmlCalls) > 0 {
 		return cleanXML, xmlCalls
 	}
 
 	if len(allowedTools) > 0 {
-		cleanJSON, jsonCalls := extractBlocksWithRegex(text, reJSONToolCall, true, allowedTools)
+		jsonOpts := explicitOpts
+		jsonOpts.requireAllowed = true
+		cleanJSON, jsonCalls := extractBlocksWithRegex(text, reJSONToolCall, jsonOpts)
 		if len(jsonCalls) > 0 {
 			return cleanJSON, jsonCalls
 		}
 	}
 
 	return text, nil
+}
+
+// ParseToolCallsWithAllowed extracts structured tool calls from model output.
+// In addition to ```tool_call``` and <tool_call> blocks, if allowedTools is non-empty
+// and no explicit tool_call blocks were found, it also accepts ```json``` blocks whose
+// "name" matches a declared tool (or deferred mcp__* connector tool when DeferExecuteTool is allowed).
+func ParseToolCallsWithAllowed(text string, allowedTools map[string]bool) (string, []models.OpenAIToolCall) {
+	deferCfg := DeferredToolConfig{
+		DeferExecName: "DeferExecuteTool",
+		ToolNameKey:   "toolName",
+		ParamsKey:     "params",
+	}
+	if allowedTools != nil && allowedTools["DeferExecuteTool"] {
+		deferCfg.HasDeferExec = true
+	}
+	return parseToolCallsInternal(text, allowedTools, deferCfg, nil)
+}
+
+// ParseToolCallsWithContext extracts structured tool calls using the full declared
+// OpenAI tools and conversation messages, enabling dynamic DeferExecuteTool schema
+// detection, normalization, and auto-wrapping of both `mcp__*` and ToolSearch-discovered
+// deferred connector tools.
+func ParseToolCallsWithContext(text string, tools []models.OpenAITool, messages []models.OpenAIMessage) (string, []models.OpenAIToolCall) {
+	allowedTools := AllowedToolNames(tools)
+	deferCfg := DetectDeferredToolConfig(tools)
+	deferredNames := ExtractDeferredToolNames(messages)
+	return parseToolCallsInternal(text, allowedTools, deferCfg, deferredNames)
 }
