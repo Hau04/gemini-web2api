@@ -52,8 +52,43 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	var reqMessages []models.OpenAIMessage
 	for _, m := range messages {
 		role, _ := m["role"].(string)
+		name, _ := m["name"].(string)
+		toolCallID, _ := m["tool_call_id"].(string)
 		content := m["content"]
-		reqMessages = append(reqMessages, models.OpenAIMessage{Role: role, Content: content})
+		msg := models.OpenAIMessage{
+			Role:       role,
+			Content:    content,
+			Name:       name,
+			ToolCallID: toolCallID,
+		}
+		if rawTCs, ok := m["tool_calls"].([]map[string]any); ok {
+			for _, tc := range rawTCs {
+				id, _ := tc["id"].(string)
+				tcType, _ := tc["type"].(string)
+				if tcType == "" {
+					tcType = "function"
+				}
+				var fnName, fnArgs string
+				if fnMap, ok := tc["function"].(map[string]any); ok {
+					fnName, _ = fnMap["name"].(string)
+					fnArgs, _ = fnMap["arguments"].(string)
+				}
+				if fnArgs == "" {
+					fnArgs = "{}"
+				}
+				if fnName != "" {
+					msg.ToolCalls = append(msg.ToolCalls, models.OpenAIToolCall{
+						ID:   id,
+						Type: tcType,
+						Function: models.OpenAIToolCallFunction{
+							Name:      fnName,
+							Arguments: fnArgs,
+						},
+					})
+				}
+			}
+		}
+		reqMessages = append(reqMessages, msg)
 	}
 
 	var reqTools []models.OpenAITool

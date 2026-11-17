@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"log"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
@@ -329,7 +331,27 @@ func ExtractMessageContent(msg models.OpenAIMessage) (string, []Image) {
 	return strings.Join(textParts, " "), attachments
 }
 
-func formatMessagePart(msg models.OpenAIMessage, contentStr string) string {
+// BuildToolCallNameMap maps OpenAI tool_call_id values from assistant messages to their function names,
+// so subsequent role="tool" messages that omit `name` still include the tool name in the prompt.
+func BuildToolCallNameMap(messages []models.OpenAIMessage) map[string]string {
+	var names map[string]string
+	for _, msg := range messages {
+		if len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			if tc.ID != "" && tc.Function.Name != "" {
+				if names == nil {
+					names = make(map[string]string)
+				}
+				names[tc.ID] = tc.Function.Name
+			}
+		}
+	}
+	return names
+}
+
+func formatMessagePartWithNames(msg models.OpenAIMessage, contentStr string, toolCallNames map[string]string) string {
 	role := msg.Role
 	if role == "" {
 		role = "user"
@@ -352,7 +374,11 @@ func formatMessagePart(msg models.OpenAIMessage, contentStr string) string {
 		}
 		return fmt.Sprintf("[Assistant]: %s", contentStr)
 	case "tool":
-		return fmt.Sprintf("[Tool result for %s]: %s", msg.Name, contentStr)
+		toolName := strings.TrimSpace(msg.Name)
+		if toolName == "" && msg.ToolCallID != "" && toolCallNames != nil {
+			toolName = toolCallNames[msg.ToolCallID]
+		}
+		return fmt.Sprintf("[Tool result for %s]: %s", toolName, contentStr)
 	default:
 		return contentStr
 	}
@@ -370,15 +396,166 @@ func truncateOneLine(s string, maxRunes int) string {
 	return string(runes[:maxRunes-1]) + "…"
 }
 
+func requiredSetFromSchema(schema map[string]any) map[string]bool {
+	required := make(map[string]bool)
+	if schema == nil {
+		return required
+	}
+	if reqRaw, ok := schema["required"]; ok {
+		switch arr := reqRaw.(type) {
+		case []any:
+			for _, item := range arr {
+				if name, ok := item.(string); ok {
+					required[name] = true
+				}
+			}
+		case []string:
+			for _, name := range arr {
+				required[name] = true
+			}
+		}
+	}
+	return required
+}
+
+// compactSchemaType formats a JSON Schema property type compactly while preserving
+// enum options, array element types, union (anyOf/oneOf) types, and nested object keys
+// required by MCP / WorkBuddy connector tools (e.g. GitHub PRs, Gmail).
+func compactSchemaType(pMap map[string]any, depth int) string {
+	if pMap == nil {
+		return "any"
+	}
+
+	// Extract explicit type (may be string or []any like ["string","null"])
+	pType := ""
+	switch tv := pMap["type"].(type) {
+	case string:
+		pType = tv
+	case []any:
+		var nonNull []string
+		for _, item := range tv {
+			if s, ok := item.(string); ok && s != "" && s != "null" {
+				nonNull = append(nonNull, s)
+			}
+		}
+		if len(nonNull) > 0 {
+			pType = strings.Join(nonNull, "|")
+		}
+	}
+
+	// Handle anyOf / oneOf schemas commonly emitted by Zod / Pydantic MCP connectors
+	if pType == "" {
+		for _, unionKey := range []string{"anyOf", "oneOf"} {
+			if unionList, ok := pMap[unionKey].([]any); ok && len(unionList) > 0 {
+				var unionTypes []string
+				seen := make(map[string]bool)
+				for _, branch := range unionList {
+					bm, ok := branch.(map[string]any)
+					if !ok {
+						continue
+					}
+					if bt, _ := bm["type"].(string); bt == "null" {
+						continue
+					}
+					sub := compactSchemaType(bm, depth+1)
+					if sub != "" && !seen[sub] {
+						seen[sub] = true
+						unionTypes = append(unionTypes, sub)
+					}
+				}
+				if len(unionTypes) > 0 {
+					return strings.Join(unionTypes, "|")
+				}
+			}
+		}
+	}
+
+	if pType == "" {
+		if _, hasProps := pMap["properties"].(map[string]any); hasProps {
+			pType = "object"
+		} else if _, hasItems := pMap["items"]; hasItems {
+			pType = "array"
+		} else {
+			pType = "any"
+		}
+	}
+
+	// Preserve enum values compactly (e.g. string(open|closed))
+	if enumList, ok := pMap["enum"].([]any); ok && len(enumList) > 0 {
+		var vals []string
+		limit := len(enumList)
+		if limit > 8 {
+			limit = 8
+		}
+		for i := 0; i < limit; i++ {
+			vStr := truncateOneLine(fmt.Sprintf("%v", enumList[i]), 24)
+			if vStr != "" {
+				vals = append(vals, vStr)
+			}
+		}
+		if len(vals) > 0 {
+			suffix := strings.Join(vals, "|")
+			if len(enumList) > limit {
+				suffix += "|…"
+			}
+			return fmt.Sprintf("%s(%s)", pType, suffix)
+		}
+	}
+
+	// Preserve array item types (e.g. array[string], array[{path*,content*}])
+	if pType == "array" && depth < 2 {
+		if itemMap, ok := pMap["items"].(map[string]any); ok {
+			return fmt.Sprintf("array[%s]", compactSchemaType(itemMap, depth+1))
+		}
+	}
+
+	// Preserve nested object property keys & required markers (e.g. {owner*,repo*,head*,base*,title*})
+	if pType == "object" && depth < 2 {
+		if nestedProps, ok := pMap["properties"].(map[string]any); ok && len(nestedProps) > 0 {
+			nestedReq := requiredSetFromSchema(pMap)
+			keys := make([]string, 0, len(nestedProps))
+			for k := range nestedProps {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			limit := len(keys)
+			if limit > 12 {
+				limit = 12
+			}
+			parts := make([]string, 0, limit)
+			for i := 0; i < limit; i++ {
+				k := keys[i]
+				label := k
+				if nestedReq[k] {
+					label += "*"
+				}
+				if subMap, ok := nestedProps[k].(map[string]any); ok && depth < 1 {
+					subType := compactSchemaType(subMap, depth+1)
+					if subType != "" && subType != "any" {
+						label += ":" + subType
+					}
+				}
+				parts = append(parts, label)
+			}
+			if len(keys) > limit {
+				parts = append(parts, "…")
+			}
+			return "{" + strings.Join(parts, ",") + "}"
+		}
+	}
+
+	return pType
+}
+
 type compactToolDef struct {
 	Name        string            `json:"name"`
 	Description string            `json:"description,omitempty"`
 	Params      map[string]string `json:"params,omitempty"`
 }
 
-// compactToolDefinitions keeps every tool's name, concise description, and parameter
-// names/types/required markers while shrinking verbose OpenAI JSON Schemas by ~70-85%
-// so the entire # Tool Use header stays inline instead of spilling to a file attachment.
+// compactToolDefinitions keeps every tool's name, concise description, parameter
+// names/types/enums/nested keys, and required (*) markers while shrinking verbose
+// OpenAI JSON Schemas by ~70-85% so the entire # Tool Use header stays inline.
 func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 	fullJSON, _ := json.Marshal(toolDefs)
 	if len(fullJSON) <= 10000 {
@@ -389,21 +566,7 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 		out := make([]compactToolDef, len(toolDefs))
 		for i, fn := range toolDefs {
 			paramsMap, _ := fn.Parameters.(map[string]any)
-			required := make(map[string]bool)
-			if reqRaw, ok := paramsMap["required"]; ok {
-				switch arr := reqRaw.(type) {
-				case []any:
-					for _, item := range arr {
-						if name, ok := item.(string); ok {
-							required[name] = true
-						}
-					}
-				case []string:
-					for _, name := range arr {
-						required[name] = true
-					}
-				}
-			}
+			required := requiredSetFromSchema(paramsMap)
 
 			var params map[string]string
 			if props, ok := paramsMap["properties"].(map[string]any); ok && len(props) > 0 {
@@ -412,9 +575,7 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 					pType := "any"
 					pDesc := ""
 					if pMap, ok := pRaw.(map[string]any); ok {
-						if t, ok := pMap["type"].(string); ok && t != "" {
-							pType = t
-						}
+						pType = compactSchemaType(pMap, 0)
 						if maxParamDesc > 0 {
 							if d, ok := pMap["description"].(string); ok && d != "" {
 								pDesc = truncateOneLine(d, maxParamDesc)
@@ -438,15 +599,21 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 				Params:      params,
 			}
 		}
-		b, _ := json.Marshal(out)
-		return b
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(out)
+		return bytes.TrimSpace(buf.Bytes())
 	}
 
 	compacted := buildCompact(160, 60)
-	if len(compacted) > 24000 {
-		compacted = buildCompact(80, 0)
+	if len(compacted) > 22000 {
+		compacted = buildCompact(100, 32)
 	}
-	log.Printf("Compacted %d tool definitions from %d bytes to %d bytes (preserving parameter names)", len(toolDefs), len(fullJSON), len(compacted))
+	if len(compacted) > 28000 {
+		compacted = buildCompact(72, 0)
+	}
+	log.Printf("Compacted %d tool definitions from %d bytes to %d bytes (preserving parameter names & nested/enum schemas)", len(toolDefs), len(fullJSON), len(compacted))
 	return compacted
 }
 
@@ -473,7 +640,7 @@ func AllowedToolNames(tools []models.OpenAITool) map[string]bool {
 
 // BuildDeltaToolReminder returns a compact one-line reminder for follow-up user messages
 // in a delta-context session so Gemini Enterprise keeps emitting ```tool_call``` blocks
-// instead of refusing as a cloud-only chat.
+// for both local tools and connected WorkBuddy apps/connectors (GitHub, Gmail, etc.).
 func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 	if strChoice, ok := toolChoice.(string); ok && strChoice == "none" {
 		return ""
@@ -481,7 +648,9 @@ func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 	if len(tools) == 0 {
 		return ""
 	}
+	const maxListed = 128
 	var names []string
+	extra := 0
 	seen := make(map[string]bool, len(tools))
 	for _, tool := range tools {
 		name := strings.TrimSpace(tool.Function.Name)
@@ -492,17 +661,22 @@ func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 			continue
 		}
 		seen[name] = true
-		names = append(names, name)
-		if len(names) >= 32 {
-			break
+		if len(names) < maxListed {
+			names = append(names, name)
+		} else {
+			extra++
 		}
 	}
 	if len(names) == 0 {
 		return ""
 	}
+	list := strings.Join(names, ", ")
+	if extra > 0 {
+		list += fmt.Sprintf(" (+%d more)", extra)
+	}
 	return fmt.Sprintf(
-		"[Local client bridge active: to access/modify local files or run commands, output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
-		strings.Join(names, ", "),
+		"[Local client bridge active: to use local tools or connected WorkBuddy apps/connectors (GitHub, Gmail, files, shell, etc.), output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
+		list,
 	)
 }
 
@@ -536,9 +710,9 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
-					"An external local client bridge is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that tool on the user's local machine and returns the output in the next turn as `[Tool result for <name>]`.\n"+
-					"- You DO have local tool execution through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files/shell — call the tools below instead.\n"+
-					"- Call format:\n"+
+					"An external local client bridge (WorkBuddy) is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that local tool or connected app connector (e.g. GitHub, Gmail, local files, shell) on the user's behalf and returns the output in the next turn as `[Tool result for <name>]`.\n"+
+					"- You DO have execution access to ALL tools & connectors listed below through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files, shell, GitHub, email, or external apps — call the matching declared tools below instead.\n"+
+					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch independent calls in one response.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
@@ -549,12 +723,13 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 		}
 	}
 
+	toolCallNames := BuildToolCallNameMap(req.Messages)
 	for _, msg := range req.Messages {
 		contentStr, msgAtts := ExtractMessageContent(msg)
 		if len(msgAtts) > 0 {
 			images = append(images, msgAtts...)
 		}
-		if formatted := formatMessagePart(msg, contentStr); formatted != "" {
+		if formatted := formatMessagePartWithNames(msg, contentStr, toolCallNames); formatted != "" {
 			parts = append(parts, formatted)
 		}
 	}
@@ -565,8 +740,23 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 // MessagesToDeltaPrompt formats only newly appended messages for an ongoing browser-bridge
 // conversation where the open Gemini tab already holds the earlier turns and tool definitions.
 func MessagesToDeltaPrompt(deltaMessages []models.OpenAIMessage, toolChoice any) (string, []Image) {
+	return MessagesToDeltaPromptWithNames(deltaMessages, toolChoice, nil)
+}
+
+// MessagesToDeltaPromptWithNames formats newly appended delta messages while resolving
+// role="tool" tool_call_id references against earlier assistant tool_calls.
+func MessagesToDeltaPromptWithNames(deltaMessages []models.OpenAIMessage, toolChoice any, priorToolNames map[string]string) (string, []Image) {
 	if len(deltaMessages) == 0 {
 		return "", nil
+	}
+
+	// Merge prior tool_call_id -> name mappings with any assistant tool_calls in deltaMessages
+	toolCallNames := make(map[string]string, len(priorToolNames))
+	for k, v := range priorToolNames {
+		toolCallNames[k] = v
+	}
+	for k, v := range BuildToolCallNameMap(deltaMessages) {
+		toolCallNames[k] = v
 	}
 
 	// If the first delta message is the assistant turn Gemini itself just generated,
@@ -583,7 +773,7 @@ func MessagesToDeltaPrompt(deltaMessages []models.OpenAIMessage, toolChoice any)
 		if len(msgAtts) > 0 {
 			attachments = append(attachments, msgAtts...)
 		}
-		if formatted := formatMessagePart(msg, contentStr); formatted != "" {
+		if formatted := formatMessagePartWithNames(msg, contentStr, toolCallNames); formatted != "" {
 			parts = append(parts, formatted)
 		}
 	}
@@ -596,14 +786,97 @@ func MessagesToDeltaPrompt(deltaMessages []models.OpenAIMessage, toolChoice any)
 }
 
 var (
-	reToolCall     = regexp.MustCompile("(?s)\\x60\\x60\\x60tool_call[ \\t]*\\r?\\n(.*?)\\r?\\n[ \\t]*\\x60\\x60\\x60")
-	reXMLToolCall  = regexp.MustCompile(`(?is)<tool_call>\s*(.*?)\s*</tool_call>`)
-	reJSONToolCall = regexp.MustCompile("(?s)\\x60\\x60\\x60json[ \\t]*\\r?\\n(.*?)\\r?\\n[ \\t]*\\x60\\x60\\x60")
+	reToolCall           = regexp.MustCompile("(?s)\\x60\\x60\\x60(?:tool_calls?|function_call)[ \\t]*\\r?\\n(.*?)\\s*\\x60\\x60\\x60")
+	reXMLToolCall        = regexp.MustCompile(`(?is)<tool_call>\s*(.*?)\s*</tool_call>`)
+	reJSONToolCall       = regexp.MustCompile("(?s)\\x60\\x60\\x60json[ \\t]*\\r?\\n(.*?)\\s*\\x60\\x60\\x60")
+	reTrailingJSONCommas = regexp.MustCompile(`,\s*([}\]])`)
 )
 
+type rawToolCallFunction struct {
+	Name       string `json:"name"`
+	Arguments  any    `json:"arguments"`
+	Parameters any    `json:"parameters"`
+	Args       any    `json:"args"`
+	Input      any    `json:"input"`
+}
+
 type rawToolCallPayload struct {
-	Name      string `json:"name"`
-	Arguments any    `json:"arguments"`
+	Name       string               `json:"name"`
+	Tool       string               `json:"tool"`
+	ToolName   string               `json:"tool_name"`
+	Arguments  any                  `json:"arguments"`
+	Parameters any                  `json:"parameters"`
+	Args       any                  `json:"args"`
+	Input      any                  `json:"input"`
+	Function   *rawToolCallFunction `json:"function"`
+	ToolCalls  []rawToolCallPayload `json:"tool_calls"`
+	Calls      []rawToolCallPayload `json:"calls"`
+}
+
+func (p rawToolCallPayload) resolvedName() string {
+	for _, candidate := range []string{p.Name, p.Tool, p.ToolName} {
+		if s := strings.TrimSpace(candidate); s != "" {
+			return s
+		}
+	}
+	if p.Function != nil {
+		return strings.TrimSpace(p.Function.Name)
+	}
+	return ""
+}
+
+func (p rawToolCallPayload) resolvedArgs() any {
+	for _, candidate := range []any{p.Arguments, p.Parameters, p.Args, p.Input} {
+		if candidate != nil {
+			return candidate
+		}
+	}
+	if p.Function != nil {
+		for _, candidate := range []any{p.Function.Arguments, p.Function.Parameters, p.Function.Args, p.Function.Input} {
+			if candidate != nil {
+				return candidate
+			}
+		}
+	}
+	return nil
+}
+
+func decodeToolCallItems(raw json.RawMessage) ([]rawToolCallPayload, bool) {
+	rawTrim := strings.TrimSpace(string(raw))
+	if rawTrim == "" {
+		return nil, true
+	}
+
+	tryUnmarshal := func(data []byte) ([]rawToolCallPayload, bool) {
+		trimmed := strings.TrimSpace(string(data))
+		if strings.HasPrefix(trimmed, "[") {
+			var items []rawToolCallPayload
+			if err := json.Unmarshal(data, &items); err == nil {
+				return items, true
+			}
+			return nil, false
+		}
+		var single rawToolCallPayload
+		if err := json.Unmarshal(data, &single); err == nil {
+			if len(single.ToolCalls) > 0 {
+				return single.ToolCalls, true
+			}
+			if len(single.Calls) > 0 {
+				return single.Calls, true
+			}
+			return []rawToolCallPayload{single}, true
+		}
+		return nil, false
+	}
+
+	if items, ok := tryUnmarshal(raw); ok {
+		return items, true
+	}
+	cleaned := reTrailingJSONCommas.ReplaceAll(raw, []byte("$1"))
+	if string(cleaned) != string(raw) {
+		return tryUnmarshal(cleaned)
+	}
+	return nil, false
 }
 
 func decodeToolCallPayload(content string, requireAllowed bool, allowed map[string]bool) []models.OpenAIToolCall {
@@ -612,65 +885,64 @@ func decodeToolCallPayload(content string, requireAllowed bool, allowed map[stri
 		return nil
 	}
 
-	var out []models.OpenAIToolCall
-	dec := json.NewDecoder(strings.NewReader(trimmed))
-	for {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			if err == io.EOF {
-				break
-			}
-			return nil
-		}
-		rawTrim := strings.TrimSpace(string(raw))
-		if rawTrim == "" {
-			continue
-		}
-
-		var items []rawToolCallPayload
-		if strings.HasPrefix(rawTrim, "[") {
-			if err := json.Unmarshal(raw, &items); err != nil {
+	decodeStream := func(src string) []models.OpenAIToolCall {
+		var out []models.OpenAIToolCall
+		dec := json.NewDecoder(strings.NewReader(src))
+		for {
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				if err == io.EOF {
+					break
+				}
 				return nil
 			}
-		} else {
-			var single rawToolCallPayload
-			if err := json.Unmarshal(raw, &single); err != nil {
+			items, ok := decodeToolCallItems(raw)
+			if !ok {
 				return nil
 			}
-			items = []rawToolCallPayload{single}
-		}
 
-		for _, data := range items {
-			name := strings.TrimSpace(data.Name)
-			if name == "" {
-				if requireAllowed {
+			for _, data := range items {
+				name := data.resolvedName()
+				if name == "" {
+					if requireAllowed {
+						return nil
+					}
+					continue
+				}
+				if requireAllowed && !allowed[name] {
 					return nil
 				}
-				continue
+				argsVal := data.resolvedArgs()
+				var argsStr string
+				if str, ok := argsVal.(string); ok {
+					argsStr = str
+				} else if argsVal != nil {
+					b, _ := json.Marshal(argsVal)
+					argsStr = string(b)
+				} else {
+					argsStr = "{}"
+				}
+				out = append(out, models.OpenAIToolCall{
+					ID:   fmt.Sprintf("call_%s", RandHex(8)),
+					Type: "function",
+					Function: models.OpenAIToolCallFunction{
+						Name:      name,
+						Arguments: argsStr,
+					},
+				})
 			}
-			if requireAllowed && !allowed[name] {
-				return nil
-			}
-			var argsStr string
-			if str, ok := data.Arguments.(string); ok {
-				argsStr = str
-			} else if data.Arguments != nil {
-				b, _ := json.Marshal(data.Arguments)
-				argsStr = string(b)
-			} else {
-				argsStr = "{}"
-			}
-			out = append(out, models.OpenAIToolCall{
-				ID:   fmt.Sprintf("call_%s", RandHex(8)),
-				Type: "function",
-				Function: models.OpenAIToolCallFunction{
-					Name:      name,
-					Arguments: argsStr,
-				},
-			})
 		}
+		return out
 	}
-	return out
+
+	if calls := decodeStream(trimmed); len(calls) > 0 {
+		return calls
+	}
+	cleaned := reTrailingJSONCommas.ReplaceAllString(trimmed, "$1")
+	if cleaned != trimmed {
+		return decodeStream(cleaned)
+	}
+	return nil
 }
 
 func extractBlocksWithRegex(text string, re *regexp.Regexp, requireAllowed bool, allowed map[string]bool) (string, []models.OpenAIToolCall) {

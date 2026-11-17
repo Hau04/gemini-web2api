@@ -545,3 +545,204 @@ func TestParseToolCallsMultiFormatAndJSONSafety(t *testing.T) {
 	}
 }
 
+func TestConnectorSchemaCompactionPreservesNestedObjectEnumsAndAnyOf(t *testing.T) {
+	// Simulate 65+ WorkBuddy local + connector tools exceeding the compaction threshold
+	var tools []models.OpenAITool
+	for i := 0; i < 65; i++ {
+		tools = append(tools, models.OpenAITool{
+			Type: "function",
+			Function: models.OpenAIFunction{
+				Name:        "builtin_tool_" + strings.Repeat("a", 12) + string(rune('a'+(i%26))),
+				Description: "Verbose built-in tool description " + strings.Repeat("details ", 25),
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path": map[string]any{"type": "string", "description": strings.Repeat("file path ", 15)},
+					},
+					"required": []any{"path"},
+				},
+			},
+		})
+	}
+	tools = append(tools, models.OpenAITool{
+		Type: "function",
+		Function: models.OpenAIFunction{
+			Name:        "github_create_pull_request",
+			Description: "Create a pull request in a GitHub repository via WorkBuddy connector.",
+			Parameters: map[string]any{
+				"type":     "object",
+				"required": []any{"input", "merge_method"},
+				"properties": map[string]any{
+					"input": map[string]any{
+						"type":     "object",
+						"required": []any{"owner", "repo", "head", "base", "title"},
+						"properties": map[string]any{
+							"owner": map[string]any{"type": "string"},
+							"repo":  map[string]any{"type": "string"},
+							"head":  map[string]any{"type": "string"},
+							"base":  map[string]any{"type": "string"},
+							"title": map[string]any{"type": "string"},
+							"body":  map[string]any{"anyOf": []any{map[string]any{"type": "string"}, map[string]any{"type": "null"}}},
+						},
+					},
+					"merge_method": map[string]any{
+						"type": "string",
+						"enum": []any{"merge", "squash", "rebase"},
+					},
+					"draft": map[string]any{
+						"anyOf": []any{map[string]any{"type": "boolean"}, map[string]any{"type": "null"}},
+					},
+					"files": map[string]any{
+						"type": "array",
+						"items": map[string]any{
+							"type":     "object",
+							"required": []any{"path", "content"},
+							"properties": map[string]any{
+								"path":    map[string]any{"type": "string"},
+								"content": map[string]any{"type": "string"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	prompt, _, err := MessagesToPrompt(models.OpenAIChatRequest{
+		Messages:   []models.OpenAIMessage{{Role: "user", Content: "Open a PR"}},
+		Tools:      tools,
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("MessagesToPrompt failed: %v", err)
+	}
+
+	for _, want := range []string{
+		"github_create_pull_request",
+		"owner*:string",
+		"repo*:string",
+		"head*:string",
+		"base*:string",
+		"title*:string",
+		"string(merge|squash|rebase)*",
+		"boolean",
+		"array[{content*,path*}]",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("compacted connector schema missing %q; snippet near github_create_pull_request:\n%s",
+				want, prompt[max(0, strings.Index(prompt, "github_create_pull_request")-20):])
+		}
+	}
+}
+
+func TestBuildDeltaToolReminderIncludesConnectorsBeyond32Tools(t *testing.T) {
+	var tools []models.OpenAITool
+	for i := 0; i < 40; i++ {
+		tools = append(tools, models.OpenAITool{
+			Type:     "function",
+			Function: models.OpenAIFunction{Name: "local_tool_" + string(rune('a'+(i%26))) + string(rune('0'+(i/26)))},
+		})
+	}
+	tools = append(tools,
+		models.OpenAITool{Type: "function", Function: models.OpenAIFunction{Name: "github_create_pull_request"}},
+		models.OpenAITool{Type: "function", Function: models.OpenAIFunction{Name: "gmail_trash_message"}},
+	)
+
+	rem := BuildDeltaToolReminder(tools, "auto")
+	if !strings.Contains(rem, "github_create_pull_request") || !strings.Contains(rem, "gmail_trash_message") {
+		t.Fatalf("expected connector tools beyond index 32 in delta reminder, got: %s", rem)
+	}
+}
+
+func TestToolResultResolvesNameFromToolCallID(t *testing.T) {
+	msgs := []models.OpenAIMessage{
+		{Role: "user", Content: "Create a PR on Hau04/demo"},
+		{
+			Role: "assistant",
+			ToolCalls: []models.OpenAIToolCall{
+				{
+					ID:   "call_gh_42",
+					Type: "function",
+					Function: models.OpenAIToolCallFunction{
+						Name:      "github_create_pull_request",
+						Arguments: `{"owner":"Hau04","repo":"demo"}`,
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call_gh_42",
+			Content:    `{"number":7,"url":"https://github.com/Hau04/demo/pull/7"}`,
+		},
+	}
+
+	fullPrompt, _, err := MessagesToPrompt(models.OpenAIChatRequest{Messages: msgs})
+	if err != nil {
+		t.Fatalf("MessagesToPrompt failed: %v", err)
+	}
+	if !strings.Contains(fullPrompt, "[Tool result for github_create_pull_request]:") {
+		t.Errorf("expected tool_call_id to resolve tool name in full prompt, got:\n%s", fullPrompt)
+	}
+
+	deltaPrompt, _ := MessagesToDeltaPromptWithNames(msgs[2:], "auto", BuildToolCallNameMap(msgs[:2]))
+	if !strings.Contains(deltaPrompt, "[Tool result for github_create_pull_request]:") {
+		t.Errorf("expected tool_call_id to resolve tool name in delta prompt, got:\n%s", deltaPrompt)
+	}
+}
+
+func TestParseToolCallsConnectorVariants(t *testing.T) {
+	allowed := AllowedToolNames([]models.OpenAITool{
+		{Type: "function", Function: models.OpenAIFunction{Name: "github_create_pull_request"}},
+		{Type: "function", Function: models.OpenAIFunction{Name: "gmail_trash_message"}},
+	})
+
+	cases := []struct {
+		name      string
+		raw       string
+		wantName  string
+		wantInArg string
+	}{
+		{
+			name:      "parameters instead of arguments",
+			raw:       "```tool_call\n{\"name\":\"github_create_pull_request\",\"parameters\":{\"owner\":\"Hau04\",\"repo\":\"demo\",\"title\":\"Fix\"}}\n```",
+			wantName:  "github_create_pull_request",
+			wantInArg: `"owner":"Hau04"`,
+		},
+		{
+			name:      "nested OpenAI function wrapper with trailing comma",
+			raw:       "```tool_calls\n{\"function\":{\"name\":\"github_create_pull_request\",\"arguments\":{\"owner\":\"Hau04\",\"repo\":\"demo\",}}}\n```",
+			wantName:  "github_create_pull_request",
+			wantInArg: `"repo":"demo"`,
+		},
+		{
+			name:      "function_call fence with input key and no newline before closing fence",
+			raw:       "```function_call\n{\"tool\":\"gmail_trash_message\",\"input\":{\"id\":\"msg_123\"}}```",
+			wantName:  "gmail_trash_message",
+			wantInArg: `"id":"msg_123"`,
+		},
+		{
+			name:      "tool_calls wrapper object in json fence",
+			raw:       "```json\n{\"tool_calls\":[{\"name\":\"github_create_pull_request\",\"args\":{\"head\":\"feat\",\"base\":\"main\"}}]}\n```",
+			wantName:  "github_create_pull_request",
+			wantInArg: `"base":"main"`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, calls := ParseToolCallsWithAllowed(tc.raw, allowed)
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 tool call, got %d (%+v)", len(calls), calls)
+			}
+			if calls[0].Function.Name != tc.wantName {
+				t.Errorf("got name %q, want %q", calls[0].Function.Name, tc.wantName)
+			}
+			if !strings.Contains(calls[0].Function.Arguments, tc.wantInArg) {
+				t.Errorf("got arguments %q, want substring %q", calls[0].Function.Arguments, tc.wantInArg)
+			}
+		})
+	}
+}
+
+

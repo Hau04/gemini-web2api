@@ -592,6 +592,8 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 		h.Write([]byte{0})
 		h.Write([]byte(msg.Name))
 		h.Write([]byte{0})
+		h.Write([]byte(msg.ToolCallID))
+		h.Write([]byte{0})
 		text, atts := format.ExtractMessageContent(msg)
 		h.Write([]byte(text))
 		for _, att := range atts {
@@ -681,7 +683,8 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		if matchedPrefix > 1 {
 			matchedMsgs := matchedPrefix - 1
 			if matchedMsgs < len(req.Messages) {
-				deltaPrompt, deltaAtts := format.MessagesToDeltaPrompt(req.Messages[matchedMsgs:], req.ToolChoice)
+				priorToolNames := format.BuildToolCallNameMap(req.Messages[:matchedMsgs])
+				deltaPrompt, deltaAtts := format.MessagesToDeltaPromptWithNames(req.Messages[matchedMsgs:], req.ToolChoice, priorToolNames)
 				if strings.TrimSpace(deltaPrompt) != "" {
 					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
 					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
