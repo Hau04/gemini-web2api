@@ -1,6 +1,7 @@
 package format
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -501,10 +502,10 @@ func compactSchemaType(pMap map[string]any, depth int) string {
 		}
 	}
 
-	// Preserve array item types (e.g. array<string>, array<{path*,content*}>)
+	// Preserve array item types (e.g. array[string], array[{path*,content*}])
 	if pType == "array" && depth < 2 {
 		if itemMap, ok := pMap["items"].(map[string]any); ok {
-			return fmt.Sprintf("array<%s>", compactSchemaType(itemMap, depth+1))
+			return fmt.Sprintf("array[%s]", compactSchemaType(itemMap, depth+1))
 		}
 	}
 
@@ -598,8 +599,11 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 				Params:      params,
 			}
 		}
-		b, _ := json.Marshal(out)
-		return b
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(out)
+		return bytes.TrimSpace(buf.Bytes())
 	}
 
 	compacted := buildCompact(160, 60)
@@ -671,7 +675,7 @@ func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 		list += fmt.Sprintf(" (+%d more)", extra)
 	}
 	return fmt.Sprintf(
-		"[Client bridge active: to use local tools or connected WorkBuddy apps/connectors (GitHub, Gmail, files, shell, etc.), output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
+		"[Local client bridge active: to use local tools or connected WorkBuddy apps/connectors (GitHub, Gmail, files, shell, etc.), output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
 		list,
 	)
 }
@@ -706,7 +710,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
-					"An external client bridge (WorkBuddy) is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that local tool or connected app connector (e.g. GitHub, Gmail, local files, shell) on the user's behalf and returns the output in the next turn as `[Tool result for <name>]`.\n"+
+					"An external local client bridge (WorkBuddy) is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that local tool or connected app connector (e.g. GitHub, Gmail, local files, shell) on the user's behalf and returns the output in the next turn as `[Tool result for <name>]`.\n"+
 					"- You DO have execution access to ALL tools & connectors listed below through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files, shell, GitHub, email, or external apps — call the matching declared tools below instead.\n"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+

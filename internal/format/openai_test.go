@@ -626,7 +626,7 @@ func TestConnectorSchemaCompactionPreservesNestedObjectEnumsAndAnyOf(t *testing.
 		"title*:string",
 		"string(merge|squash|rebase)*",
 		"boolean",
-		"array<{content*,path*}>",
+		"array[{content*,path*}]",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("compacted connector schema missing %q; snippet near github_create_pull_request:\n%s",
