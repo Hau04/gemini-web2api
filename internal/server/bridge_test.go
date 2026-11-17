@@ -787,8 +787,7 @@ func TestBridgeDeduplicatesSameFileFromAPIAndLocalPath(t *testing.T) {
 	pdfB64 := base64.StdEncoding.EncodeToString(pdfBytes)
 
 	cfg := config.Default()
-	cfg.LiveBridge = true
-	cfg.BridgeCooldownMs = 0
+	cfg.LogRequests = false
 	cfg.BridgeMinIntervalMs = 0
 	cfg.BridgeJitterMs = 0
 	cfg.BridgeMaxPer10Min = 0
@@ -853,8 +852,7 @@ func TestBridgeHistoricalAPIAttachmentNotReuploadedWhenSystemPromptChanges(t *te
 	pdfB64 := base64.StdEncoding.EncodeToString(pdfBytes)
 
 	cfg := config.Default()
-	cfg.LiveBridge = true
-	cfg.BridgeCooldownMs = 0
+	cfg.LogRequests = false
 	cfg.BridgeMinIntervalMs = 0
 	cfg.BridgeJitterMs = 0
 	cfg.BridgeMaxPer10Min = 0
