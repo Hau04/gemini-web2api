@@ -1266,6 +1266,67 @@
     return null;
   }
 
+  function readInputValue(el) {
+    if (!el) return "";
+    if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      return String(el.value || "");
+    }
+    return String(el.textContent || el.innerText || "");
+  }
+
+  function isButtonDisabled(btn) {
+    if (!btn) return true;
+    if (btn.disabled) return true;
+    if (btn.getAttribute) {
+      if (btn.getAttribute("disabled") !== null) return true;
+      if (String(btn.getAttribute("aria-disabled") || "").toLowerCase() === "true") return true;
+    }
+    if (btn.classList) {
+      if (
+        btn.classList.contains("disabled") ||
+        btn.classList.contains("mat-button-disabled") ||
+        btn.classList.contains("mdc-button--disabled")
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function buildNoResponseError(opts) {
+    const o = opts || {};
+    if (o.explicitError) return o.explicitError;
+    if (o.netError) return o.netError;
+    if (o.netDiagnostic) {
+      return `Gemini Enterprise did not return an answer: ${o.netDiagnostic}`;
+    }
+    if (o.netSkipped) {
+      const reasons = Array.isArray(o.skippedReasons) && o.skippedReasons.length > 0
+        ? o.skippedReasons.join(", ")
+        : "unspecified policy or connector skip";
+      return `Gemini Enterprise skipped answering this prompt (${reasons}).`;
+    }
+    if (o.netFailed) {
+      return "Gemini Enterprise returned answer state FAILED. Check the Gemini tab or retry.";
+    }
+    if (o.netStarted) {
+      if (o.netDone) {
+        return "Gemini stream completed with no answer text (thinking/routing only or blocked on page). Check the Gemini tab.";
+      }
+      return "Timed out waiting for Gemini to finish thinking/responding. Check the Gemini tab or retry.";
+    }
+    if (o.inputTruncated) {
+      return `Prompt (${o.promptLength || 0} chars) exceeded the page input maxLength (${o.inputMaxLength || 0}) and was not submitted.`;
+    }
+    if (o.inputEmpty) {
+      return "Could not insert prompt into Gemini's chat box (page may still be loading or editor rejected input). Refresh the Gemini tab and retry.";
+    }
+    if (o.submitSuccess === false) {
+      return `Prompt (${o.promptLength || 0} chars) was placed in Gemini's box but could not be submitted (Send button stayed disabled or prompt exceeded Gemini's input limit). Check the Gemini tab or lower bridge_spillover_chars.`;
+    }
+    return "Model did not respond. Please verify the prompt was sent on the page or refresh.";
+  }
+
   // Export pure/DOM helpers for Node.js unit testing
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
@@ -1299,7 +1360,10 @@
       findAttachButton,
       findUploadMenuOption,
       findNewChatButton,
-      findSidebarToggleButton
+      findSidebarToggleButton,
+      readInputValue,
+      isButtonDisabled,
+      buildNoResponseError
     };
     return;
   }
@@ -1444,8 +1508,12 @@
       cap.active = false;
       cap.thinking = false;
       cap.done = true;
+      cap.failed = Boolean(data.failed);
       cap.skipped = Boolean(data.skipped);
       cap.skippedReasons = data.skippedReasons || [];
+      if (data.diagnostic && !cap.diagnostic) {
+        cap.diagnostic = String(data.diagnostic);
+      }
       cap.notify();
     } else if (type === "error") {
       cap.active = false;
@@ -1830,6 +1898,7 @@
 
   function findAllCandidateSendButtons(inputEl) {
     const candidates = [];
+    const btnClosestSel = 'button, [role="button"], md-icon-button, md-filled-icon-button, md-filled-button, md-fab';
 
     // Priority 1: Icons with arrow_upward / send / arrow_forward
     const iconCandidates = queryDeep("mat-icon, md-icon, svg, [data-icon], .material-icons, .google-symbols, span, i");
@@ -1846,20 +1915,26 @@
         dataIcon.includes("arrow-up") || dataIcon.includes("send") ||
         aria.includes("send") || aria.includes("submit")
       ) {
-        const btn = closestDeep(icon, 'button, [role="button"]') || icon.parentElement;
+        const btn = closestDeep(icon, btnClosestSel) || icon.parentElement;
         if (btn && isVisible(btn) && !isNotSendButton(btn) && !candidates.includes(btn)) {
           candidates.push(btn);
         }
       }
     }
 
-    // Priority 2: Standard button selectors
+    // Priority 2: Standard button & Material Web button selectors
     const btnSelectors = [
       'button[aria-label*="Send" i]',
       'button[aria-label*="发送" i]',
       'button[aria-label*="Submit" i]',
       'button[mattooltip*="Send" i]',
       'button[mattooltip*="Submit" i]',
+      'md-icon-button[aria-label*="Send" i]',
+      'md-icon-button[aria-label*="Submit" i]',
+      'md-filled-icon-button[aria-label*="Send" i]',
+      'md-filled-icon-button[aria-label*="Submit" i]',
+      '[role="button"][aria-label*="Send" i]',
+      '[role="button"][aria-label*="Submit" i]',
       "button.send-button",
       'button[type="submit"]'
     ];
@@ -1877,10 +1952,7 @@
 
   function isInputCleared(inputArea) {
     if (!inputArea) return false;
-    const val = (inputArea.tagName === "TEXTAREA" || inputArea.tagName === "INPUT")
-      ? (inputArea.value || "")
-      : (inputArea.textContent || "");
-    return val.trim().length === 0;
+    return readInputValue(inputArea).trim().length === 0;
   }
 
   function isGenerating(netCapture) {
@@ -1910,7 +1982,7 @@
       const name = (icon.getAttribute("data-mat-icon-name") || "").toLowerCase();
       const txt = (icon.innerText || icon.textContent || "").trim().toLowerCase();
       if (name === "stop" || name === "stop_circle" || txt === "stop" || txt === "stop_circle") {
-        const parentBtn = closestDeep(icon, 'button, [role="button"]');
+        const parentBtn = closestDeep(icon, 'button, [role="button"], md-icon-button, md-filled-icon-button');
         if (parentBtn && isVisible(parentBtn)) {
           return true;
         }
@@ -1935,16 +2007,38 @@
     return false;
   }
 
+  function selectAllInContentEditable(el) {
+    try {
+      const root = el.getRootNode ? el.getRootNode() : document;
+      const sel = (root && typeof root.getSelection === "function" && root.getSelection()) || window.getSelection();
+      if (sel && document.createRange) {
+        const range = document.createRange();
+        range.selectNodeContents(el);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    } catch (e) {}
+  }
+
   function setInputValue(el, val) {
-    el.focus();
+    if (!el) return { ok: false, length: 0, truncated: false, maxLength: 0 };
+    const textVal = String(val || "");
+    try { el.focus(); } catch (e) {}
+
     if (el.tagName === "TEXTAREA" || el.tagName === "INPUT") {
+      const maxLen = typeof el.maxLength === "number" && el.maxLength > 0 ? el.maxLength : 0;
+      const truncated = maxLen > 0 && textVal.length > maxLen;
+      if (truncated) {
+        console.warn(`[Web2API Bridge] Input maxLength (${maxLen}) is smaller than prompt (${textVal.length} chars)`);
+      }
+
       try {
         el.dispatchEvent(new InputEvent("beforeinput", {
           bubbles: true,
           cancelable: true,
           composed: true,
           inputType: "insertFromPaste",
-          data: val
+          data: textVal
         }));
       } catch (e) {}
 
@@ -1953,9 +2047,9 @@
         : window.HTMLInputElement.prototype;
       const setMethod = Object.getOwnPropertyDescriptor(proto, "value")?.set;
       if (setMethod) {
-        setMethod.call(el, val);
+        setMethod.call(el, textVal);
       } else {
-        el.value = val;
+        el.value = textVal;
       }
 
       el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
@@ -1965,69 +2059,116 @@
           cancelable: true,
           composed: true,
           inputType: "insertFromPaste",
-          data: val
+          data: textVal
         }));
       } catch (e) {}
       el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true, composed: true }));
-    } else {
-      el.focus();
-      try {
-        document.execCommand("selectAll", false, null);
-        document.execCommand("delete", false, null);
-      } catch (e) {}
-      let ok = false;
-      try {
-        ok = document.execCommand("insertText", false, val);
-      } catch (e) {}
-      if (!ok || !el.textContent.trim()) {
-        // Escape HTML so WorkBuddy's XML tags (<instructions>, <tools>, etc.) are preserved verbatim
-        el.innerHTML = "<p>" + escapeHtml(val).replace(/\n/g, "<br>") + "</p>";
-      }
-      el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
-      try {
-        el.dispatchEvent(new InputEvent("input", {
+
+      const cur = readInputValue(el);
+      return { ok: cur.trim().length > 0, length: cur.length, truncated, maxLength: maxLen };
+    }
+
+    // Contenteditable editors (ProseMirror on Gemini Enterprise, Quill/rich-textarea on Gemini Web)
+    selectAllInContentEditable(el);
+    try {
+      document.execCommand("delete", false, null);
+    } catch (e) {}
+
+    // 1. Synthetic ClipboardEvent("paste") — natively updates ProseMirror/Quill/Lit state
+    // even inside Shadow DOM or background tabs!
+    let inserted = false;
+    try {
+      if (typeof DataTransfer !== "undefined" && typeof ClipboardEvent !== "undefined") {
+        const dt = new DataTransfer();
+        dt.setData("text/plain", textVal);
+        const pasteEv = new ClipboardEvent("paste", {
           bubbles: true,
           cancelable: true,
           composed: true,
-          inputType: "insertText",
-          data: val
-        }));
+          clipboardData: dt
+        });
+        el.dispatchEvent(pasteEv);
+        if (readInputValue(el).trim().length >= Math.min(textVal.trim().length, 16)) {
+          inserted = true;
+        }
+      }
+    } catch (e) {}
+
+    // 2. Fallback: execCommand("insertText")
+    if (!inserted) {
+      selectAllInContentEditable(el);
+      try {
+        document.execCommand("insertText", false, textVal);
+        if (readInputValue(el).trim().length >= Math.min(textVal.trim().length, 16)) {
+          inserted = true;
+        }
       } catch (e) {}
     }
+
+    // 3. Final fallback: escaped HTML + InputEvent
+    if (!inserted) {
+      // Escape HTML so WorkBuddy's XML tags (<instructions>, <tools>, etc.) are preserved verbatim
+      el.innerHTML = "<p>" + escapeHtml(textVal).replace(/\n/g, "<br>") + "</p>";
+    }
+
+    el.dispatchEvent(new Event("input", { bubbles: true, cancelable: true, composed: true }));
+    try {
+      el.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        inputType: "insertFromPaste",
+        data: textVal
+      }));
+    } catch (e) {}
+    el.dispatchEvent(new Event("change", { bubbles: true, cancelable: true, composed: true }));
+
+    const finalVal = readInputValue(el);
+    return { ok: finalVal.trim().length > 0, length: finalVal.length, truncated: false, maxLength: 0 };
   }
 
   async function submitPrompt(inputArea, netCapture) {
     closeAnyOpenDropdown();
-    inputArea.focus();
+    try { inputArea.focus(); } catch (e) {}
 
     const didSubmit = () =>
       (netCapture && netCapture.started) || isInputCleared(inputArea) || isGenerating(netCapture);
 
-    const candidateBtns = findAllCandidateSendButtons(inputArea);
-    console.log("[Web2API Bridge] Candidate send buttons found:", candidateBtns.length);
+    // Wait briefly (up to 900ms) for Angular/Lit/ProseMirror validation to enable the Send button
+    // after pasting a large prompt, rather than clicking a still-disabled button immediately.
+    let candidateBtns = findAllCandidateSendButtons(inputArea);
+    const enableDeadline = Date.now() + 900;
+    while (Date.now() < enableDeadline) {
+      candidateBtns = findAllCandidateSendButtons(inputArea);
+      if (candidateBtns.some((b) => !isButtonDisabled(b))) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 90));
+    }
 
-    // Stage 1: Try clicking candidate send buttons
-    for (const btn of candidateBtns) {
+    const enabledBtns = candidateBtns.filter((b) => !isButtonDisabled(b));
+    console.log(
+      "[Web2API Bridge] Candidate send buttons found:",
+      candidateBtns.length,
+      "enabled:",
+      enabledBtns.length
+    );
+
+    // Stage 1: Try clicking natively-enabled candidate send buttons first
+    for (const btn of enabledBtns) {
       if (didSubmit()) return true;
-      try {
-        btn.disabled = false;
-        btn.removeAttribute("disabled");
-        btn.setAttribute("aria-disabled", "false");
-        btn.classList.remove("disabled", "mat-button-disabled", "mdc-button--disabled");
-      } catch (e) {}
-
       simulateClick(btn);
-      await new Promise((r) => setTimeout(r, 350));
+      await new Promise((r) => setTimeout(r, 400));
 
       if (didSubmit()) {
-        console.log("[Web2API Bridge] Prompt submitted via send button click");
+        console.log("[Web2API Bridge] Prompt submitted via enabled send button click");
         return true;
       }
     }
 
-    // Stage 2: Dispatch Enter key events
+    // Stage 2: Dispatch Enter key events (and Ctrl/Meta+Enter for multiline composers)
     console.log("[Web2API Bridge] Dispatching Enter key...");
-    inputArea.focus();
+    try { inputArea.focus(); } catch (e) {}
     const enterOpts = {
       key: "Enter",
       code: "Enter",
@@ -2048,9 +2189,23 @@
       inputArea.parentElement.dispatchEvent(new KeyboardEvent("keyup", enterOpts));
     }
 
-    await new Promise((r) => setTimeout(r, 350));
+    await new Promise((r) => setTimeout(r, 400));
     if (didSubmit()) {
       console.log("[Web2API Bridge] Prompt submitted via Enter key");
+      return true;
+    }
+
+    // Stage 2b: Ctrl+Enter / Cmd+Enter fallback
+    const isMac = /mac/i.test(navigator.platform || "");
+    const modEnterOpts = Object.assign({}, enterOpts, {
+      ctrlKey: !isMac,
+      metaKey: isMac
+    });
+    inputArea.dispatchEvent(new KeyboardEvent("keydown", modEnterOpts));
+    inputArea.dispatchEvent(new KeyboardEvent("keyup", modEnterOpts));
+    await new Promise((r) => setTimeout(r, 300));
+    if (didSubmit()) {
+      console.log("[Web2API Bridge] Prompt submitted via Ctrl/Cmd+Enter");
       return true;
     }
 
@@ -2064,12 +2219,18 @@
       if (didSubmit()) return true;
     }
 
-    // Stage 4: Final click retry
+    // Stage 4: Final click retry (including previously disabled buttons as last resort)
     for (const btn of candidateBtns) {
       if (didSubmit()) return true;
+      try {
+        btn.disabled = false;
+        btn.removeAttribute("disabled");
+        btn.setAttribute("aria-disabled", "false");
+        btn.classList.remove("disabled", "mat-button-disabled", "mdc-button--disabled");
+      } catch (e) {}
       simulateClick(btn);
+      await new Promise((r) => setTimeout(r, 250));
     }
-    await new Promise((r) => setTimeout(r, 300));
     return didSubmit();
   }
 
@@ -2362,8 +2523,10 @@
       done: false,
       error: null,
       rateLimited: false,
+      failed: false,
       skipped: false,
       skippedReasons: [],
+      diagnostic: "",
       onUpdate(fn) {
         listeners.push(fn);
       },
@@ -2416,7 +2579,7 @@
     }
 
     if (triggered) {
-      const deadline = Date.now() + 2400;
+      const deadline = Date.now() + 2600;
       const prevInput = lastFocusedInput;
       while (Date.now() < deadline) {
         const curUrl = `${location.pathname}${location.search}`;
@@ -2429,7 +2592,8 @@
         } catch (e) {}
         await new Promise((r) => setTimeout(r, 100));
       }
-      await new Promise((r) => setTimeout(r, 350));
+      // Give the SPA route transition time to unmount old composer & bind the fresh composer
+      await new Promise((r) => setTimeout(r, 550));
     } else {
       console.warn("[Web2API Bridge] Could not locate New Chat button on page; continuing on current view.");
     }
@@ -2441,6 +2605,20 @@
     hadResponsesInConv = false;
     hadDomResponsesInConv = false;
     return triggered;
+  }
+
+  async function ensureLiveInputArea(currentInput, waitMs) {
+    if (
+      currentInput &&
+      isEditable(currentInput) &&
+      containsDeep(document, currentInput) &&
+      isVisible(currentInput) &&
+      !currentInput.disabled &&
+      !currentInput.readOnly
+    ) {
+      return currentInput;
+    }
+    return await findChatInput(waitMs || 4000);
   }
 
   async function handlePromptRequest(reqId, prompt, model, attachments, newChat) {
@@ -2455,15 +2633,18 @@
       }
     }
 
-    // A. Switch model dropdown if the requested model specifies a known family
+    // A. Wait for chat input to be mounted & ready (crucial right after New Chat SPA transition)
+    let inputArea = await findChatInput(5000);
+
+    // B. Switch model dropdown if the requested model specifies a known family
     try {
       await ensureModelSelected(model);
     } catch (e) {
       console.warn("[Web2API Bridge] Error selecting model:", e);
     }
 
-    // B. Locate Prompt Input Area
-    const inputArea = await findChatInput(4000);
+    // Re-verify inputArea in case model switching re-rendered the composer
+    inputArea = await ensureLiveInputArea(inputArea, 3500);
 
     // B2. Directly upload any attached PDFs/documents/images to the Gemini page
     let effectivePrompt = prompt;
@@ -2485,6 +2666,7 @@
       } catch (e) {
         console.warn("[Web2API Bridge] Attachment upload threw error:", e);
       }
+      inputArea = await ensureLiveInputArea(inputArea, 3000);
     }
 
     // Snapshot exact pre-existing response elements BEFORE submitting
@@ -2495,15 +2677,49 @@
     activeNetCapture = netCapture;
 
     try {
-      setInputValue(inputArea, effectivePrompt);
+      let inputResult = setInputValue(inputArea, effectivePrompt);
+      if (!inputResult.ok) {
+        console.warn("[Web2API Bridge] Initial setInputValue left input empty; re-locating composer and retrying...");
+        await new Promise((r) => setTimeout(r, 400));
+        lastFocusedInput = null;
+        inputArea = await findChatInput(3500);
+        inputResult = setInputValue(inputArea, effectivePrompt);
+      }
+
       // Small humanized jitter before clicking Send to avoid robotic fixed timing
       await new Promise((r) => setTimeout(r, 220 + Math.floor(Math.random() * 280)));
 
-      const submitSuccess = await submitPrompt(inputArea, netCapture);
-      console.log("[Web2API Bridge] submitPrompt result:", submitSuccess, "netStarted:", netCapture.started);
+      let submitSuccess = await submitPrompt(inputArea, netCapture);
+      if (!submitSuccess && !netCapture.started && !isGenerating(netCapture)) {
+        // Give async network requests a brief grace window, then retry submission once
+        await new Promise((r) => setTimeout(r, 500));
+        if (!netCapture.started && !isGenerating(netCapture) && !isInputCleared(inputArea)) {
+          console.warn("[Web2API Bridge] First submit attempt did not trigger generation — retrying once...");
+          inputArea = await ensureLiveInputArea(inputArea, 2500);
+          if (readInputValue(inputArea).trim().length === 0) {
+            inputResult = setInputValue(inputArea, effectivePrompt);
+            await new Promise((r) => setTimeout(r, 350));
+          }
+          submitSuccess = await submitPrompt(inputArea, netCapture);
+        } else {
+          submitSuccess = true;
+        }
+      }
+      console.log(
+        "[Web2API Bridge] submitPrompt result:",
+        submitSuccess,
+        "netStarted:",
+        netCapture.started,
+        "promptChars:",
+        effectivePrompt.length
+      );
 
       // C. Watch for Streaming Response (Network primary, DOM fallback)
-      await observeResponseStream(reqId, inputArea, effectivePrompt, baselineMap, netCapture);
+      await observeResponseStream(reqId, inputArea, effectivePrompt, baselineMap, netCapture, {
+        submitSuccess,
+        inputResult,
+        promptLength: effectivePrompt.length
+      });
       lastConvUrlKey = `${location.pathname}${location.search}`;
       hadResponsesInConv = true;
       try {
@@ -2528,7 +2744,8 @@
     }
   }
 
-  function observeResponseStream(reqId, inputArea, prompt, baselineMap, netCapture) {
+  function observeResponseStream(reqId, inputArea, prompt, baselineMap, netCapture, submitMeta) {
+    const meta = submitMeta || {};
     return new Promise((resolve) => {
       let sentText = "";
       let lastChangeTime = Date.now();
@@ -2594,7 +2811,21 @@
         }
 
         if (!sentText.trim()) {
-          const errMsg = explicitError || netCapture.error || "Model did not respond. Please verify the prompt was sent on the page or refresh.";
+          const errMsg = buildNoResponseError({
+            explicitError,
+            netError: netCapture.error,
+            netDiagnostic: netCapture.diagnostic,
+            netSkipped: netCapture.skipped,
+            skippedReasons: netCapture.skippedReasons,
+            netFailed: netCapture.failed,
+            netStarted: netCapture.started,
+            netDone: netCapture.done,
+            submitSuccess: meta.submitSuccess,
+            inputEmpty: meta.inputResult && !meta.inputResult.ok,
+            inputTruncated: meta.inputResult && meta.inputResult.truncated,
+            inputMaxLength: meta.inputResult && meta.inputResult.maxLength,
+            promptLength: meta.promptLength || (prompt ? prompt.length : 0)
+          });
           const rateLimited = Boolean(explicitRateLimited || netCapture.rateLimited || isRateLimitMessage(errMsg));
           if (rateLimited) {
             setStatus("disconnected", "Web2API: Rate limit detected — cooling down 🛡️");
@@ -2632,6 +2863,7 @@
         // wait for it rather than scraping partial/header DOM text prematurely.
         if (netCapture.active) {
           sawGenerating = true;
+          netDoneAt = 0;
           if (netCapture.thinking) {
             setStatus("busy", "Web2API: Thinking... ⚡");
           }

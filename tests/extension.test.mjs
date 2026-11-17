@@ -1032,6 +1032,86 @@ test("findNewChatButton finds Shadow DOM New Chat button and ignores external/de
   assert.equal(bridge.findNewChatButton(doc), newChatBtn);
 });
 
+test("buildNoResponseError reports specific root cause for submit/skip/auth/timeout failures", () => {
+  assert.match(
+    bridge.buildNoResponseError({ submitSuccess: false, promptLength: 38000 }),
+    /38000 chars.*could not be submitted/i
+  );
+  assert.match(
+    bridge.buildNoResponseError({ inputTruncated: true, promptLength: 25000, inputMaxLength: 10000 }),
+    /exceeded.*maxLength/i
+  );
+  assert.match(
+    bridge.buildNoResponseError({ inputEmpty: true }),
+    /Could not insert prompt/i
+  );
+  assert.match(
+    bridge.buildNoResponseError({ netSkipped: true, skippedReasons: ["CUSTOMER_POLICY_VIOLATION"] }),
+    /CUSTOMER_POLICY_VIOLATION/
+  );
+  assert.match(
+    bridge.buildNoResponseError({ netDiagnostic: "Gemini Enterprise requested connector authorization" }),
+    /connector authorization/i
+  );
+  assert.match(
+    bridge.buildNoResponseError({ netStarted: true, netDone: true }),
+    /no answer text/i
+  );
+});
+
+test("discovery_json processor extracts content.parts[] and captures connectorAuthError diagnostic", () => {
+  const events = [];
+  const proc = netHook.createStreamProcessor(
+    "discovery_json",
+    "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+    (type, payload) => events.push({ type, payload })
+  );
+
+  proc.feed(JSON.stringify([{
+    streamAssistResponse: {
+      answer: {
+        state: "IN_PROGRESS",
+        replies: [{
+          groundedContent: {
+            content: {
+              role: "model",
+              parts: [
+                { thought: true, text: "thinking about mailbox" },
+                { text: "Checking your mail via local tool." }
+              ]
+            }
+          }
+        }]
+      }
+    }
+  }]));
+  proc.finish();
+
+  const deltas = events.filter((e) => e.type === "delta").map((e) => e.payload.text).join("");
+  assert.equal(deltas, "Checking your mail via local tool.");
+
+  // Case 2: connectorAuthError returned with empty replies -> diagnostic surfaced on done
+  const authEvents = [];
+  const authProc = netHook.createStreamProcessor(
+    "discovery_json",
+    "https://content-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+    (type, payload) => authEvents.push({ type, payload })
+  );
+  authProc.feed(JSON.stringify([{
+    streamAssistResponse: {
+      connectorAuthError: { message: "Needs Gmail OAuth" },
+      answer: { state: "SKIPPED", assistSkippedReasons: ["CONNECTOR_AUTH_REQUIRED"] }
+    }
+  }]));
+  authProc.finish();
+
+  const doneEv = authEvents.find((e) => e.type === "done");
+  assert.ok(doneEv);
+  assert.equal(doneEv.payload.skipped, true);
+  assert.match(doneEv.payload.diagnostic, /connector authorization/i);
+});
+
+
 
 
 

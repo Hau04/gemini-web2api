@@ -221,7 +221,8 @@
       hasText: false,
       failed: false,
       skipped: false,
-      skippedReasons: []
+      skippedReasons: [],
+      diagnostic: ""
     };
 
     function emitIncrementalOrDedup(chunkText, isFinalState) {
@@ -247,8 +248,17 @@
     function processDiscoveryObject(obj) {
       if (!obj || typeof obj !== "object") return;
 
+      // Capture top-level Google RPC error objects returned inside a streaming response
+      if (obj.error && typeof obj.error === "object" && typeof obj.error.message === "string" && obj.error.message.trim()) {
+        state.failed = true;
+        state.diagnostic = obj.error.message.trim().slice(0, 240);
+      }
+
       // 1. StreamAssistResponse (widgetStreamAssist or streamAssist or answerQuery)
       const sar = obj.streamAssistResponse || obj.stream_assist_response || obj;
+      if (sar && typeof sar === "object" && (sar.connectorAuthError || sar.connector_auth_error)) {
+        state.diagnostic = "Gemini Enterprise requested connector authorization (e.g., Workspace/Gmail OAuth)";
+      }
       const answer = sar && (sar.answer || (sar.answerQueryResponse && sar.answerQueryResponse.answer));
 
       if (answer && typeof answer === "object") {
@@ -284,6 +294,22 @@
                 chunkAnswerText += cleaned;
               } else {
                 sawThought = true;
+              }
+            } else if (Array.isArray(content.parts) && content.parts.length > 0) {
+              for (const part of content.parts) {
+                if (!part || typeof part !== "object") continue;
+                if (part.thought === true) {
+                  sawThought = true;
+                  continue;
+                }
+                if (typeof part.text === "string" && part.text.length > 0) {
+                  const cleaned = cleanDiscoveryText(part.text);
+                  if (cleaned.length > 0) {
+                    chunkAnswerText += cleaned;
+                  } else {
+                    sawThought = true;
+                  }
+                }
               }
             }
           }
@@ -364,7 +390,8 @@
             hasText: state.hasText,
             failed: state.failed,
             skipped: state.skipped,
-            skippedReasons: state.skippedReasons
+            skippedReasons: state.skippedReasons,
+            diagnostic: state.diagnostic
           });
         }
       };
@@ -548,14 +575,34 @@
 
       const { streamId, processor } = startStream(kind, url);
 
+      function summarizeErrorBody(rawText) {
+        if (!rawText) return "";
+        const cleaned = String(rawText).replace(/^\)\]\}'\s*/, "").trim();
+        try {
+          const parsed = JSON.parse(cleaned);
+          const errObj = Array.isArray(parsed) ? (parsed[0] && parsed[0].error) : parsed.error;
+          if (errObj && typeof errObj.message === "string" && errObj.message.trim()) {
+            return errObj.message.trim().slice(0, 220);
+          }
+        } catch (e) {}
+        return cleaned.replace(/\s+/g, " ").slice(0, 180);
+      }
+
       promise.then((res) => {
         if (!res || !res.ok) {
           const status = res ? res.status : 0;
-          postToBridge("error", streamId, url, {
-            error: `HTTP ${status || "error"}`,
-            status,
-            rateLimited: status === 429
-          });
+          const emitErr = (detail) => {
+            postToBridge("error", streamId, url, {
+              error: detail ? `HTTP ${status || "error"}: ${detail}` : `HTTP ${status || "error"}`,
+              status,
+              rateLimited: status === 429
+            });
+          };
+          try {
+            res.clone().text().then((txt) => emitErr(summarizeErrorBody(txt))).catch(() => emitErr(""));
+          } catch (e) {
+            emitErr("");
+          }
           return;
         }
         let cloned;
@@ -684,8 +731,23 @@
                 }
                 streamObj.processor.finish();
               } else {
+                let detail = "";
+                try {
+                  const raw = (this.responseType === "" || this.responseType === "text") ? (this.responseText || "") : "";
+                  if (raw) {
+                    const cleaned = raw.replace(/^\)\]\}'\s*/, "").trim();
+                    try {
+                      const parsed = JSON.parse(cleaned);
+                      const errObj = Array.isArray(parsed) ? (parsed[0] && parsed[0].error) : parsed.error;
+                      if (errObj && typeof errObj.message === "string" && errObj.message.trim()) {
+                        detail = errObj.message.trim().slice(0, 220);
+                      }
+                    } catch (e2) {}
+                    if (!detail) detail = cleaned.replace(/\s+/g, " ").slice(0, 180);
+                  }
+                } catch (e3) {}
                 postToBridge("error", streamObj.streamId, url, {
-                  error: `HTTP ${this.status}`,
+                  error: detail ? `HTTP ${this.status}: ${detail}` : `HTTP ${this.status}`,
                   status: this.status,
                   rateLimited: this.status === 429
                 });
