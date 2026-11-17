@@ -136,7 +136,10 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var text string
-	if a.Bridge != nil && a.Bridge.IsConnected() {
+	if isTitle, sessionText := isTitleSummaryRequest(prompt); isTitle {
+		text = generateFastTitleResponse(prompt, sessionText)
+		a.Logf("Fast-tracking Responses API client title generation request locally: %s", text)
+	} else if a.Bridge != nil && a.Bridge.IsConnected() {
 		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
 			rlErr := &bridge.RateLimitError{RetryAfter: rem}
 			writeBridgeRateLimitError(w, rem, rlErr.Error())

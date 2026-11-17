@@ -45,4 +45,24 @@ func TestNormalPromptNotTitle(t *testing.T) {
 	if isTitle {
 		t.Errorf("expected normal prompt not to be classified as title request")
 	}
+
+	toolTitlePrompt := "# Tool Use\n\n[System instruction]: Generate a short title for this conversation. Return only the title.\n[User]: hello"
+	if ok, _ := isTitleSummaryRequest(toolTitlePrompt); ok {
+		t.Errorf("tool-enabled prompts must NEVER be fast-tracked as title requests")
+	}
+}
+
+func TestGenericAutoTitleRequestFastTracked(t *testing.T) {
+	prompt := "[System instruction]: Generate a short title for this conversation. Return only the title and nothing else.\n<session>\nHow to fix Go race conditions\n</session>"
+	ok, session := isTitleSummaryRequest(prompt)
+	if !ok {
+		t.Fatalf("expected generic auto-title prompt to be matched")
+	}
+	if session != "How to fix Go race conditions" {
+		t.Fatalf("unexpected session text: %q", session)
+	}
+	resp := generateFastTitleResponse(prompt, session)
+	if resp == "" || resp[0] == '{' {
+		t.Errorf("expected concise plain-text title when isNewTopic is absent, got %q", resp)
+	}
 }

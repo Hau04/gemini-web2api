@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -1310,6 +1311,230 @@ func TestBridgeWorkBuddyDeferredConnectorFlowAndAutoWrap(t *testing.T) {
 		t.Errorf("turn 2 SSE should auto-wrap github_create_pull_request into DeferExecuteTool, got: %s", sse2)
 	}
 }
+
+func TestBridgePollSerializesNewChatFlagAndStatusReportsPacing(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 15
+	cfg.BridgeAutoNewChat = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_poll_nc", "1")
+
+	pollOnce := func() map[string]any {
+		pollReq := httptest.NewRequest("GET", "/bridge/poll?tab=vertexaisearch.cloud.google.com&client=tab_poll_nc&conv_gen=1", nil)
+		pollRec := httptest.NewRecorder()
+		handler.ServeHTTP(pollRec, pollReq)
+		if pollRec.Code != http.StatusOK {
+			t.Fatalf("poll failed: %d %s", pollRec.Code, pollRec.Body.String())
+		}
+		var m map[string]any
+		if err := json.Unmarshal(pollRec.Body.Bytes(), &m); err != nil {
+			t.Fatalf("unmarshal poll: %v", err)
+		}
+		if id, ok := m["id"].(string); ok && id != "" {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: id, Text: "Done.", Done: true})
+		}
+		return m
+	}
+
+	sendChat := func(userText string) map[string]any {
+		pollCh := make(chan map[string]any, 1)
+		go func() {
+			pollCh <- pollOnce()
+		}()
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   false,
+			"messages": []any{map[string]any{"role": "user", "content": userText}},
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("chat failed: %d %s", rec.Code, rec.Body.String())
+		}
+		return <-pollCh
+	}
+
+	first := sendChat("First conversation topic")
+	if first["new_chat"] == true {
+		t.Errorf("first conversation should not set new_chat=true, got %+v", first)
+	}
+
+	second := sendChat("Brand new conversation topic")
+	if second["new_chat"] != true {
+		t.Errorf("expected /bridge/poll JSON to serialize new_chat=true for fresh conversation, got %+v", second)
+	}
+
+	statusReq := httptest.NewRequest("GET", "/bridge/status", nil)
+	statusRec := httptest.NewRecorder()
+	handler.ServeHTTP(statusRec, statusReq)
+	var status map[string]any
+	_ = json.Unmarshal(statusRec.Body.Bytes(), &status)
+	if recent, ok := status["recent_10m"].(float64); !ok || recent < 2 {
+		t.Errorf("expected recent_10m >= 2 in /bridge/status, got %#v", status)
+	}
+	if maxP, ok := status["max_per_10m"].(float64); !ok || maxP != 15 {
+		t.Errorf("expected max_per_10m == 15 in /bridge/status, got %#v", status)
+	}
+}
+
+func TestBridgeConcurrentRequestsSerializedWithAntiBanGap(t *testing.T) {
+	hub := bridge.NewHub()
+	hub.SetPacing(80*time.Millisecond, 0, 0)
+	hub.UpdateTabSession("gemini.google.com", "tab_conc", "1")
+
+	var mu sync.Mutex
+	var finishFirst time.Time
+	var startSecond time.Time
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		for i := 0; i < 2; i++ {
+			req, err := hub.WaitForNextRequestForSession(context.Background(), "gemini.google.com", "tab_conc", "1", 3*time.Second)
+			if err != nil || req == nil {
+				return
+			}
+			mu.Lock()
+			if i == 1 {
+				startSecond = time.Now()
+			}
+			mu.Unlock()
+			time.Sleep(15 * time.Millisecond)
+			_ = hub.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "ok", Done: true})
+			mu.Lock()
+			if i == 0 {
+				finishFirst = time.Now()
+			}
+			mu.Unlock()
+		}
+	}()
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			_, err := hub.Generate(context.Background(), "concurrent prompt", "gemini-4-hydrogen")
+			if err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	<-workerDone
+	close(errs)
+	for err := range errs {
+		t.Fatalf("concurrent generate failed: %v", err)
+	}
+
+	gap := startSecond.Sub(finishFirst)
+	if gap < 60*time.Millisecond {
+		t.Errorf("concurrent requests bypassed anti-ban cooldown: gap between #1 completion and #2 dispatch = %v, want >= 60ms", gap)
+	}
+}
+
+func TestBridgeSpilloverPreservesDeltaReminderAndSmartJSONAttachment(t *testing.T) {
+	bigJSON := `{"tools":[` + strings.Repeat(`{"name":"mcp__github__create_pr","desc":"Create pull request"},`, 60) + `{"name":"mcp__gmail__send","desc":"Send email"}]}`
+	reminder := `[Invoke discovered connector/MCP tools using ` + "```tool_call\n{\"name\": \"DeferExecuteTool\", \"arguments\": {\"toolName\": \"<exact_tool_name>\", \"params\": {...}}}\n```" + ` — verify exact target identifiers.]`
+	deltaPrompt := "[Tool result for ToolSearch]: " + bigJSON + "\n\n" + reminder
+
+	compact, att := SpilloverOversizedPrompt(deltaPrompt, 800, true)
+	if att == nil {
+		t.Fatalf("expected spillover attachment for huge ToolSearch delta")
+	}
+	if att.Filename != "tool_result_ToolSearch.json" || att.MIME != "application/json" {
+		t.Errorf("expected smart JSON attachment tool_result_ToolSearch.json (application/json), got %s (%s)", att.Filename, att.MIME)
+	}
+	if !strings.Contains(compact, "DeferExecuteTool") {
+		t.Errorf("delta spillover MUST keep trailing connector reminder inline, got: %s", compact)
+	}
+	decoded, _ := base64.StdEncoding.DecodeString(att.DataBase64)
+	if !json.Valid(decoded) || !strings.Contains(string(decoded), "mcp__github__create_pr") {
+		t.Errorf("expected valid verbatim JSON in spillover attachment, got: %s", string(decoded))
+	}
+}
+
+func TestBridgeExtractLargeInlineBlocksToSingleTypedAttachment(t *testing.T) {
+	header := "# Tool Use\n\nAvailable tools:\n[{\"name\":\"edit_file\"}]"
+	bigDiff := strings.Repeat("+func optimized() error { return nil }\n", 260) // ~10 KB
+	prompt := header + "\n\n[User]: Please review this patch:\n```diff\n" + bigDiff + "\n```\nLet me know any bugs."
+
+	compact, att := ExtractLargeInlineBlocksToAttachment(prompt, 8192)
+	if att == nil {
+		t.Fatalf("expected large fenced diff block to offload into attachment")
+	}
+	if att.Filename != "inline_context.diff" || att.Source != "spillover" {
+		t.Errorf("expected inline_context.diff spillover attachment, got %+v", att)
+	}
+	if !strings.Contains(compact, "# Tool Use") || !strings.Contains(compact, "Please review this patch:") || !strings.Contains(compact, "Let me know any bugs.") {
+		t.Errorf("expected # Tool Use and surrounding user instructions to stay inline, got: %s", compact)
+	}
+	if strings.Contains(compact, "func optimized()") {
+		t.Errorf("expected raw diff body to be replaced by attachment pointer")
+	}
+
+	// Multiple large blocks must bundle into ONE single markdown attachment (1 upload call!)
+	blockA := strings.Repeat("SELECT * FROM users WHERE active = 1;\n", 130) // ~4.9 KB
+	blockB := strings.Repeat("package main // line\n", 250)                   // ~5.2 KB
+	multiPrompt := "[User]: Compare these two:\n```sql\n" + blockA + "\n```\n\n```go\n" + blockB + "\n```"
+	compactMulti, multiAtt := ExtractLargeInlineBlocksToAttachment(multiPrompt, 8192)
+	if multiAtt == nil || multiAtt.Filename != "inline_code_blocks.md" || multiAtt.MIME != "text/markdown" {
+		t.Fatalf("expected multiple blocks bundled into ONE inline_code_blocks.md, got %+v", multiAtt)
+	}
+	if !strings.Contains(compactMulti, "Compare these two:") {
+		t.Errorf("expected user prompt to remain inline")
+	}
+	decodedMulti, _ := base64.StdEncoding.DecodeString(multiAtt.DataBase64)
+	if !strings.Contains(string(decodedMulti), "SELECT * FROM users") || !strings.Contains(string(decodedMulti), "package main") {
+		t.Errorf("bundled markdown attachment missing block contents")
+	}
+
+	// Must NEVER extract ```tool_call``` blocks
+	toolPrompt := "```tool_call\n{\"name\":\"edit_file\",\"arguments\":{\"content\":\"" + strings.Repeat("x", 9000) + "\"}}\n```"
+	if _, tcAtt := ExtractLargeInlineBlocksToAttachment(toolPrompt, 8192); tcAtt != nil {
+		t.Errorf("must NEVER extract ```tool_call``` blocks into attachment, got %+v", tcAtt)
+	}
+}
+
+func TestBridgeResponsesAPIFastTracksTitleRequest(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	// Connect bridge so we prove the title request NEVER touches the browser bridge!
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_resp_title", "1")
+
+	body, _ := json.Marshal(map[string]any{
+		"model":        "gemini-4-hydrogen",
+		"stream":       false,
+		"instructions": "Generate a concise, sentence-case title (3-7 words) that captures the main topic or goal of this session. Respond with JSON: {\"isNewTopic\": boolean, \"title\": string}",
+		"input":        "<session>\nhow to optimize docker builds\n</session>",
+	})
+	httpReq := httptest.NewRequest("POST", "/v1/responses", bytes.NewReader(body))
+	httpReq.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 fast-tracked title on /v1/responses, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "isNewTopic") {
+		t.Errorf("expected fast-tracked JSON title in response body, got: %s", rec.Body.String())
+	}
+	recent10m, _ := app.Bridge.PacingStats()
+	if recent10m != 0 {
+		t.Errorf("fast-tracked title request must NOT consume browser bridge quota, got recent_10m=%d", recent10m)
+	}
+}
+
 
 
 

@@ -12,8 +12,11 @@ func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
 	connected := a.Bridge != nil && a.Bridge.IsConnected()
 	tab := ""
 	cooldownSec := 0
+	recent10m := 0
+	maxPer10m := 0
 	if a.Bridge != nil {
 		tab = a.Bridge.TabName()
+		recent10m, maxPer10m = a.Bridge.PacingStats()
 		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
 			cooldownSec = int(rem.Round(time.Second).Seconds())
 			if cooldownSec < 1 {
@@ -25,6 +28,8 @@ func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
 		"connected":    connected,
 		"tab":          tab,
 		"cooldown_sec": cooldownSec,
+		"recent_10m":   recent10m,
+		"max_per_10m":  maxPer10m,
 	})
 }
 
@@ -92,6 +97,9 @@ func (a *App) handleBridgePoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Attachments) > 0 {
 		resp["attachments"] = req.Attachments
+	}
+	if req.NewChat {
+		resp["new_chat"] = true
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

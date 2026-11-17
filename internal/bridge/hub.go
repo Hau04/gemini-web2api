@@ -92,6 +92,7 @@ type tabSession struct {
 
 type Hub struct {
 	mu                    sync.Mutex
+	dispatchGate          chan struct{}
 	seq                   atomic.Uint64
 	tabName               string
 	lastHeartbeat         time.Time
@@ -115,6 +116,7 @@ type Hub struct {
 
 func NewHub() *Hub {
 	return &Hub{
+		dispatchGate:     make(chan struct{}, 1),
 		clientHeartbeats: make(map[string]time.Time),
 		inFlight:         make(map[string]*inFlightEntry),
 		waiters:          make(map[string]chan Chunk),
@@ -481,7 +483,7 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 }
 
 func (h *Hub) pruneRecentLocked(now time.Time) {
-	cutoff := now.Add(-10 * time.Minute)
+	cutoff := now.Add(-1 * time.Hour)
 	keep := 0
 	for _, ts := range h.recentDispatches {
 		if ts.After(cutoff) {
@@ -492,10 +494,33 @@ func (h *Hub) pruneRecentLocked(now time.Time) {
 	h.recentDispatches = h.recentDispatches[:keep]
 }
 
+// PacingStats returns the number of bridge prompts dispatched in the last 10 minutes
+// and the configured 10-minute rolling ceiling (0 if disabled).
+func (h *Hub) PacingStats() (recent10m int, maxPer10m int) {
+	now := time.Now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pruneRecentLocked(now)
+	tenMinAgo := now.Add(-10 * time.Minute)
+	for _, ts := range h.recentDispatches {
+		if ts.After(tenMinAgo) {
+			recent10m++
+		}
+	}
+	return recent10m, h.maxPer10Min
+}
+
 // ComputePacingDelay calculates the adaptive anti-ban delay (base + progressive burst
 // scaling + human-like jitter + rolling 10-minute window pacing) or returns *RateLimitError
 // if the circuit breaker is active.
 func (h *Hub) ComputePacingDelay() (time.Duration, error) {
+	return h.ComputePacingDelayForOptions(false)
+}
+
+// ComputePacingDelayForOptions calculates the adaptive anti-ban delay, adding a small
+// extra breather when the turn also performs browser file uploads so upload + submit
+// bursts stay well under Google's anti-abuse frequency thresholds.
+func (h *Hub) ComputePacingDelayForOptions(hasAttachments bool) (time.Duration, error) {
 	now := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -509,25 +534,45 @@ func (h *Hub) ComputePacingDelay() (time.Duration, error) {
 
 	h.pruneRecentLocked(now)
 
+	recent5m := 0
+	recent10m := 0
+	var oldest10m time.Time
+	fiveMinAgo := now.Add(-5 * time.Minute)
+	tenMinAgo := now.Add(-10 * time.Minute)
+	for _, ts := range h.recentDispatches {
+		if ts.After(tenMinAgo) {
+			if recent10m == 0 {
+				oldest10m = ts
+			}
+			recent10m++
+		}
+		if ts.After(fiveMinAgo) {
+			recent5m++
+		}
+	}
+	recent1h := len(h.recentDispatches)
+
 	var waitDur time.Duration
 	if h.minInterval > 0 && !h.lastCompletedAt.IsZero() {
-		recent5m := 0
-		fiveMinAgo := now.Add(-5 * time.Minute)
-		for _, ts := range h.recentDispatches {
-			if ts.After(fiveMinAgo) {
-				recent5m++
-			}
-		}
-
-		// Progressive burst backoff during long coding loops
+		// Progressive burst backoff during long coding loops (5m short-burst + 1h sustained-session guard)
 		target := h.minInterval
 		jitterCap := h.jitterMax
 		switch {
-		case recent5m >= 10:
+		case recent5m >= 10 || recent1h >= 50:
 			target = h.minInterval * 4
 			jitterCap = h.jitterMax * 2
-		case recent5m >= 5:
+		case recent5m >= 5 || recent1h >= 30:
 			target = h.minInterval * 2
+		}
+
+		// File uploads issue extra HTTP upload calls to Google before prompt submission;
+		// add a gentle breather so upload+submit cycles look natural.
+		if hasAttachments {
+			extra := h.minInterval / 2
+			if extra > 1500*time.Millisecond {
+				extra = 1500 * time.Millisecond
+			}
+			target += extra
 		}
 
 		if jitterCap > 0 {
@@ -542,8 +587,8 @@ func (h *Hub) ComputePacingDelay() (time.Duration, error) {
 
 	// Smooth rolling 10-minute ceiling so heavy coding sessions pace naturally
 	// rather than triggering Google's hard frequency ban.
-	if h.maxPer10Min > 0 && len(h.recentDispatches) >= h.maxPer10Min {
-		oldestExpiry := h.recentDispatches[0].Add(10 * time.Minute)
+	if h.maxPer10Min > 0 && recent10m >= h.maxPer10Min && !oldest10m.IsZero() {
+		oldestExpiry := oldest10m.Add(10 * time.Minute)
 		if oldestExpiry.After(now) {
 			windowWait := oldestExpiry.Sub(now)
 			if windowWait > waitDur {
@@ -564,13 +609,33 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 }
 
 // GenerateStreamWithOptions queues a prompt (with optional direct file attachments) to the
-// browser extension, applying adaptive anti-ban pacing and 429 circuit-breaker protection.
+// browser extension, serializing concurrent dispatches and applying adaptive anti-ban
+// pacing plus 429 circuit-breaker protection.
 func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOptions, emit func(string) error) error {
 	if !h.IsConnected() {
 		return errors.New("no browser tab connected to the bridge")
 	}
 
-	waitDur, rlErr := h.ComputePacingDelay()
+	// Fail fast if circuit breaker is already tripped (do not pile up behind dispatchGate).
+	if rem := h.CooldownRemaining(); rem > 0 {
+		h.mu.Lock()
+		cause := h.lastRateLimitCause
+		h.mu.Unlock()
+		return &RateLimitError{RetryAfter: rem, Cause: cause}
+	}
+
+	// Serialize browser-tab dispatches so concurrent requests (e.g. parallel agent/client
+	// turns) never bypass anti-ban cooldown and fire back-to-back with 0ms spacing.
+	if h.dispatchGate != nil {
+		select {
+		case h.dispatchGate <- struct{}{}:
+			defer func() { <-h.dispatchGate }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	waitDur, rlErr := h.ComputePacingDelayForOptions(len(opts.Attachments) > 0)
 	if rlErr != nil {
 		return rlErr
 	}
