@@ -2,9 +2,13 @@ package bridge
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +37,7 @@ type GenerateOptions struct {
 	Model       string
 	Attachments []Attachment
 	NewChat     bool
+	LoopPenalty bool
 }
 
 type Chunk struct {
@@ -41,6 +46,24 @@ type Chunk struct {
 	Done        bool   `json:"done,omitempty"`
 	Error       string `json:"error,omitempty"`
 	RateLimited bool   `json:"rate_limited,omitempty"`
+}
+
+// PausedError is returned when the user temporarily pauses the bridge from the
+// Chrome extension popup (e.g. to stop a runaway agent loop).
+type PausedError struct{}
+
+func (e *PausedError) Error() string {
+	return "browser bridge is paused by user (click Resume Bridge in the extension popup)"
+}
+
+// PacingSnapshot summarizes live anti-ban pacing counters and bridge pause/cooldown state.
+type PacingSnapshot struct {
+	Recent10m   int
+	MaxPer10m   int
+	Recent1h    int
+	MaxPerHour  int
+	CooldownSec int
+	Paused      bool
 }
 
 // RateLimitError is returned when the bridge circuit breaker is cooling down
@@ -87,11 +110,20 @@ type tabSession struct {
 	convGen          string
 	fingerprints     []string
 	userFingerprints []string
+	toolNames        map[string]bool
 	uploadedFiles    map[string]string // canonical path or "sha256:..." -> signature
+}
+
+type persistedPacingState struct {
+	RecentDispatches      []int64 `json:"recent_dispatches_unix_ms,omitempty"`
+	CooldownUntilUnixMs   int64   `json:"cooldown_until_unix_ms,omitempty"`
+	ConsecutiveRateLimits int     `json:"consecutive_rate_limits,omitempty"`
+	LastRateLimitCause    string  `json:"last_rate_limit_cause,omitempty"`
 }
 
 type Hub struct {
 	mu                    sync.Mutex
+	dispatchGate          chan struct{}
 	seq                   atomic.Uint64
 	tabName               string
 	lastHeartbeat         time.Time
@@ -103,6 +135,9 @@ type Hub struct {
 	minInterval           time.Duration
 	jitterMax             time.Duration
 	maxPer10Min           int
+	maxPerHour            int
+	paused                bool
+	pacingStatePath       string
 	recentDispatches      []time.Time
 	lastCompletedAt       time.Time
 	cooldownUntil         time.Time
@@ -115,6 +150,7 @@ type Hub struct {
 
 func NewHub() *Hub {
 	return &Hub{
+		dispatchGate:     make(chan struct{}, 1),
 		clientHeartbeats: make(map[string]time.Time),
 		inFlight:         make(map[string]*inFlightEntry),
 		waiters:          make(map[string]chan Chunk),
@@ -164,6 +200,112 @@ func (h *Hub) SetPacing(minInterval, jitter time.Duration, maxPer10Min int) {
 	h.maxPer10Min = maxPer10Min
 }
 
+// SetHourlyLimit configures the optional rolling 1-hour maximum prompt cap (0 disables).
+func (h *Hub) SetHourlyLimit(maxPerHour int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if maxPerHour < 0 {
+		maxPerHour = 0
+	}
+	h.maxPerHour = maxPerHour
+}
+
+// SetPacingStateFile enables persistent anti-ban pacing & cooldown survival across restarts
+// and immediately restores any unexpired timestamps or active 429 cooldown from disk.
+func (h *Hub) SetPacingStateFile(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pacingStatePath = strings.TrimSpace(path)
+	if h.pacingStatePath == "" {
+		return
+	}
+	h.loadPacingStateLocked()
+}
+
+func (h *Hub) loadPacingStateLocked() {
+	if h.pacingStatePath == "" {
+		return
+	}
+	raw, err := os.ReadFile(h.pacingStatePath)
+	if err != nil || len(raw) == 0 {
+		return
+	}
+	var st persistedPacingState
+	if err := json.Unmarshal(raw, &st); err != nil {
+		return
+	}
+	now := time.Now()
+	cutoff := now.Add(-1 * time.Hour)
+	for _, ms := range st.RecentDispatches {
+		ts := time.UnixMilli(ms)
+		if ts.After(cutoff) && !ts.After(now.Add(1*time.Minute)) {
+			h.recentDispatches = append(h.recentDispatches, ts)
+		}
+	}
+	sort.Slice(h.recentDispatches, func(i, j int) bool {
+		return h.recentDispatches[i].Before(h.recentDispatches[j])
+	})
+	h.pruneRecentLocked(now)
+	if st.CooldownUntilUnixMs > 0 {
+		until := time.UnixMilli(st.CooldownUntilUnixMs)
+		if until.After(now) && until.After(h.cooldownUntil) {
+			h.cooldownUntil = until
+			h.consecutiveRateLimits = st.ConsecutiveRateLimits
+			if st.LastRateLimitCause != "" {
+				h.lastRateLimitCause = st.LastRateLimitCause
+			}
+		}
+	}
+}
+
+func (h *Hub) savePacingStateLocked() {
+	if h.pacingStatePath == "" {
+		return
+	}
+	now := time.Now()
+	h.pruneRecentLocked(now)
+	st := persistedPacingState{
+		RecentDispatches:      make([]int64, 0, len(h.recentDispatches)),
+		ConsecutiveRateLimits: h.consecutiveRateLimits,
+		LastRateLimitCause:    h.lastRateLimitCause,
+	}
+	for _, ts := range h.recentDispatches {
+		st.RecentDispatches = append(st.RecentDispatches, ts.UnixMilli())
+	}
+	if h.cooldownUntil.After(now) {
+		st.CooldownUntilUnixMs = h.cooldownUntil.UnixMilli()
+	}
+	b, err := json.Marshal(st)
+	if err != nil {
+		return
+	}
+	dir := filepath.Dir(h.pacingStatePath)
+	if dir != "" && dir != "." {
+		_ = os.MkdirAll(dir, 0o700)
+	}
+	tmp := h.pacingStatePath + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err == nil {
+		if renameErr := os.Rename(tmp, h.pacingStatePath); renameErr != nil {
+			_ = os.WriteFile(h.pacingStatePath, b, 0o600)
+			_ = os.Remove(tmp)
+		}
+	}
+}
+
+// SetPaused pauses or resumes browser-bridge request dispatching (controlled from popup).
+func (h *Hub) SetPaused(paused bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.paused = paused
+}
+
+// IsPaused returns whether the user has paused the bridge.
+func (h *Hub) IsPaused() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.paused
+}
+
 // RecordRateLimit trips the exponential cool-off circuit breaker (60s -> 180s -> 300s).
 func (h *Hub) RecordRateLimit(cause string) time.Duration {
 	h.mu.Lock()
@@ -189,6 +331,7 @@ func (h *Hub) recordRateLimitLocked(cause string) time.Duration {
 	if cause != "" {
 		h.lastRateLimitCause = cause
 	}
+	h.savePacingStateLocked()
 	return time.Until(h.cooldownUntil)
 }
 
@@ -255,6 +398,7 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 		if sess.convGen != "" && sess.convGen != convGen {
 			sess.fingerprints = nil
 			sess.userFingerprints = nil
+			sess.toolNames = nil
 			sess.uploadedFiles = make(map[string]string)
 		}
 		sess.convGen = convGen
@@ -287,19 +431,51 @@ func (h *Hub) ActiveSession() (clientID, convGen string, uploaded map[string]str
 // MatchDeltaPrefix returns the number of leading messages already present in the
 // active browser tab's live conversation if fingerprints strictly extend it.
 func (h *Hub) MatchDeltaPrefix(fingerprints []string) int {
+	matched, _ := h.MatchDeltaPrefixWithTools(fingerprints, nil)
+	return matched
+}
+
+// MatchDeltaPrefixWithTools matches leading conversation fingerprints and also
+// supports purely additive mid-chat tool additions (e.g. tools unlocked after ToolSearch):
+// if all prior messages match and every previously declared tool is still present,
+// returns the matched prefix alongside only the newly added tool names.
+func (h *Hub) MatchDeltaPrefixWithTools(fingerprints []string, currentTools map[string]bool) (matchedPrefix int, addedTools []string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	sess := h.ensureSessionLocked(h.activeClientID)
 	prev := sess.fingerprints
 	if len(prev) == 0 || len(fingerprints) <= len(prev) {
-		return 0
+		return 0, nil
 	}
-	for i := range prev {
+	// Check all message fingerprints (index 1..len(prev)-1) first
+	for i := 1; i < len(prev); i++ {
 		if prev[i] != fingerprints[i] {
-			return 0
+			return 0, nil
 		}
 	}
-	return len(prev)
+	if prev[0] == fingerprints[0] {
+		return len(prev), nil
+	}
+
+	// Tools digest changed: allow delta ONLY when tools were purely added (never removed/mutated).
+	if len(sess.toolNames) == 0 || len(currentTools) <= len(sess.toolNames) {
+		return 0, nil
+	}
+	for oldName := range sess.toolNames {
+		if !currentTools[oldName] {
+			return 0, nil
+		}
+	}
+	for newName := range currentTools {
+		if !sess.toolNames[newName] {
+			addedTools = append(addedTools, newName)
+		}
+	}
+	if len(addedTools) == 0 {
+		return 0, nil
+	}
+	sort.Strings(addedTools)
+	return len(prev), addedTools
 }
 
 // IsNewConversation returns true when the client (e.g. WorkBuddy) started a brand-new
@@ -333,6 +509,12 @@ func (h *Hub) RecordTurnSuccess(clientID, convGen string, fingerprints []string,
 // fingerprints (for New Chat detection), and uploaded-file signatures. When resetSession
 // is true (the browser started a fresh chat), previous uploaded files are cleared first.
 func (h *Hub) RecordTurnSuccessWithConversation(clientID, convGen string, fingerprints, userFingerprints []string, uploadedSigs map[string]string, resetSession bool) {
+	h.RecordTurnSuccessWithTools(clientID, convGen, fingerprints, userFingerprints, nil, uploadedSigs, resetSession)
+}
+
+// RecordTurnSuccessWithTools additionally stores the declared tool names for the session
+// so purely additive mid-chat tool updates can preserve delta context.
+func (h *Hub) RecordTurnSuccessWithTools(clientID, convGen string, fingerprints, userFingerprints []string, toolNames map[string]bool, uploadedSigs map[string]string, resetSession bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	sess := h.ensureSessionLocked(clientID)
@@ -344,6 +526,7 @@ func (h *Hub) RecordTurnSuccessWithConversation(clientID, convGen string, finger
 	}
 	if resetSession {
 		sess.uploadedFiles = make(map[string]string)
+		sess.toolNames = nil
 	}
 	cp := make([]string, len(fingerprints))
 	copy(cp, fingerprints)
@@ -352,6 +535,13 @@ func (h *Hub) RecordTurnSuccessWithConversation(clientID, convGen string, finger
 		ucp := make([]string, len(userFingerprints))
 		copy(ucp, userFingerprints)
 		sess.userFingerprints = ucp
+	}
+	if len(toolNames) > 0 {
+		tcp := make(map[string]bool, len(toolNames))
+		for name := range toolNames {
+			tcp[name] = true
+		}
+		sess.toolNames = tcp
 	}
 	for path, sig := range uploadedSigs {
 		if path != "" {
@@ -454,7 +644,10 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 		h.recordRateLimitLocked(c.Error)
 		c.RateLimited = true
 	} else if c.Done && c.Error == "" {
-		h.consecutiveRateLimits = 0
+		if h.consecutiveRateLimits != 0 {
+			h.consecutiveRateLimits = 0
+			h.savePacingStateLocked()
+		}
 	}
 
 	if entry, ok := h.inFlight[c.ID]; ok {
@@ -481,7 +674,7 @@ func (h *Hub) SubmitChunk(c Chunk) error {
 }
 
 func (h *Hub) pruneRecentLocked(now time.Time) {
-	cutoff := now.Add(-10 * time.Minute)
+	cutoff := now.Add(-1 * time.Hour)
 	keep := 0
 	for _, ts := range h.recentDispatches {
 		if ts.After(cutoff) {
@@ -492,13 +685,67 @@ func (h *Hub) pruneRecentLocked(now time.Time) {
 	h.recentDispatches = h.recentDispatches[:keep]
 }
 
-// ComputePacingDelay calculates the adaptive anti-ban delay (base + progressive burst
-// scaling + human-like jitter + rolling 10-minute window pacing) or returns *RateLimitError
-// if the circuit breaker is active.
-func (h *Hub) ComputePacingDelay() (time.Duration, error) {
+// PacingStats returns the number of bridge prompts dispatched in the last 10 minutes
+// and the configured 10-minute rolling ceiling (0 if disabled).
+func (h *Hub) PacingStats() (recent10m int, maxPer10m int) {
+	snap := h.DetailedPacingStats()
+	return snap.Recent10m, snap.MaxPer10m
+}
+
+// DetailedPacingStats returns full live pacing counters, hourly cap, cooldown, and pause state.
+func (h *Hub) DetailedPacingStats() PacingSnapshot {
 	now := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.pruneRecentLocked(now)
+	tenMinAgo := now.Add(-10 * time.Minute)
+	recent10m := 0
+	for _, ts := range h.recentDispatches {
+		if ts.After(tenMinAgo) {
+			recent10m++
+		}
+	}
+	cooldownSec := 0
+	if now.Before(h.cooldownUntil) {
+		cooldownSec = int(time.Until(h.cooldownUntil).Round(time.Second).Seconds())
+		if cooldownSec < 1 {
+			cooldownSec = 1
+		}
+	}
+	return PacingSnapshot{
+		Recent10m:   recent10m,
+		MaxPer10m:   h.maxPer10Min,
+		Recent1h:    len(h.recentDispatches),
+		MaxPerHour:  h.maxPerHour,
+		CooldownSec: cooldownSec,
+		Paused:      h.paused,
+	}
+}
+
+// ComputePacingDelay calculates the adaptive anti-ban delay (base + progressive burst
+// scaling + human-like jitter + rolling 10-minute/1-hour window pacing) or returns *RateLimitError
+// if the circuit breaker is active.
+func (h *Hub) ComputePacingDelay() (time.Duration, error) {
+	return h.ComputePacingDelayWithPenalty(false, false)
+}
+
+// ComputePacingDelayForOptions calculates the adaptive anti-ban delay, adding a small
+// extra breather when the turn also performs browser file uploads so upload + submit
+// bursts stay well under Google's anti-abuse frequency thresholds.
+func (h *Hub) ComputePacingDelayForOptions(hasAttachments bool) (time.Duration, error) {
+	return h.ComputePacingDelayWithPenalty(hasAttachments, false)
+}
+
+// ComputePacingDelayWithPenalty calculates anti-ban pacing including upload breathers,
+// runaway agent-loop penalty spacing, and both rolling 10-minute and 1-hour ceilings.
+func (h *Hub) ComputePacingDelayWithPenalty(hasAttachments, loopPenalty bool) (time.Duration, error) {
+	now := time.Now()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.paused {
+		return 0, &PausedError{}
+	}
 
 	if now.Before(h.cooldownUntil) {
 		return 0, &RateLimitError{
@@ -509,25 +756,50 @@ func (h *Hub) ComputePacingDelay() (time.Duration, error) {
 
 	h.pruneRecentLocked(now)
 
+	recent5m := 0
+	recent10m := 0
+	var oldest10m time.Time
+	fiveMinAgo := now.Add(-5 * time.Minute)
+	tenMinAgo := now.Add(-10 * time.Minute)
+	for _, ts := range h.recentDispatches {
+		if ts.After(tenMinAgo) {
+			if recent10m == 0 {
+				oldest10m = ts
+			}
+			recent10m++
+		}
+		if ts.After(fiveMinAgo) {
+			recent5m++
+		}
+	}
+	recent1h := len(h.recentDispatches)
+
 	var waitDur time.Duration
 	if h.minInterval > 0 && !h.lastCompletedAt.IsZero() {
-		recent5m := 0
-		fiveMinAgo := now.Add(-5 * time.Minute)
-		for _, ts := range h.recentDispatches {
-			if ts.After(fiveMinAgo) {
-				recent5m++
-			}
-		}
-
-		// Progressive burst backoff during long coding loops
+		// Progressive burst backoff during long coding loops (5m short-burst + 1h sustained-session guard)
 		target := h.minInterval
 		jitterCap := h.jitterMax
 		switch {
-		case recent5m >= 10:
+		case recent5m >= 10 || recent1h >= 50:
 			target = h.minInterval * 4
 			jitterCap = h.jitterMax * 2
-		case recent5m >= 5:
+		case recent5m >= 5 || recent1h >= 30:
 			target = h.minInterval * 2
+		}
+
+		// File uploads issue extra HTTP upload calls to Google before prompt submission;
+		// add a gentle breather so upload+submit cycles look natural.
+		if hasAttachments {
+			extra := h.minInterval / 2
+			if extra > 1500*time.Millisecond {
+				extra = 1500 * time.Millisecond
+			}
+			target += extra
+		}
+
+		// Slow down runaway agent retry loops so repetitive tool failures cannot spam Google.
+		if loopPenalty {
+			target += h.minInterval * 2
 		}
 
 		if jitterCap > 0 {
@@ -542,12 +814,23 @@ func (h *Hub) ComputePacingDelay() (time.Duration, error) {
 
 	// Smooth rolling 10-minute ceiling so heavy coding sessions pace naturally
 	// rather than triggering Google's hard frequency ban.
-	if h.maxPer10Min > 0 && len(h.recentDispatches) >= h.maxPer10Min {
-		oldestExpiry := h.recentDispatches[0].Add(10 * time.Minute)
+	if h.maxPer10Min > 0 && recent10m >= h.maxPer10Min && !oldest10m.IsZero() {
+		oldestExpiry := oldest10m.Add(10 * time.Minute)
 		if oldestExpiry.After(now) {
 			windowWait := oldestExpiry.Sub(now)
 			if windowWait > waitDur {
 				waitDur = windowWait
+			}
+		}
+	}
+
+	// Rolling 1-hour ceiling for sustained multi-hour sessions.
+	if h.maxPerHour > 0 && recent1h >= h.maxPerHour && len(h.recentDispatches) > 0 {
+		oldestHourExpiry := h.recentDispatches[0].Add(1 * time.Hour)
+		if oldestHourExpiry.After(now) {
+			hourWait := oldestHourExpiry.Sub(now)
+			if hourWait > waitDur {
+				waitDur = hourWait
 			}
 		}
 	}
@@ -564,13 +847,36 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 }
 
 // GenerateStreamWithOptions queues a prompt (with optional direct file attachments) to the
-// browser extension, applying adaptive anti-ban pacing and 429 circuit-breaker protection.
+// browser extension, serializing concurrent dispatches and applying adaptive anti-ban
+// pacing plus 429 circuit-breaker protection.
 func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOptions, emit func(string) error) error {
 	if !h.IsConnected() {
 		return errors.New("no browser tab connected to the bridge")
 	}
 
-	waitDur, rlErr := h.ComputePacingDelay()
+	// Fail fast if paused by user or circuit breaker is already tripped.
+	if h.IsPaused() {
+		return &PausedError{}
+	}
+	if rem := h.CooldownRemaining(); rem > 0 {
+		h.mu.Lock()
+		cause := h.lastRateLimitCause
+		h.mu.Unlock()
+		return &RateLimitError{RetryAfter: rem, Cause: cause}
+	}
+
+	// Serialize browser-tab dispatches so concurrent requests (e.g. parallel agent/client
+	// turns) never bypass anti-ban cooldown and fire back-to-back with 0ms spacing.
+	if h.dispatchGate != nil {
+		select {
+		case h.dispatchGate <- struct{}{}:
+			defer func() { <-h.dispatchGate }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	waitDur, rlErr := h.ComputePacingDelayWithPenalty(len(opts.Attachments) > 0, opts.LoopPenalty)
 	if rlErr != nil {
 		return rlErr
 	}
@@ -582,7 +888,10 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 			return ctx.Err()
 		case <-timer.C:
 		}
-		// Re-check circuit breaker after pacing sleep in case another tab/request tripped it
+		// Re-check pause & circuit breaker after pacing sleep
+		if h.IsPaused() {
+			return &PausedError{}
+		}
 		if rem := h.CooldownRemaining(); rem > 0 {
 			return &RateLimitError{RetryAfter: rem}
 		}
@@ -605,6 +914,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	h.pending = append(h.pending, req)
 	h.recentDispatches = append(h.recentDispatches, time.Now())
 	h.pruneRecentLocked(time.Now())
+	h.savePacingStateLocked()
 	select {
 	case h.pollNotify <- struct{}{}:
 	default:

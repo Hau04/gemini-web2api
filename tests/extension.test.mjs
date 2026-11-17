@@ -1111,6 +1111,31 @@ test("discovery_json processor extracts content.parts[] and captures connectorAu
   assert.match(doneEv.payload.diagnostic, /connector authorization/i);
 });
 
+test("buildSpilloverInlineFallback decodes spillover attachments safely and ignores non-spillover files", () => {
+  const utf8Text = "diff --git a/main.go b/main.go\n+fmt.Println(\"hello 世界\")";
+  const spilloverB64 = Buffer.from(utf8Text, "utf8").toString("base64");
+  const pdfB64 = Buffer.from("%PDF-1.4\n", "utf8").toString("base64");
+
+  const fallback = bridge.buildSpilloverInlineFallback(
+    [
+      { filename: "report.pdf", source: "local_auto", data_base64: pdfB64 },
+      { filename: "inline_context.diff", source: "spillover", data_base64: spilloverB64 }
+    ],
+    2000
+  );
+  assert.match(fallback, /Fallback inline content for inline_context\.diff/);
+  assert.match(fallback, /hello 世界/);
+  assert.doesNotMatch(fallback, /report\.pdf/);
+
+  // Respects truncation cap cleanly
+  const tiny = bridge.buildSpilloverInlineFallback(
+    [{ filename: "huge.txt", source: "spillover", data_base64: Buffer.from("A".repeat(200), "utf8").toString("base64") }],
+    30
+  );
+  assert.match(tiny, /truncated after upload fallback/);
+});
+
+
 
 
 

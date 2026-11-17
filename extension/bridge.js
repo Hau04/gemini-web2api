@@ -623,6 +623,33 @@
     return `[Directly attached file(s): ${names.join(", ")}. Read the attached file(s) natively in full — do NOT call local shell/python/file tools to inspect or extract them.]`;
   }
 
+  function buildSpilloverInlineFallback(attachments, maxChars) {
+    const cap = typeof maxChars === "number" && maxChars > 0 ? maxChars : 48000;
+    if (!Array.isArray(attachments) || attachments.length === 0) return "";
+    const parts = [];
+    let remaining = cap;
+    const decoder = typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8", { fatal: false }) : null;
+    for (const att of attachments) {
+      if (!att || att.source !== "spillover" || !att.data_base64 || remaining <= 0) continue;
+      const bytes = base64ToUint8Array(att.data_base64);
+      if (bytes.length === 0) continue;
+      let text = "";
+      if (decoder) {
+        text = decoder.decode(bytes);
+      } else {
+        for (let i = 0; i < bytes.length; i++) text += String.fromCharCode(bytes[i]);
+      }
+      if (!text.trim()) continue;
+      const name = String(att.filename || "context.txt").trim();
+      if (text.length > remaining) {
+        text = text.slice(0, remaining) + "\n...[truncated after upload fallback]";
+      }
+      remaining -= text.length;
+      parts.push(`[Fallback inline content for ${name}]:\n${text}`);
+    }
+    return parts.join("\n\n");
+  }
+
   function findComposerScope(inputArea, root) {
     if (inputArea && inputArea.nodeType === 1) {
       const container = closestDeep(
@@ -1350,6 +1377,7 @@
       base64ToUint8Array,
       deduplicateAttachments,
       buildAttachedFileNote,
+      buildSpilloverInlineFallback,
       countAttachmentChipsInDom,
       hasAttachmentChipInDom,
       isSameConversationUrlTransition,
@@ -2648,6 +2676,7 @@
 
     // B2. Directly upload any attached PDFs/documents/images to the Gemini page
     let effectivePrompt = prompt;
+    let uploadedSuccessfully = false;
     const uniqueAttachments = deduplicateAttachments(attachments);
     if (uniqueAttachments.length > 0) {
       const label = uniqueAttachments.map((a) => (a && a.filename) || "file").join(", ");
@@ -2655,6 +2684,7 @@
       try {
         const uploadRes = await uploadAttachmentsToPage(uniqueAttachments, inputArea);
         if (uploadRes && uploadRes.ok) {
+          uploadedSuccessfully = true;
           const note = buildAttachedFileNote(uniqueAttachments);
           if (note) {
             effectivePrompt = `${note}\n\n${prompt}`;
@@ -2662,9 +2692,17 @@
           setStatus("busy", `Web2API: Attached ${label} ✓`);
         } else {
           console.warn("[Web2API Bridge] Proceeding with text-only prompt after upload fallback.");
+          const spillFallback = buildSpilloverInlineFallback(uniqueAttachments, 48000);
+          if (spillFallback) {
+            effectivePrompt = `${prompt}\n\n${spillFallback}`;
+          }
         }
       } catch (e) {
         console.warn("[Web2API Bridge] Attachment upload threw error:", e);
+        const spillFallback = buildSpilloverInlineFallback(uniqueAttachments, 48000);
+        if (spillFallback) {
+          effectivePrompt = `${prompt}\n\n${spillFallback}`;
+        }
       }
       inputArea = await ensureLiveInputArea(inputArea, 3000);
     }
@@ -2686,14 +2724,19 @@
         inputResult = setInputValue(inputArea, effectivePrompt);
       }
 
-      // Small humanized jitter before clicking Send to avoid robotic fixed timing
-      await new Promise((r) => setTimeout(r, 220 + Math.floor(Math.random() * 280)));
+      // Humanized pre-send pause (slightly wider after file uploads so attachment registration
+      // settles and upload+submit timing never looks robotic).
+      const preSendDelay = uploadedSuccessfully
+        ? 450 + Math.floor(Math.random() * 400)
+        : 220 + Math.floor(Math.random() * 280);
+      await new Promise((r) => setTimeout(r, preSendDelay));
 
       let submitSuccess = await submitPrompt(inputArea, netCapture);
-      if (!submitSuccess && !netCapture.started && !isGenerating(netCapture)) {
-        // Give async network requests a brief grace window, then retry submission once
-        await new Promise((r) => setTimeout(r, 500));
-        if (!netCapture.started && !isGenerating(netCapture) && !isInputCleared(inputArea)) {
+      if (!submitSuccess && !netCapture.started && !netCapture.active && !isGenerating(netCapture)) {
+        // Give slower Gemini Enterprise / post-upload network requests a generous grace window
+        // before retrying submission once, preventing accidental double-submits to Google.
+        await new Promise((r) => setTimeout(r, 1100));
+        if (!netCapture.started && !netCapture.active && !isGenerating(netCapture) && !isInputCleared(inputArea)) {
           console.warn("[Web2API Bridge] First submit attempt did not trigger generation — retrying once...");
           inputArea = await ensureLiveInputArea(inputArea, 2500);
           if (readInputValue(inputArea).trim().length === 0) {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"syscall"
@@ -78,6 +79,19 @@ func main() {
 	}
 	if *bridgeCooldownFlag >= 0 {
 		cfg.BridgeMinIntervalMs = *bridgeCooldownFlag
+	}
+
+	// Persist anti-ban pacing counters & 429 cooldown across restarts when running the server binary
+	// (disable explicitly via "bridge_pacing_state_file": "off" or "none").
+	lowerPacingPath := strings.ToLower(strings.TrimSpace(cfg.BridgePacingStateFile))
+	if lowerPacingPath == "off" || lowerPacingPath == "none" {
+		cfg.BridgePacingStateFile = ""
+	} else if lowerPacingPath == "" {
+		if configPath != "" {
+			cfg.BridgePacingStateFile = filepath.Join(filepath.Dir(configPath), ".bridge_pacing_state.json")
+		} else {
+			cfg.BridgePacingStateFile = ".bridge_pacing_state.json"
+		}
 	}
 
 	app := server.New(cfg, currentVersion)

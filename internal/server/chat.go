@@ -135,7 +135,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Intercept automatic client title / topic generation requests (e.g. WorkBuddy)
 	// and fulfill them instantly without tying up the browser tab or polluting chat history.
 	if isTitle, sessionText := isTitleSummaryRequest(prompt); isTitle {
-		titleJSON := generateFastTitleJSON(sessionText)
+		titleJSON := generateFastTitleResponse(prompt, sessionText)
 		a.Logf("Fast-tracking client title generation request locally: %s", titleJSON)
 
 		if req.Stream {
@@ -219,6 +219,16 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// Check if an authenticated browser tab is connected via the extension bridge.
 	if a.Bridge != nil && a.Bridge.IsConnected() {
+		if a.Bridge.IsPaused() {
+			pErr := &bridge.PausedError{}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error": map[string]any{
+					"message": pErr.Error(),
+					"type":    "bridge_paused",
+				},
+			})
+			return
+		}
 		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
 			rlErr := &bridge.RateLimitError{RetryAfter: rem}
 			a.Logf("Bridge rate-limit circuit breaker active: %v", rlErr)
@@ -233,6 +243,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			Model:       resolved.Name,
 			Attachments: prepared.Attachments,
 			NewChat:     prepared.NewChat,
+			LoopPenalty: prepared.LoopPenalty,
 		}
 
 		if req.Stream {
@@ -502,6 +513,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 
 		text, err := a.Bridge.GenerateWithOptions(r.Context(), bridgeOpts)
 		if err != nil {
+			var pErr *bridge.PausedError
+			if errors.As(err, &pErr) {
+				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": pErr.Error(), "type": "bridge_paused"}})
+				return
+			}
 			var rlErr *bridge.RateLimitError
 			if errors.As(err, &rlErr) {
 				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())

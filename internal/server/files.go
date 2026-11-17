@@ -111,9 +111,16 @@ var allowedCodeTextExts = map[string]string{
 	".cmake":    "text/plain",
 	".ini":      "text/plain",
 	".cfg":      "text/plain",
+	".diff":     "text/plain",
+	".patch":    "text/plain",
+	".tsv":      "text/tab-separated-values",
+	".ndjson":   "text/plain",
+	".svg":      "image/svg+xml",
+	".tex":      "text/plain",
+	".rst":      "text/plain",
 }
 
-const allowedExtPattern = `(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|rtf|odt|epub|png|jpe?g|webp|gif|bmp|mp3|wav|m4a|go|py|mjs|cjs|js|tsx|ts|jsx|java|kts|kt|cs|cpp|cc|cxx|c|hpp|h|rs|rb|php|swift|scala|dart|lua|r|sh|bash|zsh|ps1|bat|sql|html|htm|css|scss|sass|less|vue|svelte|jsonl|json|yaml|yml|toml|xml|markdown|md|txt|log|proto|graphql|tf|gradle|cmake|ini|cfg)`
+const allowedExtPattern = `(?:pdf|docx|doc|pptx|ppt|xlsx|xls|csv|tsv|rtf|odt|epub|png|jpe?g|webp|gif|bmp|svg|mp3|wav|m4a|go|py|mjs|cjs|js|tsx|ts|jsx|java|kts|kt|cs|cpp|cc|cxx|c|hpp|h|rs|rb|php|swift|scala|dart|lua|r|sh|bash|zsh|ps1|bat|sql|html|htm|css|scss|sass|less|vue|svelte|jsonl|ndjson|json|yaml|yml|toml|xml|markdown|md|txt|log|diff|patch|tex|rst|proto|graphql|tf|gradle|cmake|ini|cfg)`
 
 var (
 	reQuotedPath   = regexp.MustCompile("(?i)[\"'`]" + `([^"'` + "`" + `\r\n]+?\.` + allowedExtPattern + `)` + "[\"'`]")
@@ -366,10 +373,45 @@ func resolveAndReadLocalFile(candidate string, baseDirs []string, largeCodeMinBy
 	return "", "", bridge.Attachment{}, false
 }
 
+func codeFenceLangForFilename(name string) string {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".js", ".mjs", ".cjs", ".jsx":
+		return "javascript"
+	case ".ts", ".tsx":
+		return "typescript"
+	case ".diff", ".patch":
+		return "diff"
+	case ".json", ".jsonl", ".ndjson":
+		return "json"
+	case ".yaml", ".yml":
+		return "yaml"
+	case ".sql":
+		return "sql"
+	case ".sh", ".bash", ".zsh":
+		return "bash"
+	case ".md", ".markdown":
+		return "markdown"
+	case ".html", ".htm":
+		return "html"
+	case ".css", ".scss":
+		return "css"
+	case ".xml", ".svg":
+		return "xml"
+	default:
+		return ""
+	}
+}
+
 // DiscoverLocalUploadFiles inspects the latest message (when it is a user turn) for references
 // to existing local PDFs, Office documents, media files, or long source code files
 // (>= largeCodeMinBytes) and reads them for direct upload through the browser bridge.
 // Files already uploaded with the same size+mtime signature in this tab session are skipped.
+// When 2+ plain-text/code files are discovered in one turn, they are bundled into ONE single
+// workspace_files_bundle.md attachment to minimize browser upload HTTP calls (anti-ban).
 func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded map[string]string, largeCodeMinBytes int) ([]bridge.Attachment, map[string]string) {
 	if len(messages) == 0 {
 		return nil, nil
@@ -398,11 +440,16 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 
 	seenAbs := make(map[string]bool)
 	seenContent := make(map[string]bool)
-	var attachments []bridge.Attachment
+	var binaryAtts []bridge.Attachment
+	type codeEntry struct {
+		displayName string
+		att         bridge.Attachment
+	}
+	var codeEntries []codeEntry
 	uploadedSigs := make(map[string]string)
 
 	for _, cand := range candidates {
-		if len(attachments) >= maxLocalAutoUploadFiles {
+		if len(binaryAtts)+len(codeEntries) >= maxLocalAutoUploadFiles {
 			break
 		}
 		absKey, sig, att, ok := resolveAndReadLocalFile(cand, baseDirs, largeCodeMinBytes)
@@ -427,41 +474,361 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 		}
 		seenAbs[absKey] = true
 		seenContent[contentKey] = true
-		attachments = append(attachments, att)
 		uploadedSigs[absKey] = sig
 		uploadedSigs[contentKey] = "uploaded"
+		if att.Source == "local_large_code" {
+			codeEntries = append(codeEntries, codeEntry{displayName: cand, att: att})
+		} else {
+			binaryAtts = append(binaryAtts, att)
+		}
+	}
+
+	attachments := make([]bridge.Attachment, 0, len(binaryAtts)+len(codeEntries))
+	attachments = append(attachments, binaryAtts...)
+
+	if len(codeEntries) == 1 {
+		attachments = append(attachments, codeEntries[0].att)
+	} else if len(codeEntries) >= 2 {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "# Attached Workspace Files (%d files)\n\n", len(codeEntries))
+		for i, ce := range codeEntries {
+			rawBytes, err := base64.StdEncoding.DecodeString(ce.att.DataBase64)
+			if err != nil {
+				continue
+			}
+			lang := codeFenceLangForFilename(ce.att.Filename)
+			label := strings.TrimSpace(ce.displayName)
+			if label == "" {
+				label = ce.att.Filename
+			}
+			fmt.Fprintf(&sb, "## File %d: %s\n\n```%s\n%s\n```\n\n", i+1, label, lang, string(rawBytes))
+		}
+		bundleBytes := []byte(sb.String())
+		if len(bundleBytes) > 0 && len(bundleBytes) <= maxBridgeAttachmentBytes {
+			bundleAtt := bridge.Attachment{
+				Filename:   "workspace_files_bundle.md",
+				MIME:       "text/markdown",
+				DataBase64: base64.StdEncoding.EncodeToString(bundleBytes),
+				Size:       len(bundleBytes),
+				Source:     "local_large_code",
+			}
+			attachments = append(attachments, bundleAtt)
+			uploadedSigs["sha256:"+attachmentContentHash(bundleAtt)] = "uploaded"
+		} else {
+			for _, ce := range codeEntries {
+				attachments = append(attachments, ce.att)
+			}
+		}
 	}
 
 	return attachments, uploadedSigs
 }
 
+var reSingleToolResultPrefix = regexp.MustCompile(`(?s)^\[Tool result for ([A-Za-z0-9_.:-]+)\]:\s*(.*)$`)
+
+func splitToolUseHeader(prompt string) (header string, body string, hasHeader bool) {
+	if !strings.HasPrefix(prompt, "# Tool Use") {
+		return "", prompt, false
+	}
+	availIdx := strings.Index(prompt, "\nAvailable tools:\n")
+	if availIdx == -1 {
+		return "", prompt, false
+	}
+	afterAvail := availIdx + len("\nAvailable tools:\n")
+	splitRel := strings.Index(prompt[afterAvail:], "\n\n")
+	if splitRel == -1 {
+		return "", prompt, false
+	}
+	headerEnd := afterAvail + splitRel
+	return prompt[:headerEnd], prompt[headerEnd+2:], true
+}
+
+func splitTrailingBridgeReminder(text string) (core string, reminder string) {
+	markers := []string{
+		"\n\n[Local client bridge active:",
+		"\n\n[Invoke discovered connector/MCP tools using",
+	}
+	bestIdx := -1
+	for _, m := range markers {
+		if idx := strings.LastIndex(text, m); idx != -1 && idx > bestIdx {
+			bestIdx = idx
+		}
+	}
+	if bestIdx == -1 {
+		return text, ""
+	}
+	return strings.TrimSpace(text[:bestIdx]), strings.TrimSpace(text[bestIdx+2:])
+}
+
+func sanitizeAttachmentStem(name string) string {
+	var sb strings.Builder
+	for _, r := range name {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteByte('_')
+		}
+		if sb.Len() >= 32 {
+			break
+		}
+	}
+	out := strings.Trim(sb.String(), "_-")
+	if out == "" {
+		return "output"
+	}
+	return out
+}
+
+func classifySpilledDeltaPayload(core string) (filename string, mime string, data []byte) {
+	trimmed := strings.TrimSpace(core)
+	// If the delta is a single [Tool result for <tool>]: <payload> without another message section,
+	// give the attachment a descriptive filename and native .json MIME when the payload is JSON.
+	if m := reSingleToolResultPrefix.FindStringSubmatch(trimmed); m != nil && !strings.Contains(m[2], "\n\n[Tool result for ") && !strings.Contains(m[2], "\n\n[User]:") {
+		stem := sanitizeAttachmentStem(m[1])
+		payload := strings.TrimSpace(m[2])
+		if (strings.HasPrefix(payload, "{") || strings.HasPrefix(payload, "[")) && json.Valid([]byte(payload)) {
+			return fmt.Sprintf("tool_result_%s.json", stem), "application/json", []byte(payload)
+		}
+		return fmt.Sprintf("tool_result_%s.txt", stem), "text/plain", []byte(trimmed)
+	}
+	return "tool_output_context.txt", "text/plain", []byte(trimmed)
+}
+
+func inlineFenceFileSpec(lang string) (ext string, mime string) {
+	switch strings.ToLower(strings.TrimSpace(lang)) {
+	case "diff", "patch":
+		return ".diff", "text/plain"
+	case "json", "jsonc":
+		return ".json", "application/json"
+	case "csv":
+		return ".csv", "text/csv"
+	case "tsv":
+		return ".tsv", "text/tab-separated-values"
+	case "md", "markdown":
+		return ".md", "text/markdown"
+	case "html", "htm":
+		return ".html", "text/html"
+	case "xml", "svg":
+		return ".xml", "application/xml"
+	case "yaml", "yml":
+		return ".yaml", "text/yaml"
+	case "sql":
+		return ".sql", "text/plain"
+	case "go":
+		return ".go", "text/plain"
+	case "py", "python":
+		return ".py", "text/plain"
+	case "js", "javascript", "mjs":
+		return ".js", "text/javascript"
+	case "ts", "typescript", "tsx":
+		return ".ts", "text/plain"
+	case "sh", "bash", "zsh", "shell":
+		return ".sh", "text/plain"
+	case "log":
+		return ".log", "text/plain"
+	default:
+		return ".txt", "text/plain"
+	}
+}
+
+type fencedBlockSpan struct {
+	start int
+	end   int
+	lang  string
+	body  string
+}
+
+func findLargeFencedBlocks(text string) []fencedBlockSpan {
+	var blocks []fencedBlockSpan
+	pos := 0
+	inBlock := false
+	blockStart := 0
+	bodyStart := 0
+	fenceLen := 0
+	blockLang := ""
+
+	for pos < len(text) {
+		lineStart := pos
+		nl := strings.IndexByte(text[pos:], '\n')
+		var line string
+		if nl == -1 {
+			line = text[pos:]
+			pos = len(text)
+		} else {
+			line = text[pos : pos+nl]
+			pos = pos + nl + 1
+		}
+		trimmed := strings.TrimRight(line, "\r")
+		trimmedLeft := strings.TrimLeft(trimmed, " \t")
+
+		if !inBlock {
+			if strings.HasPrefix(trimmedLeft, "```") {
+				ticks := 0
+				for ticks < len(trimmedLeft) && trimmedLeft[ticks] == '`' {
+					ticks++
+				}
+				lang := strings.TrimSpace(trimmedLeft[ticks:])
+				// Skip inline single-line backtick phrases like ```foo```
+				if !strings.Contains(lang, "`") {
+					inBlock = true
+					blockStart = lineStart
+					bodyStart = pos
+					fenceLen = ticks
+					blockLang = lang
+				}
+			}
+		} else {
+			if strings.HasPrefix(trimmedLeft, "```") {
+				ticks := 0
+				for ticks < len(trimmedLeft) && trimmedLeft[ticks] == '`' {
+					ticks++
+				}
+				if ticks >= fenceLen && strings.TrimSpace(trimmedLeft[ticks:]) == "" {
+					bodyEnd := lineStart
+					if bodyEnd > bodyStart && text[bodyEnd-1] == '\n' {
+						bodyEnd--
+					}
+					if bodyEnd > bodyStart && text[bodyEnd-1] == '\r' {
+						bodyEnd--
+					}
+					blocks = append(blocks, fencedBlockSpan{
+						start: blockStart,
+						end:   pos,
+						lang:  blockLang,
+						body:  text[bodyStart:bodyEnd],
+					})
+					inBlock = false
+				}
+			}
+		}
+	}
+	return blocks
+}
+
+// ExtractLargeInlineBlocksToAttachment replaces large pasted code/diff/JSON/log fenced
+// blocks (>= minBytes individually, or multiple >= 2KB blocks totaling >= minBytes) with
+// ONE single file attachment while preserving `# Tool Use`, user instructions, and tool
+// reminders inline in the chat box.
+func ExtractLargeInlineBlocksToAttachment(prompt string, minBytes int) (compactPrompt string, att *bridge.Attachment) {
+	if minBytes <= 0 || len(prompt) < minBytes {
+		return prompt, nil
+	}
+
+	header, body, hasHeader := splitToolUseHeader(prompt)
+	core, reminder := splitTrailingBridgeReminder(body)
+	spans := findLargeFencedBlocks(core)
+	if len(spans) == 0 {
+		return prompt, nil
+	}
+
+	var candidates []fencedBlockSpan
+	totalCandidateBytes := 0
+	hasSingleLarge := false
+	for _, sp := range spans {
+		langLower := strings.ToLower(strings.TrimSpace(sp.lang))
+		if langLower == "tool_call" || langLower == "tool_calls" || langLower == "function_call" {
+			continue
+		}
+		if len(sp.body) >= minBytes {
+			candidates = append(candidates, sp)
+			totalCandidateBytes += len(sp.body)
+			hasSingleLarge = true
+		} else if len(sp.body) >= 2048 {
+			candidates = append(candidates, sp)
+			totalCandidateBytes += len(sp.body)
+		}
+	}
+	if !hasSingleLarge && (len(candidates) < 2 || totalCandidateBytes < minBytes) {
+		return prompt, nil
+	}
+
+	var filename, mime string
+	var payload []byte
+	if len(candidates) == 1 {
+		ext, m := inlineFenceFileSpec(candidates[0].lang)
+		filename = "inline_context" + ext
+		mime = m
+		payload = []byte(candidates[0].body)
+	} else {
+		filename = "inline_code_blocks.md"
+		mime = "text/markdown"
+		var sb strings.Builder
+		for i, sp := range candidates {
+			lang := strings.TrimSpace(sp.lang)
+			if lang == "" {
+				lang = "text"
+			}
+			fmt.Fprintf(&sb, "## Block %d (%s)\n\n```%s\n%s\n```\n\n", i+1, lang, lang, sp.body)
+		}
+		payload = []byte(sb.String())
+	}
+
+	if len(payload) == 0 || len(payload) > maxBridgeAttachmentBytes {
+		return prompt, nil
+	}
+
+	var replaced strings.Builder
+	cursor := 0
+	for i, sp := range candidates {
+		replaced.WriteString(core[cursor:sp.start])
+		label := strings.TrimSpace(sp.lang)
+		if label == "" {
+			label = "code"
+		}
+		fmt.Fprintf(&replaced, "[Complex %s block #%d (%d chars) attached in %s — read verbatim from attachment]\n",
+			label, i+1, len(sp.body), filename)
+		cursor = sp.end
+	}
+	replaced.WriteString(core[cursor:])
+
+	newBody := strings.TrimSpace(replaced.String())
+	if reminder != "" {
+		newBody = newBody + "\n\n" + reminder
+	}
+	if hasHeader {
+		compactPrompt = header + "\n\n" + newBody
+	} else {
+		compactPrompt = newBody
+	}
+
+	return compactPrompt, &bridge.Attachment{
+		Filename:   filename,
+		MIME:       mime,
+		DataBase64: base64.StdEncoding.EncodeToString(payload),
+		Size:       len(payload),
+		Source:     "spillover",
+	}
+}
+
 // SpilloverOversizedPrompt moves oversized code / tool-result prompts (> maxChars)
-// into a UTF-8 file attachment so Gemini receives 100% verbatim text without hitting
+// into a single UTF-8 file attachment so Gemini receives 100% verbatim text without hitting
 // browser composer character limits or triggering giant DOM paste slowdowns.
-// IMPORTANT: Never moves `# Tool Use` / `Available tools` into a file attachment,
-// because Vertex AI Search routes uploaded `.txt` files through its passive file-reader
-// sub-agent and stops emitting structured ```tool_call``` blocks.
+// IMPORTANT: Never moves `# Tool Use` / `Available tools` or trailing bridge tool-call
+// reminders into a file attachment, because Vertex AI Search routes attachment-only prompts
+// through its passive file-reader sub-agent and stops emitting structured ```tool_call``` blocks.
 func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compactPrompt string, att *bridge.Attachment) {
 	if maxChars <= 0 || len(prompt) <= maxChars {
 		return prompt, nil
 	}
 
 	// On a full prompt that starts with # Tool Use, ALWAYS keep the # Tool Use header inline
-	// and spill ONLY a genuinely massive conversation/code body to a file.
-	if !isDelta && strings.HasPrefix(prompt, "# Tool Use") {
-		if availIdx := strings.Index(prompt, "\nAvailable tools:\n"); availIdx != -1 {
-			afterAvail := availIdx + len("\nAvailable tools:\n")
-			if splitRel := strings.Index(prompt[afterAvail:], "\n\n"); splitRel != -1 {
-				headerEnd := afterAvail + splitRel
-				header := prompt[:headerEnd]
-				body := strings.TrimSpace(prompt[headerEnd+2:])
-				if len(body) > maxChars/2 {
-					data := []byte(body)
-					if len(data) <= maxBridgeAttachmentBytes {
-						filename := "code_context.txt"
+	// and spill ONLY a genuinely massive conversation/code body to a single file.
+	if !isDelta {
+		if header, rawBody, hasHeader := splitToolUseHeader(prompt); hasHeader {
+			body := strings.TrimSpace(rawBody)
+			if len(body) > maxChars/2 {
+				// If a massive system/history section precedes a concise final [User] question,
+				// keep BOTH # Tool Use and the concise [User] question inline and spill only the
+				// heavy context prefix so Gemini immediately sees the task without losing tool mode.
+				if lastUserIdx := strings.LastIndex(body, "\n\n[User]:"); lastUserIdx > maxChars/2 {
+					prefix := strings.TrimSpace(body[:lastUserIdx])
+					lastUser := strings.TrimSpace(body[lastUserIdx+2:])
+					if len(lastUser) <= 1200 && len(prefix) <= maxBridgeAttachmentBytes {
+						filename := "session_context.txt"
+						data := []byte(prefix)
 						return fmt.Sprintf(
-								"%s\n\n[The full prompt / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full before responding or calling tools.]",
-								header, len(body), filename,
+								"%s\n\n[Full session instructions / context (%d chars) are attached directly in %s. Read the attached file verbatim before responding or calling tools.]\n\n%s",
+								header, len(prefix), filename, lastUser,
 							), &bridge.Attachment{
 								Filename:   filename,
 								MIME:       "text/plain",
@@ -471,21 +838,60 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 							}
 					}
 				}
+
+				data := []byte(body)
+				if len(data) <= maxBridgeAttachmentBytes {
+					filename := "code_context.txt"
+					return fmt.Sprintf(
+							"%s\n\n[The full prompt / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full before responding or calling tools.]",
+							header, len(body), filename,
+						), &bridge.Attachment{
+							Filename:   filename,
+							MIME:       "text/plain",
+							DataBase64: base64.StdEncoding.EncodeToString(data),
+							Size:       len(data),
+							Source:     "spillover",
+						}
+				}
 			}
+			// Never bury `# Tool Use` inside full_prompt_context.txt when the body itself is small.
+			return prompt, nil
 		}
-		// Never bury `# Tool Use` inside full_prompt_context.txt when the body itself is small.
-		return prompt, nil
 	}
 
-	// Delta turns (e.g. massive [Tool result for read_file]) or oversized single prompts:
+	// Delta turns (e.g. massive [Tool result for read_file] or connector JSON):
+	// keep any trailing bridge/connector tool reminder INLINE in the composer!
+	if isDelta {
+		core, reminder := splitTrailingBridgeReminder(prompt)
+		if len(core) <= maxChars/2 {
+			return prompt, nil
+		}
+		filename, mime, data := classifySpilledDeltaPayload(core)
+		if len(data) > maxBridgeAttachmentBytes {
+			return prompt, nil
+		}
+		compact := fmt.Sprintf(
+			"[Full tool output / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full and continue — do NOT re-read it with local tools.]",
+			len(core), filename,
+		)
+		if reminder != "" {
+			compact = compact + "\n\n" + reminder
+		}
+		return compact, &bridge.Attachment{
+			Filename:   filename,
+			MIME:       mime,
+			DataBase64: base64.StdEncoding.EncodeToString(data),
+			Size:       len(data),
+			Source:     "spillover",
+		}
+	}
+
+	// Oversized plain non-tool prompt:
 	data := []byte(prompt)
 	if len(data) > maxBridgeAttachmentBytes {
 		return prompt, nil
 	}
-	filename := "tool_output_context.txt"
-	if !isDelta {
-		filename = "full_prompt_context.txt"
-	}
+	filename := "full_prompt_context.txt"
 	compact := fmt.Sprintf(
 		"[Full tool output / code context (%d chars) is attached directly in %s. Read the attached file verbatim in full and continue — do NOT re-read it with local tools.]",
 		len(prompt), filename,
@@ -573,6 +979,99 @@ func extForMIME(mime string) string {
 	}
 }
 
+var (
+	reVolatileSystemLine = regexp.MustCompile(`(?im)^\s*(?:current\s+(?:date|time|datetime|timestamp)|today'?s\s+date|local\s+time|server\s+time|timestamp|now)\s*[:=].*$`)
+	reVolatileISODate    = regexp.MustCompile(`\b20\d{2}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?\b`)
+	reVolatileClock      = regexp.MustCompile(`\b\d{1,2}:\d{2}(?::\d{2})?\s*(?:AM|PM|UTC|GMT)?\b`)
+)
+
+// normalizeSystemPromptForFingerprint strips volatile clock/date/timestamp metadata
+// from system prompts so routine per-turn clock updates do not break delta context.
+func normalizeSystemPromptForFingerprint(text string) string {
+	norm := reVolatileSystemLine.ReplaceAllString(text, "[volatile-time]")
+	norm = reVolatileISODate.ReplaceAllString(norm, "[date]")
+	norm = reVolatileClock.ReplaceAllString(norm, "[time]")
+	return norm
+}
+
+// DetectAgentToolLoop checks the trailing autonomous agent turns (since the last user
+// message) for 3+ consecutive identical tool calls or tool outputs, helping prevent
+// runaway retry storms that risk triggering Google frequency bans.
+func DetectAgentToolLoop(messages []models.OpenAIMessage) (repeatCount int, toolName string) {
+	if len(messages) < 6 {
+		return 0, ""
+	}
+	toolCallNames := format.BuildToolCallNameMap(messages)
+
+	var callSigs []string
+	var callNames []string
+	var outSigs []string
+	var outNames []string
+
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if role == "user" || role == "" {
+			break
+		}
+		if role == "assistant" && len(msg.ToolCalls) > 0 {
+			var parts []string
+			firstName := ""
+			for _, tc := range msg.ToolCalls {
+				n := strings.TrimSpace(tc.Function.Name)
+				if firstName == "" {
+					firstName = n
+				}
+				parts = append(parts, n+":"+strings.TrimSpace(tc.Function.Arguments))
+			}
+			callSigs = append(callSigs, strings.Join(parts, "|"))
+			callNames = append(callNames, firstName)
+		} else if role == "tool" {
+			tName := strings.TrimSpace(msg.Name)
+			if tName == "" && msg.ToolCallID != "" {
+				tName = toolCallNames[msg.ToolCallID]
+			}
+			text, _ := format.ExtractMessageContent(msg)
+			sum := sha256.Sum256([]byte(tName + "\x00" + strings.TrimSpace(text)))
+			outSigs = append(outSigs, hex.EncodeToString(sum[:]))
+			outNames = append(outNames, tName)
+		}
+	}
+
+	countPrefix := func(sigs []string) int {
+		if len(sigs) == 0 {
+			return 0
+		}
+		c := 1
+		for i := 1; i < len(sigs); i++ {
+			if sigs[i] == sigs[0] {
+				c++
+			} else {
+				break
+			}
+		}
+		return c
+	}
+
+	callRep := countPrefix(callSigs)
+	outRep := countPrefix(outSigs)
+	if callRep >= 3 && callRep >= outRep {
+		name := "tool"
+		if len(callNames) > 0 && callNames[0] != "" {
+			name = callNames[0]
+		}
+		return callRep, name
+	}
+	if outRep >= 3 {
+		name := "tool"
+		if len(outNames) > 0 && outNames[0] != "" {
+			name = outNames[0]
+		}
+		return outRep, name
+	}
+	return 0, ""
+}
+
 // ConversationFingerprints returns a deterministic slice of SHA-256 fingerprints
 // starting with the tool-definition digest followed by one digest per message.
 func ConversationFingerprints(req models.OpenAIChatRequest) []string {
@@ -588,6 +1087,7 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 
 	for _, msg := range req.Messages {
 		h := sha256.New()
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
 		h.Write([]byte(msg.Role))
 		h.Write([]byte{0})
 		h.Write([]byte(msg.Name))
@@ -595,6 +1095,9 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 		h.Write([]byte(msg.ToolCallID))
 		h.Write([]byte{0})
 		text, atts := format.ExtractMessageContent(msg)
+		if role == "system" || role == "developer" {
+			text = normalizeSystemPromptForFingerprint(text)
+		}
 		h.Write([]byte(text))
 		for _, att := range atts {
 			h.Write([]byte{1})
@@ -620,10 +1123,12 @@ type preparedBridgeTurn struct {
 	Prompt           string
 	Attachments      []bridge.Attachment
 	NewChat          bool
+	LoopPenalty      bool
 	SessionClient    string
 	SessionConv      string
 	Fingerprints     []string
 	UserFingerprints []string
+	ToolNames        map[string]bool
 	UploadedSigs     map[string]string
 }
 
@@ -647,11 +1152,12 @@ func ExtractUserFingerprints(req models.OpenAIChatRequest, allFingerprints []str
 }
 
 func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
-	a.Bridge.RecordTurnSuccessWithConversation(
+	a.Bridge.RecordTurnSuccessWithTools(
 		p.SessionClient,
 		p.SessionConv,
 		p.Fingerprints,
 		p.UserFingerprints,
+		p.ToolNames,
 		p.UploadedSigs,
 		p.NewChat,
 	)
@@ -661,6 +1167,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	sessClient, sessConvGen, alreadyUploaded := a.Bridge.ActiveSession()
 	fingerprints := ConversationFingerprints(req)
 	userFPs, hasAssistantOrTool := ExtractUserFingerprints(req, fingerprints)
+	currentToolNames := format.AllowedToolNames(req.Tools)
 
 	// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
 	// browser tab still holds an older conversation, so Gemini starts a clean New Chat
@@ -675,10 +1182,11 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	activeAtts := apiAttachments
 	isDelta := false
 
-	// Delta-context optimization: if the active browser tab already holds the exact
-	// tool definitions and leading conversation turns, send only the newly appended turns.
+	// Delta-context optimization: if the active browser tab already holds the leading
+	// conversation turns (including when only new tools were added mid-chat), send only
+	// the newly appended turns plus any newly added tool schemas.
 	if a.Cfg.BridgeDeltaContext && !newChat {
-		matchedPrefix := a.Bridge.MatchDeltaPrefix(fingerprints)
+		matchedPrefix, addedToolNames := a.Bridge.MatchDeltaPrefixWithTools(fingerprints, currentToolNames)
 		// Element 0 is the tools digest, so matchedPrefix > 1 means at least 1 message matched.
 		if matchedPrefix > 1 {
 			matchedMsgs := matchedPrefix - 1
@@ -686,6 +1194,25 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 				priorToolNames := format.BuildToolCallNameMap(req.Messages[:matchedMsgs])
 				deltaPrompt, deltaAtts := format.MessagesToDeltaPromptWithNames(req.Messages[matchedMsgs:], req.ToolChoice, priorToolNames)
 				if strings.TrimSpace(deltaPrompt) != "" {
+					if len(addedToolNames) > 0 {
+						addedSet := make(map[string]bool, len(addedToolNames))
+						for _, n := range addedToolNames {
+							addedSet[n] = true
+						}
+						var addedDefs []models.OpenAITool
+						for _, t := range req.Tools {
+							n := strings.TrimSpace(t.Function.Name)
+							if n == "" {
+								n = strings.TrimSpace(t.Name)
+							}
+							if addedSet[n] {
+								addedDefs = append(addedDefs, t)
+							}
+						}
+						if compactAdded := format.CompactToolDefinitionsJSON(addedDefs); compactAdded != "" {
+							deltaPrompt = fmt.Sprintf("[Newly added tools available in this session]:\n%s\n\n%s", compactAdded, deltaPrompt)
+						}
+					}
 					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
 					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
 					// ```tool_call``` blocks instead of refusing as a cloud-only environment.
@@ -712,8 +1239,8 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 					bridgePrompt = deltaPrompt
 					activeAtts = deltaAtts
 					isDelta = true
-					a.Logf("Bridge delta context active: sending %d/%d new message(s) (%d chars vs %d full)",
-						len(req.Messages)-matchedMsgs, len(req.Messages), len(deltaPrompt), len(fullPrompt))
+					a.Logf("Bridge delta context active: sending %d/%d new message(s) (%d chars vs %d full, +%d added tools)",
+						len(req.Messages)-matchedMsgs, len(req.Messages), len(deltaPrompt), len(fullPrompt), len(addedToolNames))
 				}
 			}
 		}
@@ -791,17 +1318,47 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		}
 	}
 
-	// Spillover oversized code / tool-result prompts to a .txt file upload so Gemini gets
-	// 100% verbatim content without browser input truncation or sluggish DOM paste.
+	// Offload complex/oversized prompts into ONE single file attachment so Gemini gets
+	// 100% verbatim content without browser composer truncation, DOM lag, or extra upload calls.
+	var spilledAtt *bridge.Attachment
 	if a.Cfg.BridgeSpilloverChars > 0 && len(bridgePrompt) > a.Cfg.BridgeSpilloverChars {
 		origLen := len(bridgePrompt)
 		compactPrompt, spillAtt := SpilloverOversizedPrompt(bridgePrompt, a.Cfg.BridgeSpilloverChars, isDelta)
 		if spillAtt != nil {
 			bridgePrompt = compactPrompt
-			attachments = append(attachments, *spillAtt)
+			spilledAtt = spillAtt
 			a.Logf("Bridge spilled oversized prompt (%d chars) into attachment %s (%d KB)",
 				origLen, spillAtt.Filename, (spillAtt.Size+1023)/1024)
 		}
+	}
+	// Even below full spillover, replace large pasted fenced code/diff/JSON/log blocks
+	// (>= bridge_large_code_upload_bytes) with a single clean typed attachment while keeping
+	// `# Tool Use`, user instructions, and tool reminders inline.
+	if spilledAtt == nil && a.Cfg.BridgeLargeCodeUploadBytes > 0 {
+		origLen := len(bridgePrompt)
+		compactPrompt, inlineAtt := ExtractLargeInlineBlocksToAttachment(bridgePrompt, a.Cfg.BridgeLargeCodeUploadBytes)
+		if inlineAtt != nil {
+			bridgePrompt = compactPrompt
+			spilledAtt = inlineAtt
+			a.Logf("Bridge offloaded complex inline block(s) (%d -> %d chars) into attachment %s (%d KB)",
+				origLen, len(compactPrompt), inlineAtt.Filename, (inlineAtt.Size+1023)/1024)
+		}
+	}
+	if spilledAtt != nil {
+		attachments = append(attachments, *spilledAtt)
+		uploadedSigs["sha256:"+attachmentContentHash(*spilledAtt)] = "uploaded"
+	}
+
+	// Runaway agent-loop detection: if the last 3+ autonomous tool turns repeated the exact
+	// same call or output, inject a clear loop-breaker hint and apply extra anti-ban pacing.
+	loopPenalty := false
+	if repeatCount, loopTool := DetectAgentToolLoop(req.Messages); repeatCount >= 3 {
+		loopPenalty = true
+		a.Logf("Bridge detected runaway agent loop (%d identical %s turns) — injecting loop-breaker & extra pacing", repeatCount, loopTool)
+		bridgePrompt = bridgePrompt + fmt.Sprintf(
+			"\n\n[Loop protection: the last %d consecutive tool turns repeated the exact same %s call/output. Do NOT repeat the same call again — change strategy, inspect what failed, or explain the blocker to the user.]",
+			repeatCount, loopTool,
+		)
 	}
 
 	// Final hard deduplication pass so duplicate bytes/files are never dispatched in a turn
@@ -815,10 +1372,12 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		Prompt:           bridgePrompt,
 		Attachments:      attachments,
 		NewChat:          newChat,
+		LoopPenalty:      loopPenalty,
 		SessionClient:    sessClient,
 		SessionConv:      sessConvGen,
 		Fingerprints:     fingerprints,
 		UserFingerprints: userFPs,
+		ToolNames:        currentToolNames,
 		UploadedSigs:     uploadedSigs,
 	}
 }

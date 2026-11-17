@@ -53,6 +53,10 @@ func New(cfg config.Config, version string) *App {
 		time.Duration(cfg.BridgeJitterMs)*time.Millisecond,
 		cfg.BridgeMaxPer10Min,
 	)
+	hub.SetHourlyLimit(cfg.BridgeMaxPerHour)
+	if cfg.BridgePacingStateFile != "" {
+		hub.SetPacingStateFile(cfg.BridgePacingStateFile)
+	}
 
 	app := &App{
 		Cfg:        cfg,
@@ -79,6 +83,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1beta/models/{target}", a.handleGoogleGenerate)
 
 	mux.HandleFunc("GET /bridge/status", a.handleBridgeStatus)
+	mux.HandleFunc("POST /bridge/pause", a.handleBridgePause)
 	mux.HandleFunc("POST /bridge/heartbeat", a.handleBridgeHeartbeat)
 	mux.HandleFunc("GET /bridge/poll", a.handleBridgePoll)
 	mux.HandleFunc("POST /bridge/chunk", a.handleBridgeChunk)

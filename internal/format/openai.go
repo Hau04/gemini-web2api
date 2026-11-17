@@ -617,6 +617,37 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 	return compacted
 }
 
+// CompactToolDefinitionsJSON converts OpenAI tool declarations into the compact
+// schema JSON representation used in # Tool Use and additive mid-chat tool deltas.
+func CompactToolDefinitionsJSON(tools []models.OpenAITool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	defs := make([]models.OpenAIFunction, 0, len(tools))
+	for _, tool := range tools {
+		fn := tool.Function
+		if fn.Name == "" {
+			fn.Name = tool.Name
+		}
+		if fn.Description == "" {
+			fn.Description = tool.Description
+		}
+		if fn.Parameters == nil {
+			fn.Parameters = tool.Parameters
+		}
+		if fn.Parameters == nil {
+			fn.Parameters = map[string]any{}
+		}
+		if fn.Name != "" {
+			defs = append(defs, fn)
+		}
+	}
+	if len(defs) == 0 {
+		return ""
+	}
+	return string(compactToolDefinitions(defs))
+}
+
 // AllowedToolNames extracts the set of declared tool function names from an OpenAI request.
 func AllowedToolNames(tools []models.OpenAITool) map[string]bool {
 	if len(tools) == 0 {
@@ -875,7 +906,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"%s"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
-					"- Output ONLY the tool_call block(s) when calling tools. Batch independent calls in one response.\n"+
+					"- Output ONLY the tool_call block(s) when calling tools. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
 					"Available tools:\n%s%s",
 				connectorNote,
