@@ -358,11 +358,6 @@ func formatMessagePart(msg models.OpenAIMessage, contentStr string) string {
 	}
 }
 
-func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
-	var parts []string
-	var images []Image
-
-	strChoice, isStr := req.ToolChoice.(string)
 func truncateOneLine(s string, maxRunes int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if maxRunes <= 0 {
@@ -393,8 +388,9 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 	buildCompact := func(maxDesc, maxParamDesc int) []byte {
 		out := make([]compactToolDef, len(toolDefs))
 		for i, fn := range toolDefs {
+			paramsMap, _ := fn.Parameters.(map[string]any)
 			required := make(map[string]bool)
-			if reqRaw, ok := fn.Parameters["required"]; ok {
+			if reqRaw, ok := paramsMap["required"]; ok {
 				switch arr := reqRaw.(type) {
 				case []any:
 					for _, item := range arr {
@@ -410,7 +406,7 @@ func compactToolDefinitions(toolDefs []models.OpenAIFunction) []byte {
 			}
 
 			var params map[string]string
-			if props, ok := fn.Parameters["properties"].(map[string]any); ok && len(props) > 0 {
+			if props, ok := paramsMap["properties"].(map[string]any); ok && len(props) > 0 {
 				params = make(map[string]string, len(props))
 				for pName, pRaw := range props {
 					pType := "any"
