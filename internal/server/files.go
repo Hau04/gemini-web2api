@@ -438,13 +438,16 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 // SpilloverOversizedPrompt moves oversized code / tool-result prompts (> maxChars)
 // into a UTF-8 file attachment so Gemini receives 100% verbatim text without hitting
 // browser composer character limits or triggering giant DOM paste slowdowns.
+// IMPORTANT: Never moves `# Tool Use` / `Available tools` into a file attachment,
+// because Vertex AI Search routes uploaded `.txt` files through its passive file-reader
+// sub-agent and stops emitting structured ```tool_call``` blocks.
 func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compactPrompt string, att *bridge.Attachment) {
 	if maxChars <= 0 || len(prompt) <= maxChars {
 		return prompt, nil
 	}
 
-	// On a full prompt that starts with # Tool Use, keep the # Tool Use header inline
-	// (if reasonably sized) and spill only the oversized conversation/code body to a file.
+	// On a full prompt that starts with # Tool Use, ALWAYS keep the # Tool Use header inline
+	// and spill ONLY a genuinely massive conversation/code body to a file.
 	if !isDelta && strings.HasPrefix(prompt, "# Tool Use") {
 		if availIdx := strings.Index(prompt, "\nAvailable tools:\n"); availIdx != -1 {
 			afterAvail := availIdx + len("\nAvailable tools:\n")
@@ -452,7 +455,7 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 				headerEnd := afterAvail + splitRel
 				header := prompt[:headerEnd]
 				body := strings.TrimSpace(prompt[headerEnd+2:])
-				if len(body) > maxChars/2 && len(header) <= maxChars {
+				if len(body) > maxChars/2 {
 					data := []byte(body)
 					if len(data) <= maxBridgeAttachmentBytes {
 						filename := "code_context.txt"
@@ -470,6 +473,8 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 				}
 			}
 		}
+		// Never bury `# Tool Use` inside full_prompt_context.txt when the body itself is small.
+		return prompt, nil
 	}
 
 	// Delta turns (e.g. massive [Tool result for read_file]) or oversized single prompts:
@@ -636,6 +641,15 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 			if matchedMsgs < len(req.Messages) {
 				deltaPrompt, deltaAtts := format.MessagesToDeltaPrompt(req.Messages[matchedMsgs:], req.ToolChoice)
 				if strings.TrimSpace(deltaPrompt) != "" {
+					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
+					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
+					// ```tool_call``` blocks instead of refusing as a cloud-only environment.
+					lastRole := req.Messages[len(req.Messages)-1].Role
+					if len(req.Tools) > 0 && (lastRole == "user" || lastRole == "") {
+						if reminder := format.BuildDeltaToolReminder(req.Tools, req.ToolChoice); reminder != "" {
+							deltaPrompt = deltaPrompt + "\n\n" + reminder
+						}
+					}
 					bridgePrompt = deltaPrompt
 					activeAtts = deltaAtts
 					isDelta = true

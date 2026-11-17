@@ -55,7 +55,7 @@ func Default() Config {
 		BridgeMaxPer10Min:          18,
 		BridgeAutoUploadLocalFiles: true,
 		BridgeLargeCodeUploadBytes: 12288,
-		BridgeSpilloverChars:       18000,
+		BridgeSpilloverChars:       48000,
 		BridgeDeltaContext:         true,
 	}
 }

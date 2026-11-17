@@ -935,3 +935,151 @@ func TestBridgeHistoricalAPIAttachmentNotReuploadedWhenSystemPromptChanges(t *te
 	}
 }
 
+func TestSpilloverNeverBuriesToolUseHeaderWhenToolsAreLarge(t *testing.T) {
+	// Even when # Tool Use + Available tools exceeds maxChars, a short user prompt
+	// must NEVER be dumped into full_prompt_context.txt (which caused Vertex AI Search
+	// to route the prompt into its passive file-reader sub-agent and break tool calls).
+	largeToolHeader := "# Tool Use\n\nAvailable tools:\n[" + strings.Repeat(`{"name":"tool","desc":"desc"},`, 120) + "{}]"
+	prompt := largeToolHeader + "\n\nlook into my sidebar here, retain the local files that store these 3 existing chats, others dlt"
+
+	outPrompt, att := SpilloverOversizedPrompt(prompt, 2000, false)
+	if att != nil {
+		t.Fatalf("expected NO spillover attachment when only # Tool Use header is large and user body is short, got %+v", att)
+	}
+	if outPrompt != prompt || !strings.Contains(outPrompt, "# Tool Use") {
+		t.Errorf("expected prompt with # Tool Use header to remain completely inline")
+	}
+}
+
+func TestBridgeDeltaUserFollowUpIncludesLocalBridgeToolReminder(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeDeltaContext = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_agent", "1")
+
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "list_dir", "description": "List directory"}},
+		map[string]any{"type": "function", "function": map[string]any{"name": "delete_file", "description": "Delete a file"}},
+	}
+
+	runTurn := func(msgs []any, reply string) *bridge.Request {
+		ch := make(chan *bridge.Request, 1)
+		go func() {
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_agent", "1", 2*time.Second)
+			ch <- req
+			if req != nil {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: reply, Done: true})
+			}
+		}()
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   false,
+			"tools":    tools,
+			"messages": msgs,
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return <-ch
+	}
+
+	msgs1 := []any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "check my chats"},
+	}
+	_ = runTurn(msgs1, "Which folder?")
+
+	// Turn 2: user follow-up ("use local tools in workbuddy") -> delta prompt includes compact bridge reminder
+	msgs2 := append(append([]any{}, msgs1...),
+		map[string]any{"role": "assistant", "content": "Which folder?"},
+		map[string]any{"role": "user", "content": "use local tools in workbuddy"},
+	)
+	req2 := runTurn(msgs2, "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{}}\n```")
+	if req2 == nil {
+		t.Fatal("expected turn 2 bridge request")
+	}
+	if strings.Contains(req2.Prompt, "# Tool Use") {
+		t.Errorf("turn 2 delta prompt should NOT repeat full # Tool Use block, got %q", req2.Prompt)
+	}
+	if !strings.Contains(req2.Prompt, "Local client bridge active") || !strings.Contains(req2.Prompt, "list_dir") {
+		t.Errorf("turn 2 follow-up user turn must include compact local bridge tool reminder, got %q", req2.Prompt)
+	}
+}
+
+func TestBridgeStreamingParsesJSONToolCallsAndFlushesNormalJSON(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "list_dir", "description": "List directory"}},
+	}
+
+	runStream := func(tabID string, chunks []string) string {
+		app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", tabID, "1")
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", tabID, "1", 2*time.Second)
+			if req == nil {
+				return
+			}
+			for i, c := range chunks {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: c, Done: i == len(chunks)-1})
+			}
+		}()
+
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   true,
+			"tools":    tools,
+			"messages": []any{map[string]any{"role": "user", "content": "list files"}},
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		<-done
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return rec.Body.String()
+	}
+
+	// Case 1: Model uses ```json``` for a declared tool -> must emit finish_reason: tool_calls
+	sseTool := runStream("tab_stream_tc", []string{
+		"Checking folder.\n```js",
+		"on\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n```",
+	})
+	if !strings.Contains(sseTool, `"finish_reason":"tool_calls"`) || !strings.Contains(sseTool, `"name":"list_dir"`) {
+		t.Errorf("expected streaming SSE to parse declared ```json``` tool call, got: %s", sseTool)
+	}
+
+	// Case 2: Model outputs ordinary ```json``` config snippet -> must flush verbatim without dropping text
+	ssePlain := runStream("tab_stream_json", []string{
+		"Here is the config:\n```json\n",
+		"{\"name\":\"my_project\",\"count\":3}\n```",
+	})
+	if strings.Contains(ssePlain, `"finish_reason":"tool_calls"`) {
+		t.Errorf("ordinary ```json``` snippet must NOT emit tool_calls, got: %s", ssePlain)
+	}
+	if !strings.Contains(ssePlain, "my_project") || !strings.Contains(ssePlain, `"finish_reason":"stop"`) {
+		t.Errorf("ordinary ```json``` snippet must be flushed intact with stop finish_reason, got: %s", ssePlain)
+	}
+}
+
+

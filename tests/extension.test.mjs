@@ -938,5 +938,59 @@ test("Upload injection dispatches change-only on file input and single drop targ
   assert.equal(/for\s*\(\s*const\s+target\s+of\s+dropTargets\s*\)/.test(bridgeSrc), false);
 });
 
+test("cleanDiscoveryText strips Vertex AI Search [[section:...]] and internal sub-agent transfer noise", () => {
+  const noisy =
+    "I am transferring your request to read and process the uploaded file.\n" +
+    "[[section:Reading uploaded file context]]\n" +
+    "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{\"path\":\".\"}}\n```";
+  const cleaned = netHook.cleanDiscoveryText(noisy);
+  assert.equal(cleaned.includes("[[section:"), false);
+  assert.equal(cleaned.includes("transferring your request"), false);
+  assert.ok(cleaned.includes("\"name\":\"list_dir\""));
+
+  // Standalone routing narration is dropped completely
+  assert.equal(
+    netHook.cleanDiscoveryText("I am checking the available tools and integrations in this environment to see if local tools are accessible."),
+    ""
+  );
+
+  // Normal streaming delta with leading newline is preserved untouched
+  assert.equal(netHook.cleanDiscoveryText("\n2. Second item"), "\n2. Second item");
+
+  // Stream processor emits clean tool_call without [[section:...]] noise
+  const events = [];
+  const proc = netHook.createStreamProcessor("discovery_json", "https://content-discoveryengine.googleapis.com/widgetStreamAssist", (type, payload) => {
+    events.push({ type, payload });
+  });
+  proc.feed(
+    JSON.stringify({
+      streamAssistResponse: {
+        answer: {
+          state: "IN_PROGRESS",
+          replies: [
+            { groundedContent: { content: { role: "model", text: "I am checking the available tools and integrations in this environment.\n[[section:Checking available environment tools]]\n" } } }
+          ]
+        }
+      }
+    }) + "\n" +
+    JSON.stringify({
+      streamAssistResponse: {
+        answer: {
+          state: "SUCCEEDED",
+          replies: [
+            { groundedContent: { content: { role: "model", text: "```tool_call\n{\"name\":\"list_dir\",\"arguments\":{}}\n```" } } }
+          ]
+        }
+      }
+    })
+  );
+  proc.finish();
+
+  const deltas = events.filter((e) => e.type === "delta").map((e) => e.payload.text).join("");
+  assert.equal(deltas.includes("[[section:"), false);
+  assert.ok(deltas.includes("```tool_call"));
+});
+
+
 
 
