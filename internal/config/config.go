@@ -39,7 +39,7 @@ func Default() Config {
 		Host:                       "0.0.0.0",
 		RetryAttempts:              3,
 		RetryDelaySec:              2,
-		RequestTimeoutSec:          180,
+		RequestTimeoutSec:          300,
 		GeminiBL:                   "boq_assistant-bard-web-server_20260716.08_p0",
 		AuthUser:                   "",
 		XSRFToken:                  "",

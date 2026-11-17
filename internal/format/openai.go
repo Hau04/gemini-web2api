@@ -500,8 +500,14 @@ func BuildDeltaToolReminder(tools []models.OpenAITool, toolChoice any) string {
 	if len(names) == 0 {
 		return ""
 	}
+	hasConnectorBridge := seen["ToolSearch"] && seen["DeferExecuteTool"]
+	extraHint := ""
+	if hasConnectorBridge {
+		extraHint = " For external connectors/MCP tools (e.g. Gmail, GitHub, mcp__*), call ToolSearch first, then DeferExecuteTool with {\"toolName\": \"...\", \"params\": {...}}."
+	}
 	return fmt.Sprintf(
-		"[Local client bridge active: to access/modify local files or run commands, output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result. Available tools: %s]",
+		"[Local client bridge active: to access/modify local files, run commands, or use connected apps/connectors, output a ```tool_call\n{\"name\": \"...\", \"arguments\": {...}}\n``` block — the user's local app executes it automatically and returns the result.%s Available tools: %s]",
+		extraHint,
 		strings.Join(names, ", "),
 	)
 }
@@ -532,17 +538,33 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 		}
 
 		if len(toolDefs) > 0 {
+			hasToolSearch := false
+			hasDeferExec := false
+			for _, td := range toolDefs {
+				switch td.Name {
+				case "ToolSearch":
+					hasToolSearch = true
+				case "DeferExecuteTool":
+					hasDeferExec = true
+				}
+			}
+			connectorNote := ""
+			if hasToolSearch && hasDeferExec {
+				connectorNote = "- External connectors & MCP tools (e.g. Gmail, GitHub, Drive, mcp__*): use `ToolSearch` to load their schema first, then invoke them via `DeferExecuteTool` with `{\"toolName\": \"<exact_name>\", \"params\": {...}}`. Do not call `mcp__*` directly.\n"
+			}
 			constraint := BuildToolChoiceInstruction(req.ToolChoice)
 			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
 				"# Tool Use\n\n"+
-					"An external local client bridge is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that tool on the user's local machine and returns the output in the next turn as `[Tool result for <name>]`.\n"+
-					"- You DO have local tool execution through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files/shell — call the tools below instead.\n"+
+					"An external local client bridge is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that tool on the user's local machine (or connected apps) and returns the output in the next turn as `[Tool result for <name>]`.\n"+
+					"- You DO have local tool and connector execution through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files/shell/connectors — call the tools below instead.\n"+
+					"%s"+
 					"- Call format:\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch independent calls in one response.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
 					"Available tools:\n%s%s",
+				connectorNote,
 				string(defsJSON),
 				constraint,
 			))
@@ -648,8 +670,33 @@ func decodeToolCallPayload(content string, requireAllowed bool, allowed map[stri
 				}
 				continue
 			}
-			if requireAllowed && !allowed[name] {
+			canWrapDeferred := allowed["DeferExecuteTool"] && strings.HasPrefix(name, "mcp__")
+			if requireAllowed && !allowed[name] && !canWrapDeferred {
 				return nil
+			}
+			if canWrapDeferred && !allowed[name] {
+				var paramsObj any = map[string]any{}
+				if str, ok := data.Arguments.(string); ok && strings.TrimSpace(str) != "" {
+					var parsed any
+					if err := json.Unmarshal([]byte(str), &parsed); err == nil {
+						paramsObj = parsed
+					}
+				} else if data.Arguments != nil {
+					paramsObj = data.Arguments
+				}
+				wrapped, _ := json.Marshal(map[string]any{
+					"toolName": name,
+					"params":   paramsObj,
+				})
+				out = append(out, models.OpenAIToolCall{
+					ID:   fmt.Sprintf("call_%s", RandHex(8)),
+					Type: "function",
+					Function: models.OpenAIToolCallFunction{
+						Name:      "DeferExecuteTool",
+						Arguments: string(wrapped),
+					},
+				})
+				continue
 			}
 			var argsStr string
 			if str, ok := data.Arguments.(string); ok {
@@ -720,12 +767,12 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 // and no explicit tool_call blocks were found, it also accepts ```json``` blocks whose
 // "name" matches a declared tool in allowedTools.
 func ParseToolCallsWithAllowed(text string, allowedTools map[string]bool) (string, []models.OpenAIToolCall) {
-	clean, calls := extractBlocksWithRegex(text, reToolCall, false, nil)
+	clean, calls := extractBlocksWithRegex(text, reToolCall, false, allowedTools)
 	if len(calls) > 0 {
 		return clean, calls
 	}
 
-	cleanXML, xmlCalls := extractBlocksWithRegex(text, reXMLToolCall, false, nil)
+	cleanXML, xmlCalls := extractBlocksWithRegex(text, reXMLToolCall, false, allowedTools)
 	if len(xmlCalls) > 0 {
 		return cleanXML, xmlCalls
 	}

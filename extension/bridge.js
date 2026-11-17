@@ -2714,12 +2714,12 @@
         characterData: true
       });
 
-      // Absolute safety timeout: 150s
+      // Absolute safety timeout: 240s
       const hardTimeout = setTimeout(() => {
         if (!completed) {
           finish();
         }
-      }, 150000);
+      }, 240000);
     });
   }
 
