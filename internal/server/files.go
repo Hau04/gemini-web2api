@@ -689,10 +689,24 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 					// On follow-up user turns in tool-enabled sessions (e.g. "use local tools in workbuddy"),
 					// include a compact one-line bridge reminder so Gemini Enterprise keeps emitting
 					// ```tool_call``` blocks instead of refusing as a cloud-only environment.
-					lastRole := req.Messages[len(req.Messages)-1].Role
+					lastMsg := req.Messages[len(req.Messages)-1]
+					lastRole := lastMsg.Role
 					if len(req.Tools) > 0 && (lastRole == "user" || lastRole == "") {
 						if reminder := format.BuildDeltaToolReminder(req.Tools, req.ToolChoice); reminder != "" {
 							deltaPrompt = deltaPrompt + "\n\n" + reminder
+						}
+					} else if len(req.Tools) > 0 && lastRole == "tool" {
+						// After ToolSearch loads deferred WorkBuddy connector schemas, include a
+						// compact DeferExecuteTool call-format & target-verification reminder.
+						allToolNames := format.BuildToolCallNameMap(req.Messages)
+						lastToolName := strings.TrimSpace(lastMsg.Name)
+						if lastToolName == "" && lastMsg.ToolCallID != "" {
+							lastToolName = allToolNames[lastMsg.ToolCallID]
+						}
+						if lastToolName == "ToolSearch" {
+							if reminder := format.BuildToolSearchFollowUpReminder(req.Tools, req.ToolChoice); reminder != "" {
+								deltaPrompt = deltaPrompt + "\n\n" + reminder
+							}
 						}
 					}
 					bridgePrompt = deltaPrompt

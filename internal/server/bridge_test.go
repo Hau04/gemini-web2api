@@ -1197,5 +1197,120 @@ func TestBridgeAutoNewChatSyncWhenClientStartsFreshConversation(t *testing.T) {
 	}
 }
 
+func TestBridgeWorkBuddyDeferredConnectorFlowAndAutoWrap(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeDeltaContext = true
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	tools := []any{
+		map[string]any{"type": "function", "function": map[string]any{"name": "read_file", "description": "Read file"}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "ToolSearch",
+			"description": "Search deferred connector tools.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+		}},
+		map[string]any{"type": "function", "function": map[string]any{
+			"name":        "DeferExecuteTool",
+			"description": "Execute a deferred connector tool.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"toolName": map[string]any{"type": "string"},
+					"params":   map[string]any{"type": "object"},
+				},
+				"required": []any{"toolName", "params"},
+			},
+		}},
+	}
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_wb_conn", "1")
+
+	runTurn := func(msgs []any, modelOutput string) (*bridge.Request, string) {
+		reqCh := make(chan *bridge.Request, 1)
+		go func() {
+			req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_wb_conn", "1", 2*time.Second)
+			reqCh <- req
+			if req != nil {
+				_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: modelOutput, Done: true})
+			}
+		}()
+		raw, _ := json.Marshal(map[string]any{
+			"model":    "gemini-4-hydrogen",
+			"stream":   true,
+			"tools":    tools,
+			"messages": msgs,
+		})
+		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+		httpReq.RemoteAddr = "127.0.0.1:54321"
+		httpReq.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httpReq)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		return <-reqCh, rec.Body.String()
+	}
+
+	// Turn 1: User asks to create a GitHub PR; model searches tools via ToolSearch
+	turn1Msgs := []any{
+		map[string]any{"role": "system", "content": "You are WorkBuddy."},
+		map[string]any{"role": "user", "content": "Create a PR on Hau04/gemini-web2api"},
+	}
+	req1, sse1 := runTurn(turn1Msgs, "```tool_call\n{\"name\":\"ToolSearch\",\"arguments\":{\"query\":\"github pull request\"}}\n```")
+	if req1 == nil {
+		t.Fatalf("expected turn 1 bridge request")
+	}
+	if !strings.Contains(req1.Prompt, "DeferExecuteTool") || !strings.Contains(req1.Prompt, "verify exact target") {
+		t.Errorf("turn 1 prompt missing deferred connector guidance: %s", req1.Prompt)
+	}
+	if !strings.Contains(sse1, `"name":"ToolSearch"`) || !strings.Contains(sse1, `"finish_reason":"tool_calls"`) {
+		t.Errorf("turn 1 SSE should emit ToolSearch tool call, got: %s", sse1)
+	}
+
+	// Turn 2 (delta): ToolSearch returns non-mcp deferred tool schema; delta gets follow-up reminder;
+	// model mistakenly calls github_create_pull_request directly -> server auto-wraps into DeferExecuteTool!
+	turn2Msgs := append(turn1Msgs,
+		map[string]any{
+			"role": "assistant",
+			"tool_calls": []any{
+				map[string]any{
+					"id":   "call_ts_pr",
+					"type": "function",
+					"function": map[string]any{
+						"name":      "ToolSearch",
+						"arguments": `{"query":"github pull request"}`,
+					},
+				},
+			},
+		},
+		map[string]any{
+			"role":         "tool",
+			"tool_call_id": "call_ts_pr",
+			"content":      `{"tools":[{"name":"github_create_pull_request","description":"Create a PR"}]}`,
+		},
+	)
+	req2, sse2 := runTurn(turn2Msgs, "```tool_call\n{\"name\":\"github_create_pull_request\",\"arguments\":{\"owner\":\"Hau04\",\"repo\":\"gemini-web2api\",\"title\":\"Test\"}}\n```")
+	if req2 == nil {
+		t.Fatalf("expected turn 2 bridge request")
+	}
+	if strings.Contains(req2.Prompt, "You are WorkBuddy.") {
+		t.Errorf("turn 2 should use delta context, got full prompt: %s", req2.Prompt)
+	}
+	if !strings.Contains(req2.Prompt, "DeferExecuteTool") {
+		t.Errorf("turn 2 delta prompt after ToolSearch should include DeferExecuteTool reminder, got: %s", req2.Prompt)
+	}
+	if !strings.Contains(sse2, `"name":"DeferExecuteTool"`) ||
+		!strings.Contains(sse2, `github_create_pull_request`) ||
+		!strings.Contains(sse2, `"finish_reason":"tool_calls"`) {
+		t.Errorf("turn 2 SSE should auto-wrap github_create_pull_request into DeferExecuteTool, got: %s", sse2)
+	}
+}
+
+
 
 

@@ -625,11 +625,22 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		h.mu.Unlock()
 	}()
 
+	const idleTimeout = 240 * time.Second
+	idleTimer := time.NewTimer(idleTimeout)
+	defer idleTimer.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case chunk, ok := <-ch:
+			if !idleTimer.Stop() {
+				select {
+				case <-idleTimer.C:
+				default:
+				}
+			}
+			idleTimer.Reset(idleTimeout)
 			if !ok {
 				return nil
 			}
@@ -651,8 +662,8 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 			if chunk.Done {
 				return nil
 			}
-		case <-time.After(180 * time.Second):
-			return errors.New("browser bridge generation timed out (180s)")
+		case <-idleTimer.C:
+			return errors.New("browser bridge generation timed out (240s)")
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package format
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -744,5 +745,290 @@ func TestParseToolCallsConnectorVariants(t *testing.T) {
 		})
 	}
 }
+
+func makeWorkBuddyDeferredTools(toolNameKey, paramsKey string) []models.OpenAITool {
+	return []models.OpenAITool{
+		{
+			Type: "function",
+			Function: models.OpenAIFunction{
+				Name:        "read_file",
+				Description: "Read a local file.",
+				Parameters:  map[string]any{"type": "object", "properties": map[string]any{"path": map[string]any{"type": "string"}}},
+			},
+		},
+		{
+			Type: "function",
+			Function: models.OpenAIFunction{
+				Name:        "ToolSearch",
+				Description: "Search deferred connector and MCP tools.",
+				Parameters:  map[string]any{"type": "object", "properties": map[string]any{"query": map[string]any{"type": "string"}}},
+			},
+		},
+		{
+			Type: "function",
+			Function: models.OpenAIFunction{
+				Name:        "DeferExecuteTool",
+				Description: "Execute a deferred connector or MCP tool.",
+				Parameters: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						toolNameKey: map[string]any{"type": "string"},
+						paramsKey:   map[string]any{"type": "object"},
+					},
+					"required": []any{toolNameKey, paramsKey},
+				},
+			},
+		},
+	}
+}
+
+func TestDetectDeferredToolConfigAndPromptInstructions(t *testing.T) {
+	defaultTools := makeWorkBuddyDeferredTools("toolName", "params")
+	cfg := DetectDeferredToolConfig(defaultTools)
+	if !cfg.HasToolSearch || !cfg.HasDeferExec || cfg.ToolNameKey != "toolName" || cfg.ParamsKey != "params" {
+		t.Fatalf("unexpected default deferred config: %+v", cfg)
+	}
+
+	customTools := makeWorkBuddyDeferredTools("tool_name", "arguments")
+	customCfg := DetectDeferredToolConfig(customTools)
+	if customCfg.ToolNameKey != "tool_name" || customCfg.ParamsKey != "arguments" {
+		t.Fatalf("expected custom schema keys tool_name/arguments, got: %+v", customCfg)
+	}
+
+	prompt, _, err := MessagesToPrompt(models.OpenAIChatRequest{
+		Messages:   []models.OpenAIMessage{{Role: "user", Content: "Create a PR on Hau04/gemini-web2api"}},
+		Tools:      defaultTools,
+		ToolChoice: "auto",
+	})
+	if err != nil {
+		t.Fatalf("MessagesToPrompt failed: %v", err)
+	}
+	for _, want := range []string{
+		"ToolSearch",
+		"DeferExecuteTool",
+		`"toolName": "<exact_name>"`,
+		`"params":`,
+		"verify exact target",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("expected deferred connector instruction %q in prompt", want)
+		}
+	}
+
+	deltaRem := BuildDeltaToolReminder(defaultTools, "auto")
+	if !strings.Contains(deltaRem, "DeferExecuteTool") || !strings.Contains(deltaRem, "ToolSearch") {
+		t.Errorf("expected DeferExecuteTool & ToolSearch in delta reminder, got: %s", deltaRem)
+	}
+
+	followUp := BuildToolSearchFollowUpReminder(customTools, "auto")
+	if !strings.Contains(followUp, `"tool_name"`) || !strings.Contains(followUp, `"arguments"`) {
+		t.Errorf("expected custom schema keys in ToolSearch follow-up reminder, got: %s", followUp)
+	}
+}
+
+func TestParseToolCallsAutoWrapsDeferredConnectorTools(t *testing.T) {
+	defaultTools := makeWorkBuddyDeferredTools("toolName", "params")
+	customTools := makeWorkBuddyDeferredTools("tool_name", "arguments")
+
+	messagesWithDiscovered := []models.OpenAIMessage{
+		{
+			Role:    "system",
+			Content: "System prompt.\n<available-deferred-tools>\ngmail_trash_message\nnotion_create_page\n</available-deferred-tools>",
+		},
+		{Role: "user", Content: "Open a PR and clean up draft email"},
+		{
+			Role: "assistant",
+			ToolCalls: []models.OpenAIToolCall{{
+				ID:   "call_ts_1",
+				Type: "function",
+				Function: models.OpenAIToolCallFunction{
+					Name:      "ToolSearch",
+					Arguments: `{"query":"github"}`,
+				},
+			}},
+		},
+		{
+			Role:       "tool",
+			ToolCallID: "call_ts_1",
+			Content:    `{"tools":[{"name":"github_create_pull_request","description":"Create GitHub PR"}]}`,
+		},
+	}
+
+	cases := []struct {
+		name         string
+		tools        []models.OpenAITool
+		msgs         []models.OpenAIMessage
+		raw          string
+		wantName     string
+		wantTarget   string
+		wantNameKey  string
+		wantParamKey string
+		wantParamVal string
+	}{
+		{
+			name:         "mcp__ in tool_call fence auto-wraps",
+			tools:        defaultTools,
+			raw:          "```tool_call\n{\"name\":\"mcp__github__create_pull_request\",\"arguments\":{\"owner\":\"Hau04\",\"repo\":\"demo\"}}\n```",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "mcp__github__create_pull_request",
+			wantNameKey:  "toolName",
+			wantParamKey: "params",
+			wantParamVal: "Hau04",
+		},
+		{
+			name:         "mcp__ in XML tool_call auto-wraps",
+			tools:        defaultTools,
+			raw:          "<tool_call>{\"name\":\"mcp__gmail__delete_email\",\"arguments\":{\"id\":\"m_9\"}}</tool_call>",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "mcp__gmail__delete_email",
+			wantNameKey:  "toolName",
+			wantParamKey: "params",
+			wantParamVal: "m_9",
+		},
+		{
+			name:         "mcp__ in json fence auto-wraps",
+			tools:        defaultTools,
+			raw:          "```json\n{\"name\":\"mcp__github__list_prs\",\"arguments\":{\"owner\":\"Hau04\"}}\n```",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "mcp__github__list_prs",
+			wantNameKey:  "toolName",
+			wantParamKey: "params",
+			wantParamVal: "Hau04",
+		},
+		{
+			name:         "non-mcp ToolSearch-discovered tool auto-wraps",
+			tools:        defaultTools,
+			msgs:         messagesWithDiscovered,
+			raw:          "```tool_call\n{\"name\":\"github_create_pull_request\",\"arguments\":{\"owner\":\"Hau04\",\"repo\":\"gemini-web2api\"}}\n```",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "github_create_pull_request",
+			wantNameKey:  "toolName",
+			wantParamKey: "params",
+			wantParamVal: "Hau04",
+		},
+		{
+			name:         "non-mcp system-prompt deferred tool in json fence auto-wraps",
+			tools:        defaultTools,
+			msgs:         messagesWithDiscovered,
+			raw:          "```json\n{\"name\":\"gmail_trash_message\",\"arguments\":{\"messageId\":\"msg_42\"}}\n```",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "gmail_trash_message",
+			wantNameKey:  "toolName",
+			wantParamKey: "params",
+			wantParamVal: "msg_42",
+		},
+		{
+			name:         "custom DeferExecuteTool schema keys respected",
+			tools:        customTools,
+			raw:          "```tool_call\n{\"name\":\"mcp__slack__post_message\",\"arguments\":{\"channel\":\"general\"}}\n```",
+			wantName:     "DeferExecuteTool",
+			wantTarget:   "mcp__slack__post_message",
+			wantNameKey:  "tool_name",
+			wantParamKey: "arguments",
+			wantParamVal: "general",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, calls := ParseToolCallsWithContext(tc.raw, tc.tools, tc.msgs)
+			if len(calls) != 1 {
+				t.Fatalf("expected 1 call, got %d (%+v)", len(calls), calls)
+			}
+			if calls[0].Function.Name != tc.wantName {
+				t.Fatalf("got function %q, want %q", calls[0].Function.Name, tc.wantName)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &decoded); err != nil {
+				t.Fatalf("unmarshal wrapped args %q: %v", calls[0].Function.Arguments, err)
+			}
+			if decoded[tc.wantNameKey] != tc.wantTarget {
+				t.Errorf("got %s=%v, want %q", tc.wantNameKey, decoded[tc.wantNameKey], tc.wantTarget)
+			}
+			paramsJSON, _ := json.Marshal(decoded[tc.wantParamKey])
+			if !strings.Contains(string(paramsJSON), tc.wantParamVal) {
+				t.Errorf("expected %q in %s, got %s", tc.wantParamVal, tc.wantParamKey, string(paramsJSON))
+			}
+		})
+	}
+
+	// Directly declared tool must NOT be wrapped into DeferExecuteTool
+	_, directCalls := ParseToolCallsWithContext(
+		"```tool_call\n{\"name\":\"read_file\",\"arguments\":{\"path\":\"README.md\"}}\n```",
+		defaultTools,
+		messagesWithDiscovered,
+	)
+	if len(directCalls) != 1 || directCalls[0].Function.Name != "read_file" {
+		t.Fatalf("declared tool read_file must stay direct, got %+v", directCalls)
+	}
+
+	// Ordinary JSON snippet must still NOT be parsed as a tool call
+	_, nonToolCalls := ParseToolCallsWithContext(
+		"```json\n{\"name\":\"ordinary-package\",\"version\":\"1.0.0\"}\n```",
+		defaultTools,
+		messagesWithDiscovered,
+	)
+	if len(nonToolCalls) != 0 {
+		t.Fatalf("ordinary JSON snippet must NOT parse as tool call, got %+v", nonToolCalls)
+	}
+}
+
+func TestParseToolCallsNormalizesDeferExecuteToolArguments(t *testing.T) {
+	tools := makeWorkBuddyDeferredTools("toolName", "params")
+
+	cases := []struct {
+		name       string
+		raw        string
+		wantTarget string
+		wantKey    string
+		wantVal    string
+	}{
+		{
+			name:       "aliased tool_name and arguments keys",
+			raw:        "```tool_call\n{\"name\":\"DeferExecuteTool\",\"arguments\":{\"tool_name\":\"mcp__gmail__delete_email\",\"arguments\":{\"id\":\"msg_1\"}}}\n```",
+			wantTarget: "mcp__gmail__delete_email",
+			wantKey:    "id",
+			wantVal:    "msg_1",
+		},
+		{
+			name:       "stringified JSON params unmarshaled to object",
+			raw:        "```tool_call\n{\"name\":\"DeferExecuteTool\",\"arguments\":{\"toolName\":\"mcp__gmail__delete_email\",\"params\":\"{\\\"id\\\":\\\"msg_2\\\"}\"}}\n```",
+			wantTarget: "mcp__gmail__delete_email",
+			wantKey:    "id",
+			wantVal:    "msg_2",
+		},
+		{
+			name:       "flattened top-level connector params nested into params",
+			raw:        "```tool_call\n{\"name\":\"DeferExecuteTool\",\"arguments\":{\"toolName\":\"mcp__github__create_pull_request\",\"owner\":\"Hau04\",\"repo\":\"gemini-web2api\"}}\n```",
+			wantTarget: "mcp__github__create_pull_request",
+			wantKey:    "owner",
+			wantVal:    "Hau04",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, calls := ParseToolCallsWithContext(tc.raw, tools, nil)
+			if len(calls) != 1 || calls[0].Function.Name != "DeferExecuteTool" {
+				t.Fatalf("expected 1 DeferExecuteTool call, got %+v", calls)
+			}
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(calls[0].Function.Arguments), &decoded); err != nil {
+				t.Fatalf("unmarshal normalized args %q: %v", calls[0].Function.Arguments, err)
+			}
+			if decoded["toolName"] != tc.wantTarget {
+				t.Errorf("got toolName=%v, want %q", decoded["toolName"], tc.wantTarget)
+			}
+			paramsMap, ok := decoded["params"].(map[string]any)
+			if !ok {
+				t.Fatalf("expected params to be a JSON object, got %T (%v)", decoded["params"], decoded["params"])
+			}
+			if paramsMap[tc.wantKey] != tc.wantVal {
+				t.Errorf("got params[%q]=%v, want %q", tc.wantKey, paramsMap[tc.wantKey], tc.wantVal)
+			}
+		})
+	}
+}
+
 
 
