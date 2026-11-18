@@ -235,6 +235,18 @@ gemini-4-argon@think=2              # Medium
 gemini-4-argon@think=4              # Low (default for standard models)
 ```
 
+### Chat Session Mode (New vs Continue Chat)
+
+In **bridge mode**, each request either starts a fresh chat in the open Gemini tab or appends to the chat currently open there. Three ways to control it, in priority order:
+
+1. **Per-request model suffix** — append `@new` (or `@fresh`/`@newchat`) to force a fresh chat, `@continue` (or `@cont`) to keep appending to the open chat. Combines with `@think=N` in any order:
+   ```text
+   gemini-4-hydrogen@new                # this request starts a brand-new chat
+   gemini-4-hydrogen@think=0@continue   # deep thinking, keep the open chat (incl. Gemini memory)
+   ```
+2. **Extension popup "Chat Mode" selector** — *Auto (recommended)* / *Always new chat* / *Continue open chat*. The choice is pushed to the server (`POST /bridge/chatmode`) and persists until changed. With *Continue open chat*, click any old chat in the Gemini history sidebar first — API turns then keep adding to that conversation.
+3. **Auto heuristic (default)** — a brand-new client conversation (e.g. WorkBuddy "New Chat") starts a fresh browser chat; follow-up turns continue it.
+
 ### Model Inspection Headers
 
 Every API response (both JSON and streaming SSE) includes HTTP response headers indicating actual model routing:

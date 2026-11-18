@@ -1735,13 +1735,110 @@ func TestBridgeRunawayAgentLoopDetectionAndGuardrail(t *testing.T) {
 	app := New(cfg, "test")
 	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_loop", "1")
 
-	prepared := app.prepareBridgeRequest(nil, models.OpenAIChatRequest{Messages: msgs}, "[Tool result for bash]: Error", nil)
+	prepared := app.prepareBridgeRequest(nil, models.OpenAIChatRequest{Messages: msgs}, "[Tool result for bash]: Error", nil, "")
 	if !prepared.LoopPenalty {
 		t.Errorf("expected LoopPenalty=true on 3 consecutive identical tool calls")
 	}
 	if !strings.Contains(prepared.Prompt, "Loop protection") {
 		t.Errorf("expected loop-breaker guardrail in prompt, got: %s", prepared.Prompt)
 	}
+}
+
+func TestBridgeChatModeOverridePrecedence(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	app := New(cfg, "test")
+	app.Bridge.UpdateTabSession("gemini.google.com", "tab_mode", "1")
+
+	// An assistant turn in history makes the auto heuristic see an ongoing conversation.
+	ongoing := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
+		{Role: "user", Content: "Hello"},
+		{Role: "assistant", Content: "Hi!"},
+		{Role: "user", Content: "Follow-up question"},
+	}}
+
+	t.Run("popup override from hub", func(t *testing.T) {
+		app.Bridge.SetChatMode("new")
+		if got := app.Bridge.ChatMode(); got != "new" {
+			t.Fatalf("expected chat mode %q, got %q", "new", got)
+		}
+		if p := app.prepareBridgeRequest(nil, ongoing, "Follow-up question", nil, ""); !p.NewChat {
+			t.Errorf("hub override 'new' must force a fresh chat")
+		}
+
+		app.Bridge.SetChatMode("continue")
+		if p := app.prepareBridgeRequest(nil, ongoing, "Follow-up question", nil, ""); p.NewChat {
+			t.Errorf("hub override 'continue' must keep the open chat")
+		}
+
+		app.Bridge.SetChatMode("garbage")
+		if got := app.Bridge.ChatMode(); got != "auto" {
+			t.Errorf("invalid chat mode must normalize to 'auto', got %q", got)
+		}
+	})
+
+	t.Run("per-request suffix wins over hub override", func(t *testing.T) {
+		app.Bridge.SetChatMode("continue")
+		if p := app.prepareBridgeRequest(nil, ongoing, "Follow-up question", nil, "new"); !p.NewChat {
+			t.Errorf("per-request 'new' must override popup 'continue'")
+		}
+		app.Bridge.SetChatMode("new")
+		if p := app.prepareBridgeRequest(nil, ongoing, "Follow-up question", nil, "continue"); p.NewChat {
+			t.Errorf("per-request 'continue' must override popup 'new'")
+		}
+	})
+
+	t.Run("auto heuristic for fresh conversation", func(t *testing.T) {
+		app.Bridge.SetChatMode("auto")
+		// Seed the session with a prior completed turn so IsNewConversation has
+		// something to compare against (it returns false for an empty session).
+		prev := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
+			{Role: "user", Content: "Earlier topic"},
+			{Role: "assistant", Content: "Earlier answer"},
+		}}
+		prevPrepared := app.prepareBridgeRequest(nil, prev, "Earlier topic", nil, "")
+		app.recordBridgeTurnSuccess(prevPrepared)
+
+		fresh := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
+			{Role: "user", Content: "Brand new topic"},
+		}}
+		if p := app.prepareBridgeRequest(nil, fresh, "Brand new topic", nil, ""); !p.NewChat {
+			t.Errorf("auto mode must start a fresh chat for a brand-new client conversation")
+		}
+	})
+
+	t.Run("http endpoint sets and validates mode", func(t *testing.T) {
+		app.Bridge.SetChatMode("auto") // isolate from earlier subtests
+		req := httptest.NewRequest("POST", "/bridge/chatmode", strings.NewReader(`{"mode":"continue"}`))
+		rec := httptest.NewRecorder()
+		app.handleBridgeChatMode(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if got := app.Bridge.ChatMode(); got != "continue" {
+			t.Fatalf("endpoint must set chat mode to 'continue', got %q", got)
+		}
+
+		req = httptest.NewRequest("POST", "/bridge/chatmode", strings.NewReader(`{"mode":"nonsense"}`))
+		rec = httptest.NewRecorder()
+		app.handleBridgeChatMode(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 for invalid mode, got %d", rec.Code)
+		}
+		if got := app.Bridge.ChatMode(); got != "auto" {
+			t.Fatalf("invalid mode must normalize to 'auto', got %q", got)
+		}
+
+		req = httptest.NewRequest("GET", "/bridge/status", nil)
+		rec = httptest.NewRecorder()
+		app.handleBridgeStatus(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: expected 200, got %d", rec.Code)
+		}
+		if !strings.Contains(rec.Body.String(), `"chat_mode"`) {
+			t.Errorf("status payload must expose chat_mode, got: %s", rec.Body.String())
+		}
+	})
 }
 
 func TestBridgePersistentPacingStateSurvivesRestartAndHourlyLimit(t *testing.T) {

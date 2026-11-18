@@ -73,6 +73,16 @@ The extension can push cookies to a server running anywhere — not just localho
 
 The background worker, content script bridge, and popup all use the saved address and token automatically. When Google later rejects the session (expired cookies/XSRF), the server notifies you via its configured `notify_webhook` — just open Gemini once and the extension re-syncs automatically.
 
+### Chat Mode Selector
+
+The popup includes a **Chat Mode** selector controlling where API requests land in the open Gemini tab:
+
+- **Auto (recommended)** — a brand-new client conversation starts a fresh browser chat; follow-ups continue it.
+- **Always new chat** — every API request starts a fresh chat.
+- **Continue open chat** — requests keep appending to the chat currently open in the tab. Open any old chat from the Gemini history sidebar first, and API turns will keep its Gemini memory/context.
+
+The choice is pushed to the server (`POST /bridge/chatmode`) as soon as you change it, and again on every **Save & Sync Now**. A per-request `@new` / `@continue` model suffix overrides the popup setting for that one request.
+
 ### How It Works
 
 1. The background service worker reads your Google session cookies (`__Secure-1PSID`, `SAPISID`, etc.) and extracts the XSRF token from any open Gemini tab.

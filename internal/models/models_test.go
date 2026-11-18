@@ -13,6 +13,7 @@ func TestResolve(t *testing.T) {
 		wantThink    int
 		wantHeader   string
 		wantFallback bool
+		wantChatMode string
 		wantErr      bool
 	}{
 		{
@@ -165,6 +166,71 @@ func TestResolve(t *testing.T) {
 			defaultName: "gemini-3.6-flash",
 			wantErr:     true,
 		},
+		{
+			input:        "gemini-4-hydrogen@new",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-hydrogen",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantChatMode: "new",
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-4-hydrogen@think=0@continue",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-hydrogen",
+			wantMode:     8,
+			wantThink:    0,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantChatMode: "continue",
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-4-hydrogen@new@think=0",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-hydrogen",
+			wantMode:     8,
+			wantThink:    0,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantChatMode: "new",
+			wantErr:      false,
+		},
+		{
+			input:        "gemini-4-hydrogen@fresh",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-4-hydrogen",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantChatMode: "new",
+			wantErr:      false,
+		},
+		{
+			input:        "hydrogen@cont",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "hydrogen",
+			wantMode:     8,
+			wantThink:    4,
+			wantHeader:   "95a4c0abcba24364",
+			wantFallback: false,
+			wantChatMode: "continue",
+			wantErr:      false,
+		},
+		{
+			input:        "unknown-model@new",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-3.6-flash",
+			wantMode:     1,
+			wantThink:    4,
+			wantFallback: true,
+			wantChatMode: "new",
+			wantErr:      false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -190,6 +256,9 @@ func TestResolve(t *testing.T) {
 			}
 			if res.Fallback != tt.wantFallback {
 				t.Errorf("res.Fallback = %v, want %v", res.Fallback, tt.wantFallback)
+			}
+			if res.ChatMode != tt.wantChatMode {
+				t.Errorf("res.ChatMode = %q, want %q", res.ChatMode, tt.wantChatMode)
 			}
 		})
 	}

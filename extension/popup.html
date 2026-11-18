@@ -160,6 +160,20 @@
     </div>
   </div>
 
+  <div class="bridge-controls" style="margin-top: 8px;">
+    <label class="checkbox-label" style="justify-content: space-between;">
+      <span>💬 Chat Mode (where API requests go)</span>
+      <select id="chatModeSelect" style="font-size: 12px; padding: 4px 6px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff;">
+        <option value="auto">Auto (recommended)</option>
+        <option value="new">Always new chat</option>
+        <option value="continue">Continue open chat</option>
+      </select>
+    </label>
+    <div id="chatModeHint" style="font-size: 11px; color: #6b7280; margin-top: 6px;">
+      Auto: new client conversation starts a fresh chat; follow-ups continue it.
+    </div>
+  </div>
+
   <div class="section-title">Server Connection (Remote / NAS)</div>
   <div class="bridge-controls">
     <input type="text" id="serverUrlInput" placeholder="http://localhost:8081 or https://gemini.example.com"

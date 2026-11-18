@@ -98,6 +98,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /bridge/frozen", a.handleBridgeFrozen)
 	mux.HandleFunc("POST /bridge/cookies", a.handleBridgeCookies)
 	mux.HandleFunc("GET /bridge/cookie-status", a.handleCookieStatus)
+	mux.HandleFunc("POST /bridge/chatmode", a.handleBridgeChatMode)
 
 	handler := a.withAuthAndLogging(mux)
 	handler = a.withCORS(handler)

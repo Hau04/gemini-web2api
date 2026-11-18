@@ -222,19 +222,43 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 // Also sync when a Google session cookie changes (login, token refresh).
+// Chrome fires one event PER cookie — a login/refresh burst sets 5-10 cookies in
+// under a second, so debounce: wait until the burst is quiet for 3s before syncing.
+let cookieChangeTimer = null;
 chrome.cookies.onChanged.addListener((changeInfo) => {
   const c = changeInfo && changeInfo.cookie;
   if (!c) return;
   if (COOKIE_KEY_ORDER.includes(c.name)) {
-    // Debounce: login bursts set many cookies at once.
-    syncCookiesNow("cookie-change");
+    if (cookieChangeTimer) clearTimeout(cookieChangeTimer);
+    cookieChangeTimer = setTimeout(() => {
+      cookieChangeTimer = null;
+      syncCookiesNow("cookie-change");
+    }, 3000);
   }
 });
+
+// Push the stored chat-mode override to the server (best effort).
+async function pushChatModeNow() {
+  try {
+    const cfg = await getBridgeConfig();
+    if (!cfg.url) return;
+    const res = await chrome.storage.local.get(["chatMode"]);
+    const mode = res.chatMode || "auto";
+    await fetch(`${cfg.url}/bridge/chatmode`, {
+      method: "POST",
+      headers: buildBridgeHeaders(cfg.token, { "Content-Type": "application/json" }),
+      body: JSON.stringify({ mode })
+    });
+  } catch (e) {
+    // Server unreachable — the popup will show the stored value and retry on next change/sync.
+  }
+}
 
 // Re-sync immediately when the user updates the server address/token in the popup.
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg && msg.action === "syncCookiesNow") {
     syncCookiesNow("manual");
+    pushChatModeNow();
   }
 });
 }

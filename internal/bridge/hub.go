@@ -129,6 +129,7 @@ type Hub struct {
 	lastHeartbeat         time.Time
 	frozen                atomic.Bool
 	degradedUntil         time.Time
+	chatModeOverride      string
 	clientHeartbeats      map[string]time.Time
 	pending               []*Request
 	inFlight              map[string]*inFlightEntry
@@ -394,6 +395,29 @@ func (h *Hub) ClearDegraded() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.degradedUntil = time.Time{}
+}
+
+// SetChatMode stores the chat-session override controlled from the extension
+// popup: "auto" (default heuristic), "new" (every request starts a fresh chat),
+// or "continue" (every request appends to the tab's currently open chat).
+func (h *Hub) SetChatMode(mode string) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "new" && mode != "continue" {
+		mode = "auto"
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.chatModeOverride = mode
+}
+
+// ChatMode returns the current chat-session override ("auto" when unset).
+func (h *Hub) ChatMode() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.chatModeOverride == "" {
+		return "auto"
+	}
+	return h.chatModeOverride
 }
 
 // IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds,

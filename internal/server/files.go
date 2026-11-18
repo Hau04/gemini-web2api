@@ -1308,18 +1308,37 @@ func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
 	)
 }
 
-func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest, fullPrompt string, apiAttachments []format.Image) preparedBridgeTurn {
+func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest, fullPrompt string, apiAttachments []format.Image, chatMode string) preparedBridgeTurn {
 	sessClient, sessConvGen, alreadyUploaded := a.Bridge.ActiveSession()
 	fingerprints := ConversationFingerprints(req)
 	userFPs, hasAssistantOrTool := ExtractUserFingerprints(req, fingerprints)
 	currentToolNames := format.AllowedToolNames(req.Tools)
 
-	// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
-	// browser tab still holds an older conversation, so Gemini starts a clean New Chat
-	// with zero stale memory or leftover files from the previous chat.
-	newChat := a.Cfg.BridgeAutoNewChat && a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+	// Chat-session selection priority:
+	//   1. Per-request model suffix (@new / @continue)
+	//   2. Extension popup override (POST /bridge/chatmode)
+	//   3. Auto heuristic: a brand-new client conversation starts a fresh chat
+	if chatMode == "" {
+		chatMode = a.Bridge.ChatMode()
+	}
+	var newChat bool
+	switch chatMode {
+	case "new":
+		newChat = true
+		a.Logf("Chat mode 'new' requested — browser tab will start a fresh chat")
+	case "continue":
+		newChat = false
+		a.Logf("Chat mode 'continue' requested — appending to the tab's currently open chat")
+	default:
+		// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
+		// browser tab still holds an older conversation, so Gemini starts a clean New Chat
+		// with zero stale memory or leftover files from the previous chat.
+		newChat = a.Cfg.BridgeAutoNewChat && a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+		if newChat {
+			a.Logf("Bridge detected new client conversation — instructing browser tab to start a fresh chat")
+		}
+	}
 	if newChat {
-		a.Logf("Bridge detected new client conversation — instructing browser tab to start a fresh chat")
 		alreadyUploaded = nil
 	}
 

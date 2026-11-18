@@ -28,10 +28,47 @@ document.addEventListener("DOMContentLoaded", async () => {
     return h;
   }
 
+  // -------------------- Chat Mode --------------------
+
+  const CHAT_MODE_HINTS = {
+    auto: "Auto: a new client conversation starts a fresh chat; follow-ups continue it.",
+    new: "Every API request starts a brand-new chat in the browser tab.",
+    continue: "Requests keep adding to the chat currently open in the tab — open an old chat from the history sidebar first.",
+  };
+
+  const chatModeSelect = document.getElementById("chatModeSelect");
+  const chatModeHint = document.getElementById("chatModeHint");
+
+  function applyChatModeUI(mode) {
+    if (chatModeSelect) chatModeSelect.value = mode || "auto";
+    if (chatModeHint) chatModeHint.textContent = CHAT_MODE_HINTS[mode] || CHAT_MODE_HINTS.auto;
+  }
+
+  async function pushChatModeToServer(mode) {
+    try {
+      await fetch(`${serverUrl}/bridge/chatmode`, {
+        method: "POST",
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ mode })
+      });
+    } catch (e) {
+      // Server unreachable — setting stays saved locally and is re-pushed on next Sync Now.
+    }
+  }
+
+  chatModeSelect.addEventListener("change", async () => {
+    const mode = chatModeSelect.value;
+    applyChatModeUI(mode);
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ chatMode: mode });
+    }
+    await pushChatModeToServer(mode);
+  });
+
   // Load saved server address + token (awaited so all status fetches below use them)
   if (chrome.storage && chrome.storage.local) {
     await new Promise((resolve) => {
-      chrome.storage.local.get(["serverUrl", "bridgeToken"], (res) => {
+      chrome.storage.local.get(["serverUrl", "bridgeToken", "chatMode"], (res) => {
         if (res && res.serverUrl) {
           serverUrl = res.serverUrl;
           serverUrlInput.value = res.serverUrl;
@@ -40,6 +77,7 @@ document.addEventListener("DOMContentLoaded", async () => {
           bridgeToken = res.bridgeToken;
           bridgeTokenInput.value = res.bridgeToken;
         }
+        applyChatModeUI(res && res.chatMode);
         resolve();
       });
     });
@@ -188,6 +226,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     } else {
       bridgeBox.className = "status warn";
       bridgeStatusText.textContent = "Server running on :8081 (Open Gemini page to connect)";
+    }
+
+    // Reflect the server-side chat mode if the browser hasn't stored one locally.
+    if (typeof bData.chat_mode === "string" && bData.chat_mode) {
+      chrome.storage.local.get(["chatMode"], (res) => {
+        if (!res || !res.chatMode) applyChatModeUI(bData.chat_mode);
+      });
     }
   }
 
