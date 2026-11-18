@@ -1030,7 +1030,7 @@ func TestParseToolCallsNormalizesDeferExecuteToolArguments(t *testing.T) {
 	}
 }
 
-func DisabledTestFileFromPartWorkBuddyAttachment(t *testing.T) {
+func TestFileFromPartWorkBuddyAttachment(t *testing.T) {
 	// WorkBuddy sends attached files as {"type":"attachment","filename":...,"data":...}
 	// with raw UTF-8 text (not base64) for .txt files.
 	rawText := "# Code Context\n\npackage main\n\nfunc main() {}\n"
@@ -1072,7 +1072,7 @@ func DisabledTestFileFromPartWorkBuddyAttachment(t *testing.T) {
 	}
 }
 
-func DisabledTestFileFromPartDirectlyAttachedFile(t *testing.T) {
+func TestFileFromPartDirectlyAttachedFile(t *testing.T) {
 	// WorkBuddy may also use "directly_attached_file" type with base64 data.
 	b64 := "cGFja2FnZSBtYWluCg==" // "package main\n"
 	req := models.OpenAIChatRequest{

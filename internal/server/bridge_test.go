@@ -1880,7 +1880,7 @@ func TestBridgePauseAndResumeEndpoint(t *testing.T) {
 	}
 }
 
-func DisabledTestBridgeWorkBuddyAttachmentUploadedToGemini(t *testing.T) {
+func TestBridgeWorkBuddyAttachmentUploadedToGemini(t *testing.T) {
 	// Regression: WorkBuddy attaches code_context.txt via {"type":"attachment",...}
 	// with raw text data. The bridge MUST upload it to Gemini (not just placeholder text),
 	// otherwise Gemini replies "I can't see the contents" and tries Read tool (which fails).
@@ -1956,7 +1956,7 @@ func DisabledTestBridgeWorkBuddyAttachmentUploadedToGemini(t *testing.T) {
 	}
 }
 
-func DisabledTestExtractAttachedFilenamesFromWorkBuddyNotice(t *testing.T) {
+func TestExtractAttachedFilenamesFromWorkBuddyNotice(t *testing.T) {
 	text := "[Directly attached file(s): code_context.txt. Read the attached file(s) natively in full — do NOT call local shell/python/file tools to inspect or extract them.]\n\n[The full prompt / code context (23003 chars) is attached directly in code_context.txt. Read the attached file verbatim in full before responding or calling tools.]"
 	names := ExtractAttachedFilenames(text)
 	if len(names) != 1 || names[0] != "code_context.txt" {

@@ -450,6 +450,9 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 	}
 
 	candidates := ExtractCandidatePaths(latestUserText)
+	// Also extract filenames from WorkBuddy attachment notices like
+	// "[Directly attached file(s): code_context.txt. ...]" which may not match path regexes.
+	candidates = append(candidates, ExtractAttachedFilenames(latestUserText)...)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
