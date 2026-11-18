@@ -49,6 +49,18 @@ var MODELS = map[string]Model{
 		Header: "95a4c0abcba24364",
 		Desc:   "Alias for gemini-4-hydrogen",
 	},
+	"gemini-4-carbon": {
+		Mode:   8,
+		Think:  4,
+		Header: "95a4c0abcba24364",
+		Desc:   "Frontier model (Gemini 4 Carbon)",
+	},
+	"carbon": {
+		Mode:   8,
+		Think:  4,
+		Header: "95a4c0abcba24364",
+		Desc:   "Alias for gemini-4-carbon",
+	},
 	"gemini-3.8-flash": {
 		Mode:  1,
 		Think: 4,
