@@ -971,14 +971,12 @@ func FormatAttachmentsToBridge(items []format.Image, fetchRemote func(string) ([
 		if mime == "" {
 			if len(data) >= 4 && string(data[:4]) == "%PDF" {
 				mime = "application/pdf"
-			} else if detected := multimodal.DetectImageMime(data); detected != "" && detected != "application/octet-stream" {
-				mime = detected
+			} else if fromName := mimeFromFilename(item.Filename); fromName != "" {
+				// Prefer filename-based MIME for text/code/docs (DetectImageMime
+				// defaults to image/png for unknown data, which is wrong for text).
+				mime = fromName
 			} else {
-				// For text files, DetectImageMime returns octet-stream; infer from filename.
-				mime = mimeFromFilename(item.Filename)
-				if mime == "" {
-					mime = "application/octet-stream"
-				}
+				mime = multimodal.DetectImageMime(data)
 			}
 		}
 
