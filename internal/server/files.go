@@ -440,37 +440,11 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 	if len(messages) == 0 {
 		return nil, nil
 	}
-	// Scan all recent user messages (not just the latest) so WorkBuddy attachment
-	// notices like "[Directly attached file(s): code_context.txt...]" are found
-	// even if they appear in an earlier turn or the latest message is a tool result.
-	var combinedText strings.Builder
-	// Check last 3 messages for file references (covers user + tool + user patterns).
-	startIdx := len(messages) - 3
-	if startIdx < 0 {
-		startIdx = 0
+	last := messages[len(messages)-1]
+	if last.Role != "user" && last.Role != "" {
+		return nil, nil
 	}
-	for i := startIdx; i < len(messages); i++ {
-		msg := messages[i]
-		role := strings.ToLower(strings.TrimSpace(msg.Role))
-		if role != "user" && role != "" && role != "system" && role != "developer" {
-			continue
-		}
-		text, _ := format.ExtractMessageContent(msg)
-		if strings.TrimSpace(text) != "" {
-			combinedText.WriteString(text)
-			combinedText.WriteString("\n")
-		}
-	}
-	// Also check the very last message even if it's a tool result (WorkBuddy may
-	// attach files alongside tool outputs).
-	if len(messages) > 0 {
-		last := messages[len(messages)-1]
-		text, _ := format.ExtractMessageContent(last)
-		if strings.TrimSpace(text) != "" && !strings.Contains(combinedText.String(), text) {
-			combinedText.WriteString(text)
-		}
-	}
-	latestUserText := combinedText.String()
+	latestUserText, _ := format.ExtractMessageContent(last)
 	if strings.TrimSpace(latestUserText) == "" {
 		return nil, nil
 	}
