@@ -1521,7 +1521,25 @@
     }
 
     if (cap.activeStreamId && streamId && streamId !== cap.activeStreamId) {
-      return;
+      // Re-lock onto a different stream that is actually delivering answer text when
+      // the currently-locked stream has produced none (e.g. a background/telemetry
+      // request matched a generation endpoint first and never completes). Without this,
+      // the real answer's deltas are ignored and the bridge hangs until the 240s timeout.
+      const carriesText =
+        (type === "delta" || type === "replace") &&
+        typeof data.text === "string" &&
+        data.text.length > 0;
+      if (carriesText && !cap.receivedText) {
+        console.log("[Web2API Bridge] Re-locking capture onto live text stream:", url);
+        cap.activeStreamId = streamId;
+        cap.url = url || "";
+        cap.started = true;
+        cap.active = true;
+        cap.done = false;
+        // fall through to process this delta/replace below
+      } else {
+        return;
+      }
     }
     if (!cap.activeStreamId && streamId && (type === "delta" || type === "replace" || type === "thinking")) {
       cap.activeStreamId = streamId;
@@ -2808,6 +2826,10 @@
       let abortedByServer = false;
       let sawGenerating = false;
       let netDoneAt = 0;
+      let activeSince = 0;
+      let lastNetProgressAt = 0;
+      let lastNetSeenLen = 0;
+      let lastNetGrowthAt = 0;
       const startTime = Date.now();
       let chunkQueue = Promise.resolve();
 
@@ -2907,8 +2929,22 @@
 
         // 1. PRIMARY ENGINE: Transparent Network Stream Interception
         if (netCapture.receivedText) {
+          if (netCapture.accumulated.length > lastNetSeenLen) {
+            lastNetSeenLen = netCapture.accumulated.length;
+            lastNetGrowthAt = Date.now();
+          }
           emitDeltaFromFull(netCapture.accumulated, "⚡");
           if (netCapture.done) {
+            finish();
+            return;
+          }
+          // Stall guard: the stream delivered text but never emitted a done signal and
+          // has stopped growing (e.g. net-hook missed the stream end). Finish with the
+          // captured content instead of hanging until the 240s server idle timeout.
+          if (!netCapture.thinking && lastNetGrowthAt > 0 && Date.now() - lastNetGrowthAt > 20000) {
+            console.warn(
+              "[Web2API Bridge] Network stream stalled after delivering text without a done signal — finishing with captured content."
+            );
             finish();
           }
           return;
@@ -2916,13 +2952,40 @@
 
         // If an intercepted network request is actively in flight (e.g. model thinking),
         // wait for it rather than scraping partial/header DOM text prematurely.
+        // BUT: if the stream has been active for >30s with no progress (no delta/done),
+        // it is likely stuck (e.g. background request hijacked the capture, or the
+        // done event was missed). Fall through to DOM fallback so a fast page answer
+        // is not lost to a 240s timeout.
         if (netCapture.active) {
-          sawGenerating = true;
-          netDoneAt = 0;
-          if (netCapture.thinking) {
-            setStatus("busy", "Web2API: Thinking... ⚡");
+          const nowActive = Date.now();
+          if (!activeSince) {
+            activeSince = nowActive;
+            lastNetProgressAt = nowActive;
           }
-          return;
+          if (netCapture.receivedText) {
+            lastNetProgressAt = nowActive;
+          }
+          const activeFor = nowActive - activeSince;
+          const sinceProgress = nowActive - lastNetProgressAt;
+          const stuck = activeFor > 30000 && sinceProgress > 15000 && !netCapture.receivedText;
+          if (!stuck) {
+            sawGenerating = true;
+            netDoneAt = 0;
+            if (netCapture.thinking) {
+              setStatus("busy", "Web2API: Thinking... ⚡");
+            }
+            return;
+          }
+          console.warn(
+            `[Web2API Bridge] Network stream stuck active for ${Math.round(activeFor / 1000)}s with no progress — falling through to DOM fallback.`
+          );
+          // Mark as not-active so isGenerating() does not block DOM completion,
+          // but keep sawGenerating so DOM completion criteria can fire.
+          sawGenerating = true;
+          netCapture.active = false;
+          activeSince = 0;
+        } else {
+          activeSince = 0;
         }
 
         if (netCapture.done && !netDoneAt) {
@@ -2952,8 +3015,15 @@
         }
 
         if (sentText.length === 0) {
-          // Wait up to 45s for generation to start producing text
-          if (!generating && timeSinceStart > 45000) {
+          // Wait up to 45s for generation to start producing text. Also force a final
+          // DOM flush + finish if a spinner/stop button stays stuck in the DOM with no
+          // capturable text for 120s, so we never hang to the 240s server idle timeout.
+          if ((!generating && timeSinceStart > 45000) || timeSinceStart > 120000) {
+            if (timeSinceStart > 120000 && generating) {
+              console.warn(
+                "[Web2API Bridge] 'Generating' indicator stuck with no captured text after 120s — forcing completion."
+              );
+            }
             finish();
           }
           return;
