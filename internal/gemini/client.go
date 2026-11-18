@@ -211,6 +211,25 @@ func (c *Client) triageStatus(resp *http.Response) error {
 		}
 		return err
 	}
+	if resp.StatusCode == http.StatusBadRequest {
+		// A 400 carrying an xsrf error means the page XSRF token (SNlM0e) rotated —
+		// the session cookies may still be valid, but the token must be refreshed by
+		// opening Gemini in the browser again (the extension re-pushes it automatically).
+		var sniff [4096]byte
+		n, _ := resp.Body.Read(sniff[:])
+		bodyLower := strings.ToLower(string(sniff[:n]))
+		if strings.Contains(bodyLower, "xsrf") {
+			err := &UpstreamError{
+				Status: resp.StatusCode,
+				Kind:   "auth",
+				Msg:    "XSRF token expired (HTTP 400 xsrf); open gemini.google.com in the browser once to refresh the session token",
+			}
+			if c.OnAuthError != nil {
+				c.OnAuthError(err.Msg)
+			}
+			return err
+		}
+	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return &UpstreamError{
 			Status: resp.StatusCode,

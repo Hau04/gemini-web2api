@@ -65,6 +65,28 @@ func authorize(r *http.Request, apiKeys []string) bool {
 	return false
 }
 
+// authorizeBridge validates the shared bridge token (config "bridge_token") that
+// protects the /bridge/* control & cookie-ingestion endpoints when the server is
+// exposed beyond localhost (e.g. NAS + Cloudflare Tunnel). The extension sends it
+// via the X-Bridge-Token header (or Authorization: Bearer). When no token is
+// configured the endpoints stay open (localhost-only default behavior).
+func authorizeBridge(r *http.Request, bridgeToken string) bool {
+	if bridgeToken == "" {
+		return true
+	}
+	if h := r.Header.Get("X-Bridge-Token"); h != "" {
+		if subtle.ConstantTimeCompare([]byte(h), []byte(bridgeToken)) == 1 {
+			return true
+		}
+	}
+	if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		if subtle.ConstantTimeCompare([]byte(authHeader[7:]), []byte(bridgeToken)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -94,6 +116,17 @@ func (a *App) withAuthAndLogging(next http.Handler) http.Handler {
 			writeJSON(lrw, http.StatusUnauthorized, map[string]any{
 				"error": map[string]any{
 					"message": "invalid api key",
+				},
+			})
+			a.logRequest(r, lrw.statusCode, time.Since(start))
+			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/bridge/") && !authorizeBridge(r, a.Cfg.BridgeToken) {
+			writeJSON(lrw, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{
+					"message": "invalid or missing bridge token (set bridge_token in config.json and the same token in the extension settings)",
+					"type":    "bridge_auth",
 				},
 			})
 			a.logRequest(r, lrw.statusCode, time.Since(start))

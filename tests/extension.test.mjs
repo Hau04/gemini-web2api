@@ -1141,3 +1141,23 @@ test("buildSpilloverInlineFallback decodes spillover attachments safely and igno
 
 
 
+
+test("background helpers: normalizeServerUrl and buildBridgeHeaders", async () => {
+  const bg = await import("../extension/background.js");
+  const { normalizeServerUrl, buildBridgeHeaders } = bg;
+
+  assert.equal(normalizeServerUrl(""), "http://localhost:8081");
+  assert.equal(normalizeServerUrl("  "), "http://localhost:8081");
+  assert.equal(normalizeServerUrl("https://gemini.example.com/"), "https://gemini.example.com");
+  assert.equal(normalizeServerUrl("https://gemini.example.com/v1"), "https://gemini.example.com");
+  assert.equal(normalizeServerUrl("gemini.example.com"), "http://gemini.example.com");
+  assert.equal(normalizeServerUrl("http://192.168.1.10:8081///"), "http://192.168.1.10:8081");
+
+  assert.deepEqual(buildBridgeHeaders("", { "Content-Type": "application/json" }), {
+    "Content-Type": "application/json"
+  });
+  assert.deepEqual(buildBridgeHeaders("tok123", { Accept: "application/json" }), {
+    Accept: "application/json",
+    "X-Bridge-Token": "tok123"
+  });
+});

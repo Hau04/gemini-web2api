@@ -33,6 +33,9 @@ type Config struct {
 	BridgeSpilloverChars       int      `json:"bridge_spillover_chars"`
 	BridgeDeltaContext         bool     `json:"bridge_delta_context"`
 	BridgeAutoNewChat          bool     `json:"bridge_auto_new_chat"`
+	BridgeToken                string   `json:"bridge_token"`
+	NotifyWebhook              string   `json:"notify_webhook"`
+	NotifyFormat               string   `json:"notify_format"`
 }
 
 func Default() Config {
@@ -63,6 +66,9 @@ func Default() Config {
 		BridgeSpilloverChars:       20000,
 		BridgeDeltaContext:         true,
 		BridgeAutoNewChat:          true,
+		BridgeToken:                "",
+		NotifyWebhook:              "",
+		NotifyFormat:               "ntfy",
 	}
 }
 
@@ -107,6 +113,9 @@ func Load(path string) (Config, error) {
 		BridgeSpilloverChars       *int      `json:"bridge_spillover_chars"`
 		BridgeDeltaContext         *bool     `json:"bridge_delta_context"`
 		BridgeAutoNewChat          *bool     `json:"bridge_auto_new_chat"`
+		BridgeToken                *string   `json:"bridge_token"`
+		NotifyWebhook              *string   `json:"notify_webhook"`
+		NotifyFormat               *string   `json:"notify_format"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -190,6 +199,15 @@ func Load(path string) (Config, error) {
 	}
 	if aux.BridgeAutoNewChat != nil {
 		cfg.BridgeAutoNewChat = *aux.BridgeAutoNewChat
+	}
+	if aux.BridgeToken != nil {
+		cfg.BridgeToken = *aux.BridgeToken
+	}
+	if aux.NotifyWebhook != nil {
+		cfg.NotifyWebhook = *aux.NotifyWebhook
+	}
+	if aux.NotifyFormat != nil {
+		cfg.NotifyFormat = *aux.NotifyFormat
 	}
 
 	return cfg, nil

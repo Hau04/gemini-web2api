@@ -7,7 +7,39 @@
 (function (globalScope) {
   "use strict";
 
-  const BRIDGE_URL = "http://localhost:8081";
+  const DEFAULT_BRIDGE_URL = "http://localhost:8081";
+  let BRIDGE_URL = DEFAULT_BRIDGE_URL;
+  let BRIDGE_TOKEN = "";
+
+  function bridgeHeaders(extra) {
+    const h = Object.assign({}, extra || {});
+    if (BRIDGE_TOKEN) h["X-Bridge-Token"] = BRIDGE_TOKEN;
+    return h;
+  }
+
+  function normalizeServerUrl(raw) {
+    let u = String(raw || "").trim();
+    if (!u) return DEFAULT_BRIDGE_URL;
+    if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+    u = u.replace(/\/+$/, "");
+    u = u.replace(/\/v1$/i, "");
+    return u;
+  }
+
+  // Load configurable server address + bridge token (set from the extension popup)
+  if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(["serverUrl", "bridgeToken"], (res) => {
+      if (res && res.serverUrl) BRIDGE_URL = normalizeServerUrl(res.serverUrl);
+      if (res && res.bridgeToken) BRIDGE_TOKEN = String(res.bridgeToken);
+    });
+    if (chrome.storage.onChanged) {
+      chrome.storage.onChanged.addListener((changes, area) => {
+        if (area !== "local") return;
+        if (changes.serverUrl) BRIDGE_URL = normalizeServerUrl(changes.serverUrl.newValue);
+        if (changes.bridgeToken) BRIDGE_TOKEN = String(changes.bridgeToken.newValue || "");
+      });
+    }
+  }
   const NET_MSG_KEY = "__web2api_net";
   const BADGE_ID = "web2api-bridge-badge";
 
@@ -3133,7 +3165,7 @@
     try {
       await fetch(`${BRIDGE_URL}/bridge/heartbeat`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({
           tab: location.hostname,
           client_id: CLIENT_ID,
@@ -3154,7 +3186,7 @@
     if (document.hidden) return;
     fetch(`${BRIDGE_URL}/bridge/frozen`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: bridgeHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ frozen: false, client_id: CLIENT_ID, tab: location.hostname })
     }).catch(() => {});
   });
@@ -3173,7 +3205,7 @@
           `${BRIDGE_URL}/bridge/poll?tab=${tabParam}&client=${clientParam}&conv_gen=${convParam}`,
           {
             method: "GET",
-            headers: { Accept: "application/json" }
+            headers: bridgeHeaders({ Accept: "application/json" })
           }
         );
 
@@ -3223,7 +3255,7 @@
       }
       const res = await fetch(`${BRIDGE_URL}/bridge/chunk`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify(payload)
       });
       if (res.status === 410) {

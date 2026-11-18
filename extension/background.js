@@ -1,12 +1,16 @@
 // Gemini Web2API Background Service Worker
-// - Periodically pushes Google session cookies to the local gemini-web2api server
+// - Periodically pushes Google session cookies to the gemini-web2api server
 //   (POST /bridge/cookies) so the server can answer via direct RPC mode whenever
-//   the live tab bridge is unusable (frozen by Chrome Memory Saver, etc).
-// - Watches Gemini tabs for discard/freeze (chrome.tabs.onUpdated -> frozen=true)
+//   the live tab bridge is unusable (frozen by Chrome Memory Saver) or CLOSED.
+// - Watches Gemini tabs for discard/freeze (chrome.tabs.onUpdated -> discarded)
 //   and reports state transitions to POST /bridge/frozen so the server instantly
 //   re-routes in-flight and future requests to cookie mode.
+//
+// Server address & auth token are configurable from the extension popup
+// (chrome.storage.local: serverUrl, bridgeToken) so the server can run on a
+// remote NAS / VPS behind HTTPS (e.g. Cloudflare Tunnel) instead of localhost.
 
-const BRIDGE_URL = "http://localhost:8081";
+const DEFAULT_SERVER_URL = "http://localhost:8081";
 const SYNC_ALARM = "web2api_cookie_sync";
 const SYNC_PERIOD_MIN = 2;
 
@@ -27,6 +31,40 @@ const COOKIE_KEY_ORDER = [
 ];
 
 const GEMINI_URL_RE = /^https:\/\/(gemini\.google\.com|business\.gemini\.google|vertexaisearch\.cloud\.google\.com)\//;
+
+// normalizeServerUrl strips trailing slashes and trailing /v1 so users can paste
+// either the API base URL or the server root.
+function normalizeServerUrl(raw) {
+  let u = String(raw || "").trim();
+  if (!u) return DEFAULT_SERVER_URL;
+  if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+  u = u.replace(/\/+$/, "");
+  u = u.replace(/\/v1$/i, "");
+  return u;
+}
+
+function buildBridgeHeaders(token, extra) {
+  const h = Object.assign({}, extra || {});
+  if (token) h["X-Bridge-Token"] = token;
+  return h;
+}
+
+// Export pure helpers for Node.js unit tests
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { normalizeServerUrl, buildBridgeHeaders };
+}
+
+async function getBridgeConfig() {
+  try {
+    const res = await chrome.storage.local.get(["serverUrl", "bridgeToken"]);
+    return {
+      url: normalizeServerUrl(res.serverUrl),
+      token: String(res.bridgeToken || "").trim()
+    };
+  } catch (e) {
+    return { url: DEFAULT_SERVER_URL, token: "" };
+  }
+}
 
 async function collectCookies() {
   const cookieMap = new Map();
@@ -102,9 +140,10 @@ async function syncCookiesNow(reason) {
     if (xsrf) payload.xsrf_token = xsrf;
     if (authUser) payload.auth_user = authUser;
 
-    const res = await fetch(`${BRIDGE_URL}/bridge/cookies`, {
+    const cfg = await getBridgeConfig();
+    const res = await fetch(`${cfg.url}/bridge/cookies`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildBridgeHeaders(cfg.token, { "Content-Type": "application/json" }),
       body: JSON.stringify(payload)
     });
     if (res.ok) {
@@ -112,7 +151,9 @@ async function syncCookiesNow(reason) {
       if (data && data.auth_error) {
         console.warn("[Web2API] Cookie auth error reported by server:", data.auth_error);
       }
-      console.log(`[Web2API] Cookies synced (${reason}): ${cookieString.length} bytes, xsrf=${!!xsrf}`);
+      console.log(`[Web2API] Cookies synced to ${cfg.url} (${reason}): ${cookieString.length} bytes, xsrf=${!!xsrf}`);
+    } else if (res.status === 401 || res.status === 403) {
+      console.warn("[Web2API] Cookie sync rejected (HTTP " + res.status + ") — check bridge token in extension settings.");
     }
   } catch (e) {
     // Server offline or unreachable — stay silent; next alarm retries.
@@ -121,9 +162,10 @@ async function syncCookiesNow(reason) {
 
 async function reportFrozen(tab, frozen) {
   try {
-    await fetch(`${BRIDGE_URL}/bridge/frozen`, {
+    const cfg = await getBridgeConfig();
+    await fetch(`${cfg.url}/bridge/frozen`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: buildBridgeHeaders(cfg.token, { "Content-Type": "application/json" }),
       body: JSON.stringify({
         frozen: !!frozen,
         client_id: `bg_${tab.id}`,
@@ -138,6 +180,9 @@ async function reportFrozen(tab, frozen) {
 // onUpdated multiple times per tab lifecycle event).
 const frozenTabs = new Map();
 
+// Runtime listeners — only register in a real extension environment
+// (skipped under Node.js unit tests where `chrome` is undefined).
+if (typeof chrome !== "undefined" && chrome.tabs && chrome.runtime) {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tab || !tab.url || !GEMINI_URL_RE.test(tab.url)) return;
 
@@ -185,3 +230,11 @@ chrome.cookies.onChanged.addListener((changeInfo) => {
     syncCookiesNow("cookie-change");
   }
 });
+
+// Re-sync immediately when the user updates the server address/token in the popup.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg && msg.action === "syncCookiesNow") {
+    syncCookiesNow("manual");
+  }
+});
+}

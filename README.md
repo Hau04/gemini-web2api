@@ -114,9 +114,43 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **Note**: If you configure a cookie file in `config.json` (e.g. `"cookie_file": "/app/cookie.txt"`), remember to mount your cookie file as well: `-v ./cookie.txt:/app/cookie.txt`.
+> **Note**: The compose file mounts `./data:/app/data` for persistent cookie storage. Set `"cookie_file": "/app/data/cookie.json"` in your `config.json` so extension-synced cookies survive container restarts. (Mounting `./cookie.json` directly also works but Docker creates a *directory* if the file doesn't exist yet — the data-dir mount avoids that footgun.)
 >
 > **Note**: If you get empty responses (`content: null`) with Docker's default bridge network, switch to host networking: `docker run --network host ...` or add `network_mode: host` in your compose file. This is caused by Gemini's upstream rejecting requests from certain Docker NAT IP ranges.
+
+### 5. Remote NAS / Cloudflare Tunnel Setup (Cookie-Sync Mode)
+
+Run the server on your NAS, exposed through Cloudflare Tunnel (HTTPS), and let the browser extension auto-sync cookies to it — then you can close the browser entirely:
+
+**Server `config.json` on the NAS:**
+
+```json
+{
+  "api_keys": ["sk-your-secret-api-key"],
+  "cookie_file": "/app/data/cookie.json",
+  "bridge_token": "pick-a-long-random-token",
+  "notify_webhook": "https://ntfy.sh/your-unique-topic",
+  "notify_format": "ntfy"
+}
+```
+
+- **`bridge_token`**: shared secret protecting all `/bridge/*` endpoints (cookie push, status, frozen reporting). **Required** when the port is reachable from the internet — without it anyone can overwrite your session cookies.
+- **`api_keys`**: protects `/v1/*` API endpoints as usual.
+- **`notify_webhook`**: when the session cookies expire (Google rejects them), the server POSTs an alert here once per expiry. Use a free [ntfy.sh](https://ntfy.sh) topic (subscribe on your phone), a Discord webhook (`"notify_format": "discord"`), Slack (`"slack"`), or any generic JSON webhook (`"generic"`).
+
+**Extension popup → Server Connection:**
+
+1. **Server address**: your tunnel URL, e.g. `https://gemini.example.com` (trailing `/v1` is handled automatically)
+2. **Bridge token**: the same `bridge_token` value as the server config
+3. Click **Save & Sync Now** — the extension immediately pushes cookies and verifies the connection.
+
+**Daily flow:**
+
+1. Open `gemini.google.com` once → cookies auto-push within seconds (or click Save & Sync Now)
+2. Close the browser — the NAS keeps serving via direct cookie mode
+3. Days later, when the XSRF token expires, you get a push notification → open Gemini once → re-sync happens automatically
+
+> **Security**: Cloudflare Tunnel already gives you HTTPS. The `bridge_token` adds application-level auth so the tunnel URL alone isn't enough to push cookies. Keep both set.
 
 ## Client Configuration
 
@@ -379,11 +413,14 @@ Create `config.json` in the same directory:
   "cookie_file": null,
   "proxy": null,
   "impersonate": null,
-  "log_requests": true
+  "log_requests": true,
+  "bridge_token": null,
+  "notify_webhook": null,
+  "notify_format": "ntfy"
 }
 ```
 
-When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>`.
+When `api_keys` is empty `[]`, authentication is disabled. When keys are set, `/v1/*` endpoints require `Authorization: Bearer <key>`. When `bridge_token` is set, `/bridge/*` endpoints (extension cookie sync, bridge control) require the `X-Bridge-Token` header — set the same token in the extension popup's Server Connection section.
 
 ## Proxy
 
