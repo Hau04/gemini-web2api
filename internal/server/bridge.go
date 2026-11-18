@@ -13,10 +13,12 @@ func (a *App) buildBridgeStatusPayload() map[string]any {
 	tab := ""
 	frozen := false
 	degradedSec := 0
+	chatMode := "auto"
 	var snap bridge.PacingSnapshot
 	if a.Bridge != nil {
 		tab = a.Bridge.TabName()
 		frozen = a.Bridge.IsFrozen()
+		chatMode = a.Bridge.ChatMode()
 		snap = a.Bridge.DetailedPacingStats()
 		if rem := a.Bridge.DegradedRemaining(); rem > 0 {
 			degradedSec = int(rem.Round(time.Second).Seconds())
@@ -33,6 +35,7 @@ func (a *App) buildBridgeStatusPayload() map[string]any {
 		"max_per_10m":   snap.MaxPer10m,
 		"recent_1h":     snap.Recent1h,
 		"max_per_hour":  snap.MaxPerHour,
+		"chat_mode":     chatMode,
 		"cookies_ready": a.cookiesReady(),
 	}
 	lastSync, authErr, authErrAt := a.CookieSync.snapshot()
@@ -173,6 +176,27 @@ func (a *App) handleBridgeFrozen(w http.ResponseWriter, r *http.Request) {
 		"frozen":    a.Bridge.IsFrozen(),
 		"connected": a.Bridge.IsConnected(),
 	})
+}
+
+// handleBridgeChatMode sets the chat-session override from the extension popup:
+// "auto" (default heuristic), "new" (every request starts a fresh chat), or
+// "continue" (requests append to the chat currently open in the browser tab —
+// e.g. an old chat the user clicked open from the history sidebar).
+func (a *App) handleBridgeChatMode(w http.ResponseWriter, r *http.Request) {
+	if a.Bridge == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "bridge not initialized"})
+		return
+	}
+
+	var payload struct {
+		Mode string `json:"mode"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	a.Bridge.SetChatMode(payload.Mode)
+	mode := a.Bridge.ChatMode()
+	a.Logf("Chat mode set to %q via extension popup", mode)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "chat_mode": mode})
 }
 
 func (a *App) handleBridgeChunk(w http.ResponseWriter, r *http.Request) {

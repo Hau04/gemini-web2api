@@ -245,7 +245,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		a.Logf("Routing chat completion through active browser bridge (%s)", a.Bridge.TabName())
-		prepared := a.prepareBridgeRequest(r, req, prompt, images)
+		prepared := a.prepareBridgeRequest(r, req, prompt, images, resolved.ChatMode)
 		bridgeOpts := bridge.GenerateOptions{
 			Prompt:      prepared.Prompt,
 			Model:       resolved.Name,

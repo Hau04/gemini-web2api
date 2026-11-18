@@ -121,6 +121,12 @@ type Resolved struct {
 	Header   string
 	Fallback bool
 	Extra    map[int]any
+	// ChatMode carries the optional chat-session directive parsed from the model
+	// suffix: "" (auto), "new" (@new — always start a fresh chat in the browser
+	// tab), or "continue" (@continue — always append to the tab's currently open
+	// chat, preserving its Gemini memory). Only meaningful in bridge mode; the
+	// direct cookie mode is stateless per request.
+	ChatMode string
 }
 
 const DefaultModelName = "gemini-3.6-flash"
@@ -128,20 +134,45 @@ const DefaultModelName = "gemini-3.6-flash"
 // Resolve maps a requested model string to its corresponding backend configuration.
 // It supports model name suffixes like "@think=N" (e.g. "gemini-3.6-flash@think=0")
 // to dynamically override the model's default thinking depth without modifying the model mapping.
+// Chat-session directives "@new" / "@continue" can be combined in any order:
+// "gemini-4-hydrogen@think=0@new" or "gemini-4-hydrogen@continue".
 func Resolve(modelName, defaultName string) (Resolved, error) {
 	if defaultName == "" {
 		defaultName = DefaultModelName
 	}
 
 	var thinkOverride *int
-	if idx := strings.LastIndex(modelName, "@think="); idx != -1 {
-		thinkStr := modelName[idx+len("@think="):]
-		modelName = modelName[:idx]
-		val, err := strconv.Atoi(thinkStr)
-		if err != nil {
-			return Resolved{}, fmt.Errorf("invalid think level: %s", thinkStr)
+	chatMode := ""
+
+	// Parse @directives in any order after the base model name.
+	if strings.Contains(modelName, "@") {
+		segs := strings.Split(modelName, "@")
+		base := segs[0]
+		var leftover []string
+		for _, d := range segs[1:] {
+			dl := strings.ToLower(strings.TrimSpace(d))
+			switch {
+			case strings.HasPrefix(dl, "think="):
+				val, err := strconv.Atoi(dl[len("think="):])
+				if err != nil {
+					return Resolved{}, fmt.Errorf("invalid think level: %s", dl[len("think="):])
+				}
+				thinkOverride = &val
+			case dl == "new" || dl == "newchat" || dl == "fresh":
+				chatMode = "new"
+			case dl == "continue" || dl == "cont":
+				chatMode = "continue"
+			default:
+				// Unrecognized segment: keep it in the name so unknown models still
+				// fall through to the default-model fallback exactly as before.
+				leftover = append(leftover, d)
+			}
 		}
-		thinkOverride = &val
+		if len(leftover) == 0 {
+			modelName = base
+		} else {
+			modelName = base + "@" + strings.Join(leftover, "@")
+		}
 	}
 
 	cfg, exists := MODELS[modelName]
@@ -165,5 +196,6 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 		Header:   cfg.Header,
 		Fallback: fallback,
 		Extra:    cfg.Extra,
+		ChatMode: chatMode,
 	}, nil
 }

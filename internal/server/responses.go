@@ -162,7 +162,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
-			prepared := a.prepareBridgeRequest(r, chatReq, prompt, images)
+			prepared := a.prepareBridgeRequest(r, chatReq, prompt, images, resolved.ChatMode)
 			text, err = a.Bridge.GenerateWithOptions(r.Context(), bridge.GenerateOptions{
 				Prompt:      prepared.Prompt,
 				Model:       resolved.Name,
