@@ -228,6 +228,30 @@ func ExtractCandidatePaths(text string) []string {
 	return out
 }
 
+var reAttachedFilename = regexp.MustCompile(`(?i)(?:\[Directly attached file\(s\):|\[File attached:|\[Attached file:)\s*([^\s\]]+\.(?:` + allowedExtPattern + `))`)
+
+// ExtractAttachedFilenames extracts filenames from WorkBuddy attachment notices like
+// "[Directly attached file(s): code_context.txt. ...]" or "[File attached: report.pdf]".
+// These bare filenames (without paths) are resolved against workspace/cwd by
+// resolveAndReadLocalFile.
+func ExtractAttachedFilenames(text string) []string {
+	if strings.TrimSpace(text) == "" {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]bool)
+	for _, m := range reAttachedFilename.FindAllStringSubmatch(text, -1) {
+		name := strings.TrimSpace(m[1])
+		name = strings.Trim(name, "\"'`()[]<>,.;:")
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
+}
+
 func isSensitiveFilename(base string) bool {
 	lower := strings.ToLower(base)
 	if strings.HasPrefix(lower, ".") {
@@ -416,16 +440,46 @@ func DiscoverLocalUploadFiles(messages []models.OpenAIMessage, alreadyUploaded m
 	if len(messages) == 0 {
 		return nil, nil
 	}
-	last := messages[len(messages)-1]
-	if last.Role != "user" && last.Role != "" {
-		return nil, nil
+	// Scan all recent user messages (not just the latest) so WorkBuddy attachment
+	// notices like "[Directly attached file(s): code_context.txt...]" are found
+	// even if they appear in an earlier turn or the latest message is a tool result.
+	var combinedText strings.Builder
+	// Check last 3 messages for file references (covers user + tool + user patterns).
+	startIdx := len(messages) - 3
+	if startIdx < 0 {
+		startIdx = 0
 	}
-	latestUserText, _ := format.ExtractMessageContent(last)
+	for i := startIdx; i < len(messages); i++ {
+		msg := messages[i]
+		role := strings.ToLower(strings.TrimSpace(msg.Role))
+		if role != "user" && role != "" && role != "system" && role != "developer" {
+			continue
+		}
+		text, _ := format.ExtractMessageContent(msg)
+		if strings.TrimSpace(text) != "" {
+			combinedText.WriteString(text)
+			combinedText.WriteString("\n")
+		}
+	}
+	// Also check the very last message even if it's a tool result (WorkBuddy may
+	// attach files alongside tool outputs).
+	if len(messages) > 0 {
+		last := messages[len(messages)-1]
+		text, _ := format.ExtractMessageContent(last)
+		if strings.TrimSpace(text) != "" && !strings.Contains(combinedText.String(), text) {
+			combinedText.WriteString(text)
+		}
+	}
+	latestUserText := combinedText.String()
 	if strings.TrimSpace(latestUserText) == "" {
 		return nil, nil
 	}
 
 	candidates := ExtractCandidatePaths(latestUserText)
+	// Also extract filenames from WorkBuddy attachment notices like
+	// "[Directly attached file(s): code_context.txt. ...]" or
+	// "[File attached: code_context.txt]" which may not match path regexes.
+	candidates = append(candidates, ExtractAttachedFilenames(latestUserText)...)
 	if len(candidates) == 0 {
 		return nil, nil
 	}
@@ -905,8 +959,10 @@ func SpilloverOversizedPrompt(prompt string, maxChars int, isDelta bool) (compac
 	}
 }
 
-// FormatAttachmentsToBridge converts explicit API attachments (image_url, file, input_file, document)
-// into bridge.Attachment payloads for the browser extension.
+// FormatAttachmentsToBridge converts explicit API attachments (image_url, file, input_file,
+// document, attachment) into bridge.Attachment payloads for the browser extension.
+// Handles remote URLs via fetchRemote, plus local file:// URLs and bare local paths
+// (WorkBuddy may send attached files as local paths when running on localhost).
 func FormatAttachmentsToBridge(items []format.Image, fetchRemote func(string) ([]byte, error)) []bridge.Attachment {
 	if len(items) == 0 {
 		return nil
@@ -917,12 +973,22 @@ func FormatAttachmentsToBridge(items []format.Image, fetchRemote func(string) ([
 		data := item.Data
 		mime := item.MIME
 
-		if len(data) == 0 && item.URL != "" && fetchRemote != nil {
-			fetched, err := fetchRemote(item.URL)
-			if err != nil || len(fetched) == 0 {
+		if len(data) == 0 && item.URL != "" {
+			// Try remote fetch first (http/https/data:).
+			if fetchRemote != nil {
+				if fetched, err := fetchRemote(item.URL); err == nil && len(fetched) > 0 {
+					data = fetched
+				}
+			}
+			// Fallback: try local file read for file:// URLs or bare paths.
+			if len(data) == 0 {
+				if localData, err := readLocalFileFromURL(item.URL); err == nil && len(localData) > 0 {
+					data = localData
+				}
+			}
+			if len(data) == 0 {
 				continue
 			}
-			data = fetched
 		}
 
 		if len(data) == 0 || len(data) > maxBridgeAttachmentBytes {
@@ -931,12 +997,25 @@ func FormatAttachmentsToBridge(items []format.Image, fetchRemote func(string) ([
 		if mime == "" {
 			if len(data) >= 4 && string(data[:4]) == "%PDF" {
 				mime = "application/pdf"
+			} else if detected := multimodal.DetectImageMime(data); detected != "" && detected != "application/octet-stream" {
+				mime = detected
 			} else {
-				mime = multimodal.DetectImageMime(data)
+				// For text files, DetectImageMime returns octet-stream; infer from filename.
+				mime = mimeFromFilename(item.Filename)
+				if mime == "" {
+					mime = "application/octet-stream"
+				}
 			}
 		}
 
 		filename := strings.TrimSpace(item.Filename)
+		if filename == "" && item.URL != "" {
+			filename = filepath.Base(strings.TrimSpace(item.URL))
+			// Strip query params from URL-derived filename.
+			if qIdx := strings.Index(filename, "?"); qIdx != -1 {
+				filename = filename[:qIdx]
+			}
+		}
 		if filename == "" {
 			filename = fmt.Sprintf("attachment_%d%s", idx+1, extForMIME(mime))
 		}
@@ -950,6 +1029,101 @@ func FormatAttachmentsToBridge(items []format.Image, fetchRemote func(string) ([
 		})
 	}
 	return out
+}
+
+// readLocalFileFromURL reads a local file from a file:// URL or bare filesystem path.
+// Returns error if the path is not a local file or cannot be read.
+func readLocalFileFromURL(rawURL string) ([]byte, error) {
+	trimmed := strings.TrimSpace(rawURL)
+	if trimmed == "" {
+		return nil, fmt.Errorf("empty url")
+	}
+	// Handle file:// URLs.
+	if strings.HasPrefix(strings.ToLower(trimmed), "file://") {
+		rest := trimmed[7:] // strip "file://"
+		// file:///path -> /path ; file://host/path -> /path (ignore host for localhost)
+		if strings.HasPrefix(rest, "localhost/") {
+			rest = rest[len("localhost"):]
+		}
+		if unesc, err := url.PathUnescape(rest); err == nil {
+			rest = unesc
+		}
+		// Windows: file:///C:/path -> C:/path
+		if len(rest) >= 3 && rest[0] == '/' && rest[2] == ':' {
+			rest = rest[1:]
+		}
+		trimmed = rest
+	}
+	// Only attempt local read for paths that look like filesystem paths
+	// (absolute or relative with extension), not http/https/data: URLs.
+	lower := strings.ToLower(trimmed)
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(lower, "data:") {
+		return nil, fmt.Errorf("not a local path: %s", rawURL)
+	}
+	// Must have a file extension to be considered a local file path.
+	if filepath.Ext(trimmed) == "" {
+		return nil, fmt.Errorf("no file extension: %s", rawURL)
+	}
+	cleaned := filepath.Clean(trimmed)
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		// Try relative to cwd.
+		if abs, err2 := filepath.Abs(cleaned); err2 == nil {
+			info, err = os.Stat(abs)
+			if err == nil {
+				cleaned = abs
+			}
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if info.IsDir() || info.Size() <= 0 || info.Size() > maxBridgeAttachmentBytes {
+		return nil, fmt.Errorf("invalid file size or directory: %s", cleaned)
+	}
+	return os.ReadFile(cleaned)
+}
+
+func mimeFromFilename(filename string) string {
+	ext := strings.ToLower(filepath.Ext(strings.TrimSpace(filename)))
+	switch ext {
+	case ".pdf":
+		return "application/pdf"
+	case ".txt", ".log":
+		return "text/plain"
+	case ".md", ".markdown":
+		return "text/markdown"
+	case ".json":
+		return "application/json"
+	case ".csv":
+		return "text/csv"
+	case ".tsv":
+		return "text/tab-separated-values"
+	case ".html", ".htm":
+		return "text/html"
+	case ".css":
+		return "text/css"
+	case ".js", ".mjs", ".cjs":
+		return "text/javascript"
+	case ".png":
+		return "image/png"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".gif":
+		return "image/gif"
+	case ".webp":
+		return "image/webp"
+	case ".svg":
+		return "image/svg+xml"
+	case ".docx":
+		return "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+	case ".xlsx":
+		return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+	case ".pptx":
+		return "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+	default:
+		return ""
+	}
 }
 
 func extForMIME(mime string) string {

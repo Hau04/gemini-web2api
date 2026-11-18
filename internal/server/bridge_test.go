@@ -1880,6 +1880,88 @@ func TestBridgePauseAndResumeEndpoint(t *testing.T) {
 	}
 }
 
+func TestBridgeWorkBuddyAttachmentUploadedToGemini(t *testing.T) {
+	// Regression: WorkBuddy attaches code_context.txt via {"type":"attachment",...}
+	// with raw text data. The bridge MUST upload it to Gemini (not just placeholder text),
+	// otherwise Gemini replies "I can't see the contents" and tries Read tool (which fails).
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeMinIntervalMs = 0
+	cfg.BridgeJitterMs = 0
+	cfg.BridgeMaxPer10Min = 0
+	cfg.BridgeMaxPerHour = 0
+	app := New(cfg, "test")
+	handler := app.Handler()
+
+	app.Bridge.UpdateTabSession("vertexaisearch.cloud.google.com", "tab_wb_attach", "1")
+
+	rawText := "# Code Context\n\npackage main\n\nfunc main() { fmt.Println(\"hello\") }\n"
+	body := map[string]any{
+		"model":  "gemini-4-hydrogen",
+		"stream": false,
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "text", "text": "Review this code context"},
+					map[string]any{
+						"type":     "attachment",
+						"filename": "code_context.txt",
+						"data":     rawText,
+					},
+				},
+			},
+		},
+	}
+	raw, _ := json.Marshal(body)
+
+	done := make(chan *bridge.Request, 1)
+	go func() {
+		req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_wb_attach", "1", 2*time.Second)
+		done <- req
+		if req != nil {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "Reviewed the code.", Done: true})
+		}
+	}()
+
+	httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
+	httpReq.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httpReq)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	req := <-done
+	if req == nil {
+		t.Fatal("expected bridge request")
+	}
+	// The attachment MUST be present for upload to Gemini — placeholder text alone
+	// is the bug ("I can't see the contents of code_context.txt").
+	if len(req.Attachments) != 1 {
+		t.Fatalf("expected 1 uploaded attachment (code_context.txt), got %d: %+v", len(req.Attachments), req.Attachments)
+	}
+	att := req.Attachments[0]
+	if att.Filename != "code_context.txt" {
+		t.Errorf("Filename = %q, want code_context.txt", att.Filename)
+	}
+	decoded, _ := base64.StdEncoding.DecodeString(att.DataBase64)
+	if string(decoded) != rawText {
+		t.Errorf("attachment content mismatch: got %q", string(decoded))
+	}
+	if !strings.Contains(req.Prompt, "[File attached: code_context.txt]") {
+		t.Errorf("prompt missing file marker, got: %s", req.Prompt)
+	}
+}
+
+func TestExtractAttachedFilenamesFromWorkBuddyNotice(t *testing.T) {
+	text := "[Directly attached file(s): code_context.txt. Read the attached file(s) natively in full — do NOT call local shell/python/file tools to inspect or extract them.]\n\n[The full prompt / code context (23003 chars) is attached directly in code_context.txt. Read the attached file verbatim in full before responding or calling tools.]"
+	names := ExtractAttachedFilenames(text)
+	if len(names) != 1 || names[0] != "code_context.txt" {
+		t.Fatalf("expected [code_context.txt], got %v", names)
+	}
+}
+
 
 
 
