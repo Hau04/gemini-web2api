@@ -1041,7 +1041,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
-					"- If a file or image is already attached directly to this message (shown as [File attached: ...] or uploaded to this chat), read it natively from the attachment — NEVER call Read/Glob/Bash to re-read it (the file is virtual and does not exist on disk; calling Read will fail with 'File does not exist').\n\n"+
+					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
 					"Available tools:\n%s%s",
 				connectorNote,
 				string(defsJSON),
