@@ -334,8 +334,10 @@ func decodeFilePayload(payload, filename, mimeHint string) (Image, bool) {
 	// WorkBuddy may send raw UTF-8 text (not base64) for .txt/.md/.code attachments.
 	// Heuristic: if payload contains newlines or non-base64 chars and is valid UTF-8,
 	// treat as raw text bytes. Base64 payloads are single-line without spaces.
-	if isLikelyRawText(trimmed) {
-		data := []byte(trimmed)
+	// Use original payload (not trimmed) to preserve exact file bytes including
+	// trailing newlines.
+	if isLikelyRawText(payload) {
+		data := []byte(payload)
 		if mimeHint == "" {
 			mimeHint = mimeForFilename(filename)
 		}
@@ -344,8 +346,8 @@ func decodeFilePayload(payload, filename, mimeHint string) (Image, bool) {
 	decoded, err := multimodal.DecodeBase64Raw(trimmed)
 	if err != nil {
 		// Last resort: treat as raw text if it looks like text.
-		if isLikelyRawText(trimmed) {
-			data := []byte(trimmed)
+		if isLikelyRawText(payload) {
+			data := []byte(payload)
 			if mimeHint == "" {
 				mimeHint = mimeForFilename(filename)
 			}
