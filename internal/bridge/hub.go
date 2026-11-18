@@ -973,7 +973,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 				return nil
 			}
 		case <-idleTimer.C:
-			return errors.New("browser bridge generation timed out (240s)")
+			return errors.New("browser bridge generation timed out (240s with no data from the browser tab — the Gemini tab may be laggy, throttled in the background, or stuck uploading; check the tab and retry)")
 		}
 	}
 }

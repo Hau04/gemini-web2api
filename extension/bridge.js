@@ -2353,8 +2353,9 @@
     return null;
   }
 
-  async function waitForUploadTrigger(filenames, inputArea, snap, timeoutMs) {
-    const deadline = Date.now() + timeoutMs;
+  async function waitForUploadTrigger(filenames, inputArea, snap, timeoutMs, overallDeadline) {
+    let deadline = Date.now() + timeoutMs;
+    if (overallDeadline && overallDeadline < deadline) deadline = overallDeadline;
     while (Date.now() < deadline) {
       const sig = checkUploadTriggerSignal(filenames, inputArea, snap);
       if (sig) return sig;
@@ -2363,9 +2364,15 @@
     return null;
   }
 
-  async function waitForUploadsReady(filenames, inputArea, snap) {
+  async function waitForUploadsReady(filenames, inputArea, snap, overallDeadline) {
+    // Clamp every internal wait to the overall upload budget so multi-tier probing
+    // can never consume the whole request window on laggy/throttled tabs.
+    const cap = (ms) => {
+      const d = Date.now() + ms;
+      return overallDeadline && overallDeadline < d ? overallDeadline : d;
+    };
     // Allow brief window after injection for upload POST request to kick off
-    const kickDeadline = Date.now() + 1800;
+    const kickDeadline = cap(1800);
     while (
       Date.now() < kickDeadline &&
       uploadTracker.startedCount === snap.startedCount &&
@@ -2376,7 +2383,7 @@
 
     // If network upload started, wait until all in-flight uploads finish (up to 35s for large PDFs)
     if (uploadTracker.startedCount > snap.startedCount) {
-      const netDeadline = Date.now() + 35000;
+      const netDeadline = cap(35000);
       while (Date.now() < netDeadline) {
         const finished = uploadTracker.doneCount > snap.doneCount || uploadTracker.errorCount > snap.errorCount;
         if (uploadTracker.inFlightIds.size === 0 && finished) {
@@ -2390,7 +2397,7 @@
     }
 
     // Wait briefly for UI chip / send button to settle
-    const chipDeadline = Date.now() + 3000;
+    const chipDeadline = cap(3000);
     while (Date.now() < chipDeadline) {
       const curChips = countAttachmentChipsInDom(inputArea);
       if (
@@ -2427,6 +2434,11 @@
       armId: null
     };
 
+    // Overall upload budget: on throttled/laggy tabs multi-tier probing can otherwise
+    // eat the entire request window before the prompt is even submitted. When the
+    // budget runs out, the caller falls back to inlining the file text.
+    const uploadDeadline = Date.now() + 45000;
+
     // Prioritize whichever upload tier already succeeded on this site to avoid probing
     // failing tiers (and prevent any chance of double-uploading across tiers).
     const defaultTiers = ["file_input", "drag_drop", "click_trap"];
@@ -2435,9 +2447,13 @@
       : defaultTiers;
 
     for (const tier of tierOrder) {
+      if (Date.now() > uploadDeadline) {
+        console.warn("[Web2API Bridge] Upload budget exhausted — falling back to inline text.");
+        break;
+      }
       // Safety abort: if a prior attempt already started uploading or added a chip, NEVER try another tier!
       if (checkUploadTriggerSignal(filenames, inputArea, snap)) {
-        const ready = await waitForUploadsReady(filenames, inputArea, snap);
+        const ready = await waitForUploadsReady(filenames, inputArea, snap, uploadDeadline);
         return { ok: ready, method: preferredUploadMethod || "detected" };
       }
 
@@ -2454,9 +2470,9 @@
           // on Angular/Lit components that listen to both events).
           existingInput.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
 
-          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600);
+          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600, uploadDeadline);
           if (triggered) {
-            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            const ready = await waitForUploadsReady(filenames, inputArea, snap, uploadDeadline);
             if (ready) {
               preferredUploadMethod = "file_input";
               console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 1 (<input type=file>, signal:", triggered + ")");
@@ -2500,9 +2516,9 @@
             dropTarget.dispatchEvent(ev);
           }
 
-          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600);
+          const triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1600, uploadDeadline);
           if (triggered) {
-            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            const ready = await waitForUploadsReady(filenames, inputArea, snap, uploadDeadline);
             if (ready) {
               preferredUploadMethod = "drag_drop";
               console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 2 (drag-and-drop, signal:", triggered + ")");
@@ -2531,19 +2547,19 @@
           await new Promise((r) => setTimeout(r, 60));
 
           simulateClick(attachBtn);
-          let triggered = await waitForUploadTrigger(filenames, inputArea, snap, 700);
+          let triggered = await waitForUploadTrigger(filenames, inputArea, snap, 700, uploadDeadline);
 
           if (!triggered) {
             // Clicking '+' likely opened a popover menu ("Upload files" / "Upload from computer")
             const menuOpt = findUploadMenuOption(document, attachBtn);
             if (menuOpt) {
               simulateClick(menuOpt);
-              triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1200);
+              triggered = await waitForUploadTrigger(filenames, inputArea, snap, 1200, uploadDeadline);
             }
           }
 
           if (triggered) {
-            const ready = await waitForUploadsReady(filenames, inputArea, snap);
+            const ready = await waitForUploadsReady(filenames, inputArea, snap, uploadDeadline);
             if (ready) {
               preferredUploadMethod = "click_trap";
               console.log("[Web2API Bridge] Uploaded attachment(s) via Tier 3 (attach button + click trap, signal:", triggered + ")");
@@ -2680,6 +2696,18 @@
   }
 
   async function handlePromptRequest(reqId, prompt, model, attachments, newChat) {
+    // Keepalive: the server applies a 240s IDLE timeout that resets on EVERY chunk.
+    // On throttled/laggy tabs (Chrome throttles background-tab timers to ~1/min),
+    // uploading attachments + pasting a huge prompt + submitting can legitimately
+    // take minutes before any content exists. Send an empty chunk now and every
+    // 15s so the server never mistakes a slow-but-working tab for a dead one.
+    const sendKeepalive = () => {
+      sendChunk(reqId, "", false).catch(() => {});
+    };
+    sendKeepalive();
+    const keepaliveTimer = setInterval(sendKeepalive, 15000);
+
+    try {
     // 0. If WorkBuddy/client started a brand-new chat, open a fresh Gemini chat first
     // so previous conversation memory & files never bleed into the new chat!
     if (newChat) {
@@ -2815,6 +2843,9 @@
       await new Promise((r) => setTimeout(r, 600));
       resetOrRefreshPage();
     }
+    } finally {
+      clearInterval(keepaliveTimer);
+    }
   }
 
   function observeResponseStream(reqId, inputArea, prompt, baselineMap, netCapture, submitMeta) {
@@ -2830,6 +2861,8 @@
       let lastNetProgressAt = 0;
       let lastNetSeenLen = 0;
       let lastNetGrowthAt = 0;
+      let lastDomScanAt = 0;
+      let lastGenerating = false;
       const startTime = Date.now();
       let chunkQueue = Promise.resolve();
 
@@ -2993,8 +3026,18 @@
         }
 
         // 2. FALLBACK ENGINE: Hardened Shadow-DOM Observer
-        const domText = extractActiveDomResponseText(inputArea, prompt, baselineMap);
-        const generating = isGenerating(netCapture);
+        // Throttle the expensive deep-DOM scans: on large/laggy pages a single
+        // shadow-DOM walk can block the main thread for seconds, starving chunk
+        // delivery and heartbeats. Scanning ~1/sec is plenty for markdown capture;
+        // finish() always performs a fresh final scan.
+        let domText = "";
+        const scanAt = Date.now();
+        if (scanAt - lastDomScanAt >= 800) {
+          lastDomScanAt = scanAt;
+          domText = extractActiveDomResponseText(inputArea, prompt, baselineMap);
+          lastGenerating = isGenerating(netCapture);
+        }
+        const generating = lastGenerating;
         if (generating) {
           sawGenerating = true;
         }
