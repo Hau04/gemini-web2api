@@ -41,8 +41,11 @@ type Client struct {
 	HTTP    Requester
 	Cookies *CookieCache
 	Logf    func(format string, args ...any)
-	blMu    sync.Mutex
-	bl      string
+	// OnAuthError is invoked when Google rejects the session cookies (redirect to
+	// sign-in, HTTP 401/403) so the server can surface "session expired" state.
+	OnAuthError func(msg string)
+	blMu        sync.Mutex
+	bl          string
 
 	modelsMu      sync.RWMutex
 	discovered    []DiscoveredModel
@@ -178,11 +181,35 @@ func (c *Client) buildHeaders() http.Header {
 
 func (c *Client) triageStatus(resp *http.Response) error {
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		// A redirect to accounts.google.com means the session cookies expired or the
+		// account was signed out — distinct from an IP-level sorry/index block.
+		if loc := resp.Header.Get("Location"); strings.Contains(loc, "accounts.google.com") {
+			err := &UpstreamError{
+				Status: resp.StatusCode,
+				Kind:   "auth",
+				Msg:    "session cookies expired or signed out (redirected to Google sign-in); open gemini.google.com in the browser to refresh the session",
+			}
+			if c.OnAuthError != nil {
+				c.OnAuthError(err.Msg)
+			}
+			return err
+		}
 		return &UpstreamError{
 			Status: resp.StatusCode,
 			Kind:   "http",
 			Msg:    "upstream blocked (redirected to sorry/index); IP may be flagged - retry later or use a different proxy/IP",
 		}
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		err := &UpstreamError{
+			Status: resp.StatusCode,
+			Kind:   "auth",
+			Msg:    fmt.Sprintf("session cookies rejected (HTTP %d); cookies may be expired - open gemini.google.com in the browser to refresh the session", resp.StatusCode),
+		}
+		if c.OnAuthError != nil {
+			c.OnAuthError(err.Msg)
+		}
+		return err
 	}
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return &UpstreamError{

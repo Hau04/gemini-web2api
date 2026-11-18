@@ -3146,6 +3146,19 @@
 
   setInterval(sendHeartbeat, 10000);
 
+  // Report visibility recovery to the server so it clears any frozen state.
+  // Chrome's Memory Saver may freeze background tabs entirely — the background
+  // service worker reports that via /bridge/frozen — but this gives us an
+  // early signal when the user switches back to the tab.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    fetch(`${BRIDGE_URL}/bridge/frozen`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ frozen: false, client_id: CLIENT_ID, tab: location.hostname })
+    }).catch(() => {});
+  });
+
   async function pollServer() {
     if (isPolling) return;
     isPolling = true;

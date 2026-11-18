@@ -11,21 +11,40 @@ import (
 func (a *App) buildBridgeStatusPayload() map[string]any {
 	connected := a.Bridge != nil && a.Bridge.IsConnected()
 	tab := ""
+	frozen := false
+	degradedSec := 0
 	var snap bridge.PacingSnapshot
 	if a.Bridge != nil {
 		tab = a.Bridge.TabName()
+		frozen = a.Bridge.IsFrozen()
 		snap = a.Bridge.DetailedPacingStats()
+		if rem := a.Bridge.DegradedRemaining(); rem > 0 {
+			degradedSec = int(rem.Round(time.Second).Seconds())
+		}
 	}
-	return map[string]any{
-		"connected":    connected,
-		"tab":          tab,
-		"paused":       snap.Paused,
-		"cooldown_sec": snap.CooldownSec,
-		"recent_10m":   snap.Recent10m,
-		"max_per_10m":  snap.MaxPer10m,
-		"recent_1h":    snap.Recent1h,
-		"max_per_hour": snap.MaxPerHour,
+	payload := map[string]any{
+		"connected":     connected,
+		"tab":           tab,
+		"paused":        snap.Paused,
+		"frozen":        frozen,
+		"degraded_sec":  degradedSec,
+		"cooldown_sec":  snap.CooldownSec,
+		"recent_10m":    snap.Recent10m,
+		"max_per_10m":   snap.MaxPer10m,
+		"recent_1h":     snap.Recent1h,
+		"max_per_hour":  snap.MaxPerHour,
+		"cookies_ready": a.cookiesReady(),
 	}
+	lastSync, authErr, authErrAt := a.CookieSync.snapshot()
+	if !lastSync.IsZero() {
+		payload["cookie_last_sync"] = lastSync.UTC().Format(time.RFC3339)
+		payload["cookie_last_sync_age_sec"] = int(time.Since(lastSync).Seconds())
+	}
+	if authErr != "" {
+		payload["cookie_auth_error"] = authErr
+		payload["cookie_auth_error_at"] = authErrAt.UTC().Format(time.RFC3339)
+	}
+	return payload
 }
 
 func (a *App) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +142,37 @@ func (a *App) handleBridgePoll(w http.ResponseWriter, r *http.Request) {
 		resp["new_chat"] = true
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleBridgeFrozen receives freeze/resume lifecycle events from the content
+// script. Chrome freezes background tabs (Memory Saver / Energy Saver), which
+// halts the content script entirely — while frozen, requests must route via the
+// direct cookie mode instead of waiting on a tab that cannot respond.
+func (a *App) handleBridgeFrozen(w http.ResponseWriter, r *http.Request) {
+	if a.Bridge == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "bridge not initialized"})
+		return
+	}
+
+	var payload struct {
+		Frozen   bool   `json:"frozen"`
+		ClientID string `json:"client_id"`
+		Tab      string `json:"tab"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	a.Bridge.SetFrozen(payload.Frozen)
+	if payload.Frozen {
+		a.Logf("Browser tab reported FROZEN (%s) — routing new requests via direct cookie mode until it resumes", payload.Tab)
+	} else {
+		a.Logf("Browser tab resumed (%s) — browser bridge available again", payload.Tab)
+		a.Bridge.ClearDegraded()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"frozen":    a.Bridge.IsFrozen(),
+		"connected": a.Bridge.IsConnected(),
+	})
 }
 
 func (a *App) handleBridgeChunk(w http.ResponseWriter, r *http.Request) {

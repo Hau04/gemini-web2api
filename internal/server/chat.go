@@ -218,7 +218,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if an authenticated browser tab is connected via the extension bridge.
-	if a.Bridge != nil && a.Bridge.IsConnected() {
+	// A frozen tab (Chrome Memory Saver) never counts as connected. A degraded bridge
+	// (recent zero-content timeout) is skipped while session cookies are available —
+	// otherwise we still prefer the bridge over failing outright.
+	bridgeAlive := a.Bridge != nil && a.Bridge.IsConnected()
+	if bridgeAlive && a.Bridge.IsDegraded() && a.cookiesReady() {
+		a.Logf("Browser bridge degraded after recent timeout — routing via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
+		bridgeAlive = false
+	}
+	if bridgeAlive {
 		if a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
@@ -312,80 +320,109 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 			}()
 
-			var fullText strings.Builder
-			var bufferedTail strings.Builder
-			hasTools := len(req.Tools) > 0 && !isToolNone
-			isBufferingToolCall := false
-			pending := ""
-			streamedAny := false
+		var fullText strings.Builder
+		var bufferedTail strings.Builder
+		hasTools := len(req.Tools) > 0 && !isToolNone
+		isBufferingToolCall := false
+		pending := ""
+		streamedAny := false
+		servedByDirect := false
 
-			emitContent := func(text string) error {
-				if text == "" {
-					return nil
-				}
-				streamedAny = true
-				chunk := models.OpenAIChatResponse{
-					ID:      cid,
-					Object:  "chat.completion.chunk",
-					Created: time.Now().Unix(),
-					Model:   resolved.Name,
-					Choices: []models.OpenAIChoice{
-						{
-							Index: 0,
-							Delta: &models.OpenAIDelta{
-								Content: text,
-							},
-							FinishReason: nil,
+		emitContent := func(text string) error {
+			if text == "" {
+				return nil
+			}
+			streamedAny = true
+			chunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: &models.OpenAIDelta{
+							Content: text,
 						},
+						FinishReason: nil,
 					},
-				}
-				return safeWriteSSE(chunk)
+				},
+			}
+			return safeWriteSSE(chunk)
+		}
+
+		emitDelta := func(delta string) error {
+			fullText.WriteString(delta)
+
+			if !hasTools {
+				return emitContent(delta)
 			}
 
-			emitErr := a.Bridge.GenerateStreamWithOptions(r.Context(), bridgeOpts, func(delta string) error {
-				fullText.WriteString(delta)
-
-				if !hasTools {
-					return emitContent(delta)
-				}
-
-				if isBufferingToolCall {
-					bufferedTail.WriteString(delta)
-					return nil
-				}
-
-				pending += delta
-
-				// Detect start of a ```tool_call, <tool_call>, or ```json block; flush any leading prose
-				if idx := findToolFenceStart(pending); idx != -1 {
-					isBufferingToolCall = true
-					bufferedTail.WriteString(pending[idx:])
-					if idx > 0 {
-						leading := pending[:idx]
-						pending = ""
-						return emitContent(leading)
-					}
-					pending = ""
-					return nil
-				}
-
-				// Hold only a tiny trailing suffix if it could be the opening of a tool fence
-				hold := partialToolFenceSuffixLen(pending)
-				if len(pending) > hold {
-					toEmit := pending[:len(pending)-hold]
-					pending = pending[len(pending)-hold:]
-					return emitContent(toEmit)
-				}
+			if isBufferingToolCall {
+				bufferedTail.WriteString(delta)
 				return nil
-			})
+			}
 
-			close(stopKeepalive)
-			<-doneKeepalive
+			pending += delta
 
+			// Detect start of a ```tool_call, <tool_call>, or ```json block; flush any leading prose
+			if idx := findToolFenceStart(pending); idx != -1 {
+				isBufferingToolCall = true
+				bufferedTail.WriteString(pending[idx:])
+				if idx > 0 {
+					leading := pending[:idx]
+					pending = ""
+					return emitContent(leading)
+				}
+				pending = ""
+				return nil
+			}
+
+			// Hold only a tiny trailing suffix if it could be the opening of a tool fence
+			hold := partialToolFenceSuffixLen(pending)
+			if len(pending) > hold {
+				toEmit := pending[:len(pending)-hold]
+				pending = pending[len(pending)-hold:]
+				return emitContent(toEmit)
+			}
+			return nil
+		}
+
+		emitErr := a.Bridge.GenerateStreamWithOptions(r.Context(), bridgeOpts, emitDelta)
+		if emitErr != nil && !streamedAny && fullText.Len() == 0 && a.cookiesReady() && r.Context().Err() == nil {
+			// The bridge produced nothing before failing (e.g. the tab froze or was
+			// discarded mid-turn). Fall back to the direct cookie mode and mark the
+			// bridge degraded so subsequent requests skip it until the tab recovers.
+			a.Logf("Browser bridge failed before streaming (%v) — retrying via direct cookie mode", emitErr)
+			a.Bridge.MarkDegraded(10 * time.Minute)
+			fullText.Reset()
+			var fileRefs []string
+			if len(images) > 0 {
+				var uErr error
+				fileRefs, uErr = a.uploadImages(images)
+				if uErr != nil {
+					emitErr = uErr
+				}
+			}
 			if emitErr == nil {
-				if strings.TrimSpace(fullText.String()) != "" {
+				emitErr = a.Gem.GenerateStream(prompt, gemOpt, fileRefs, emitDelta)
+				if emitErr == nil {
+					servedByDirect = true
+				}
+			}
+		}
+
+		close(stopKeepalive)
+		<-doneKeepalive
+
+		if emitErr == nil {
+			if strings.TrimSpace(fullText.String()) != "" {
+				if servedByDirect {
+					a.Bridge.ClearDegraded()
+				} else {
 					a.recordBridgeTurnSuccess(prepared)
 				}
+			}
 				if hasTools {
 					if isBufferingToolCall {
 						_, toolCalls := format.ParseToolCallsWithContext(fullText.String(), req.Tools, req.Messages)
@@ -523,8 +560,31 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
 				return
 			}
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
-			return
+			if a.cookiesReady() && r.Context().Err() == nil {
+				// The bridge produced nothing before failing (e.g. the tab froze or
+				// was discarded mid-turn). Fall back to the direct cookie mode and
+				// mark the bridge degraded so subsequent requests skip it.
+				a.Logf("Browser bridge failed (%v) — retrying via direct cookie mode", err)
+				a.Bridge.MarkDegraded(10 * time.Minute)
+				var fileRefs []string
+				if len(images) > 0 {
+					var uErr error
+					fileRefs, uErr = a.uploadImages(images)
+					if uErr != nil {
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, uErr)}})
+						return
+					}
+				}
+				text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, err)}})
+					return
+				}
+				a.Bridge.ClearDegraded()
+			} else {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+				return
+			}
 		}
 		if strings.TrimSpace(text) != "" {
 			a.recordBridgeTurnSuccess(prepared)
