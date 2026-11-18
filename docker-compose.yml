@@ -6,4 +6,7 @@ services:
       - "8081:8081"
     volumes:
       - ./config.json:/app/config.json
+      # Persistent cookie storage: the browser extension auto-syncs session
+      # cookies here (POST /bridge/cookies); survives container restarts.
+      - ./data:/app/data
     restart: unless-stopped

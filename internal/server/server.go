@@ -74,7 +74,7 @@ func New(cfg config.Config, version string) *App {
 		Logf:       logFn,
 		Version:    version,
 	}
-	gemClient.OnAuthError = app.CookieSync.RecordAuthError
+	gemClient.OnAuthError = app.onGeminiAuthError
 
 	return app
 }

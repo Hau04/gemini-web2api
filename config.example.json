@@ -26,5 +26,8 @@
   "bridge_large_code_upload_bytes": 8192,
   "bridge_spillover_chars": 20000,
   "bridge_delta_context": true,
-  "bridge_auto_new_chat": true
+  "bridge_auto_new_chat": true,
+  "bridge_token": "",
+  "notify_webhook": "",
+  "notify_format": "ntfy"
 }

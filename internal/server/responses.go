@@ -181,24 +181,25 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 					writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
 					return
 				}
-				// Transparent direct-mode fallback when bridge produced nothing
-				if a.cookiesReady() && r.Context().Err() == nil {
-					a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
-					a.Bridge.MarkDegraded(10 * time.Minute)
-					var fileRefs []string
-					if len(images) > 0 {
-						var uErr error
-						fileRefs, uErr = a.uploadImages(images)
-						if uErr != nil {
-							writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, uErr)}})
-							return
-						}
-					}
-					text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
-					if err != nil {
-						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, err)}})
+			// Transparent direct-mode fallback when bridge produced nothing
+			if a.cookiesReady() && r.Context().Err() == nil {
+				a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
+				a.Bridge.MarkDegraded(10 * time.Minute)
+				bridgeErr := err
+				var fileRefs []string
+				if len(images) > 0 {
+					var uErr error
+					fileRefs, uErr = a.uploadImages(images)
+					if uErr != nil {
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
 						return
 					}
+				}
+				text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+				if err != nil {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
+					return
+				}
 					a.Bridge.ClearDegraded()
 				} else {
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})

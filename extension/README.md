@@ -63,10 +63,20 @@ The extension's background service worker automatically pushes your Google sessi
 
 Check the **"Cookie Sync (Direct Mode)"** indicator in the extension popup to verify sync status. No configuration is needed — it works automatically when the server is running on `localhost:8081`.
 
+### Remote Server (NAS / Cloudflare Tunnel)
+
+The extension can push cookies to a server running anywhere — not just localhost. In the popup, under **Server Connection (Remote / NAS)**:
+
+1. Enter your server address (e.g. `https://gemini.example.com` via Cloudflare Tunnel, or `http://192.168.1.10:8081` on your LAN)
+2. If the server has `bridge_token` configured, enter the same token
+3. Click **Save & Sync Now**
+
+The background worker, content script bridge, and popup all use the saved address and token automatically. When Google later rejects the session (expired cookies/XSRF), the server notifies you via its configured `notify_webhook` — just open Gemini once and the extension re-syncs automatically.
+
 ### How It Works
 
 1. The background service worker reads your Google session cookies (`__Secure-1PSID`, `SAPISID`, etc.) and extracts the XSRF token from any open Gemini tab.
-2. It POSTs them to `localhost:8081/bridge/cookies`, which atomically writes them to the server's cookie file.
+2. It POSTs them to `<server>/bridge/cookies`, which atomically writes them to the server's cookie file.
 3. The server's direct-mode client (CookieCache) hot-reloads the file on the next request.
 4. When the server detects a frozen tab or bridge timeout with zero content, it marks the bridge as **degraded** and routes subsequent requests via direct cookie mode for 10 minutes (or until the tab recovers).
-5. If the direct mode request fails with an auth error, the server records it and the popup shows a clear **session expired** message.
+5. If the direct mode request fails with an auth error (HTTP 401/403/sign-in redirect, or HTTP 400 XSRF expiry), the server records it, fires the notification webhook, and the popup shows a clear **session expired** message.

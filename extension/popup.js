@@ -15,12 +15,55 @@ document.addEventListener("DOMContentLoaded", async () => {
   const cookieSyncBox = document.getElementById("cookieSyncBox");
   const cookieSyncText = document.getElementById("cookieSyncText");
   const cookieSyncDetail = document.getElementById("cookieSyncDetail");
+  const serverUrlInput = document.getElementById("serverUrlInput");
+  const bridgeTokenInput = document.getElementById("bridgeTokenInput");
+  const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+
+  let serverUrl = "http://localhost:8081";
+  let bridgeToken = "";
+
+  function bridgeHeaders(extra) {
+    const h = Object.assign({}, extra || {});
+    if (bridgeToken) h["X-Bridge-Token"] = bridgeToken;
+    return h;
+  }
+
+  // Load saved server address + token (awaited so all status fetches below use them)
+  if (chrome.storage && chrome.storage.local) {
+    await new Promise((resolve) => {
+      chrome.storage.local.get(["serverUrl", "bridgeToken"], (res) => {
+        if (res && res.serverUrl) {
+          serverUrl = res.serverUrl;
+          serverUrlInput.value = res.serverUrl;
+        }
+        if (res && res.bridgeToken) {
+          bridgeToken = res.bridgeToken;
+          bridgeTokenInput.value = res.bridgeToken;
+        }
+        resolve();
+      });
+    });
+  }
+  loadCookieSyncStatus();
+
+  saveSettingsBtn.addEventListener("click", async () => {
+    serverUrl = serverUrlInput.value.trim() || "http://localhost:8081";
+    bridgeToken = bridgeTokenInput.value.trim();
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ serverUrl, bridgeToken });
+    }
+    saveSettingsBtn.textContent = "Saved! Syncing...";
+    // Tell the background service worker to push cookies to the (new) server now.
+    try { await chrome.runtime.sendMessage({ action: "syncCookiesNow" }); } catch (e) {}
+    await loadCookieSyncStatus();
+    setTimeout(() => { saveSettingsBtn.textContent = "💾 Save & Sync Now"; }, 2000);
+  });
 
   // Fetch cookie-sync health from the server (shows frozen/degraded/session-expired).
   async function loadCookieSyncStatus() {
     if (!cookieSyncBox) return;
     try {
-      const res = await fetch("http://localhost:8081/bridge/status");
+      const res = await fetch(`${serverUrl}/bridge/status`, { headers: bridgeHeaders() });
       if (!res.ok) throw new Error("http " + res.status);
       const b = await res.json();
       const frozen = Boolean(b.frozen);
@@ -57,11 +100,10 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     } catch (e) {
       cookieSyncBox.className = "status error";
-      cookieSyncText.textContent = "Server not reachable (Start gemini-web2api)";
+      cookieSyncText.textContent = "Server not reachable (start gemini-web2api or check Server Connection settings above)";
       cookieSyncDetail.style.display = "none";
     }
   }
-  loadCookieSyncStatus();
 
   // Load auto-refresh preference (default: false)
   if (chrome.storage && chrome.storage.local) {
@@ -152,9 +194,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   pauseBridgeBtn.addEventListener("click", async () => {
     pauseBridgeBtn.disabled = true;
     try {
-      const res = await fetch("http://localhost:8081/bridge/pause", {
+      const res = await fetch(`${serverUrl}/bridge/pause`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
         body: JSON.stringify({ paused: !bridgePaused })
       });
       if (res.ok) {
@@ -170,7 +212,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Check bridge server connectivity
   try {
-    const bridgeRes = await fetch("http://localhost:8081/bridge/status");
+    const bridgeRes = await fetch(`${serverUrl}/bridge/status`, { headers: bridgeHeaders() });
     if (bridgeRes.ok) {
       const bData = await bridgeRes.json();
       renderBridgeStatus(bData);
@@ -180,7 +222,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   } catch (e) {
     bridgeBox.className = "status error";
-    bridgeStatusText.textContent = "Server not reachable (Start gemini-web2api)";
+    bridgeStatusText.textContent = "Server not reachable (check Server Connection settings)";
   }
 
   let currentJson = "";

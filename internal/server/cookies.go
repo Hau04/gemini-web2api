@@ -26,14 +26,19 @@ func newCookieSyncState() *cookieSyncState {
 
 // RecordAuthError stores the latest upstream authentication failure so the
 // status endpoint (and extension popup/badge) can tell the user to re-sign in.
-func (s *cookieSyncState) RecordAuthError(msg string) {
+// Returns true when this is a NEW error occurrence (no active error was recorded
+// or the message changed) — used to fire the notification webhook only once per
+// expiry instead of on every failing request.
+func (s *cookieSyncState) RecordAuthError(msg string) bool {
 	if s == nil {
-		return
+		return false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	isNew := s.lastAuthError != msg
 	s.lastAuthError = msg
 	s.lastAuthErrorAt = time.Now()
+	return isNew
 }
 
 // recordSync marks a fresh successful cookie push and clears any stale auth error.
