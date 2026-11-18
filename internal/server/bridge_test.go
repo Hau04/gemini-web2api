@@ -1917,12 +1917,14 @@ func TestBridgeWorkBuddyAttachmentUploadedToGemini(t *testing.T) {
 
 	done := make(chan *bridge.Request, 1)
 	go func() {
-		req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_wb_attach", "1", 2*time.Second)
+		req, _ := app.Bridge.WaitForNextRequestForSession(context.Background(), "vertexaisearch.cloud.google.com", "tab_wb_attach", "1", 5*time.Second)
 		done <- req
 		if req != nil {
 			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "Reviewed the code.", Done: true})
 		}
 	}()
+	// Give waiter goroutine a moment to register before sending chat request.
+	time.Sleep(50 * time.Millisecond)
 
 	httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
 	httpReq.Header.Set("Content-Type", "application/json")
