@@ -185,43 +185,94 @@ func ImageFromPart(mapItem map[string]any) (Image, bool) {
 	return Image{}, false
 }
 
-// FileFromPart parses OpenAI-style file/document content parts (`file`, `input_file`, `document`)
-// into an Image/Attachment struct so PDFs and other documents can be uploaded directly via the bridge.
+// FileFromPart parses OpenAI-style file/document content parts (`file`, `input_file`, `document`,
+// `attachment`, `directly_attached_file`, `attached_file`, `file_attachment`) into an
+// Image/Attachment struct so PDFs, text files, and other documents can be uploaded directly
+// via the bridge. Handles WorkBuddy attachment schemas where data may be in `file_data`,
+// `data`, `base64`, `content`, or `bytes` fields, and URLs in `file_url`, `url`, or `path`.
 func FileFromPart(mapItem map[string]any) (Image, bool) {
 	iType, _ := mapItem["type"].(string)
 
+	// Normalize WorkBuddy attachment type aliases to file handling.
+	normalizedType := iType
 	switch iType {
+	case "attachment", "directly_attached_file", "attached_file", "file_attachment", "direct_file":
+		normalizedType = "file"
+	}
+
+	switch normalizedType {
 	case "file":
-		fileObj, ok := mapItem["file"].(map[string]any)
-		if !ok {
+		// Try nested object first (OpenAI style: {"type":"file","file":{...}}),
+		// then flat (WorkBuddy style: {"type":"attachment","filename":...,"data":...}).
+		var fileObj map[string]any
+		if nested, ok := mapItem["file"].(map[string]any); ok {
+			fileObj = nested
+		} else if nested, ok := mapItem["attachment"].(map[string]any); ok {
+			fileObj = nested
+		} else {
 			fileObj = mapItem
 		}
 		filename, _ := fileObj["filename"].(string)
+		if filename == "" {
+			filename, _ = fileObj["name"].(string)
+		}
+		if filename == "" {
+			filename, _ = mapItem["filename"].(string)
+		}
 		mimeHint := partMime(fileObj)
 		if mimeHint == "" {
 			mimeHint = partMime(mapItem)
 		}
-		if fileData, ok := fileObj["file_data"].(string); ok && fileData != "" {
-			return decodeFilePayload(fileData, filename, mimeHint)
+		// Try all known data fields in priority order.
+		for _, field := range []string{"file_data", "data", "base64", "content", "bytes", "file_content"} {
+			if fileData, ok := fileObj[field].(string); ok && fileData != "" {
+				if img, ok := decodeFilePayload(fileData, filename, mimeHint); ok {
+					return img, true
+				}
+			}
+			if fileData, ok := mapItem[field].(string); ok && fileData != "" {
+				if img, ok := decodeFilePayload(fileData, filename, mimeHint); ok {
+					return img, true
+				}
+			}
 		}
-		if fileURL, ok := fileObj["file_url"].(string); ok && fileURL != "" {
-			img, ok := imageFromURLString(fileURL, mimeHint)
-			if ok {
-				img.Filename = filename
-				return img, true
+		// Try URL/path fields (may be file:// or local path — handled downstream).
+		for _, field := range []string{"file_url", "url", "path", "file_path", "local_path"} {
+			if fileURL, ok := fileObj[field].(string); ok && fileURL != "" {
+				img, ok := imageFromURLString(fileURL, mimeHint)
+				if ok {
+					img.Filename = filename
+					return img, true
+				}
+			}
+			if fileURL, ok := mapItem[field].(string); ok && fileURL != "" {
+				img, ok := imageFromURLString(fileURL, mimeHint)
+				if ok {
+					img.Filename = filename
+					return img, true
+				}
 			}
 		}
 	case "input_file":
 		filename, _ := mapItem["filename"].(string)
-		mimeHint := partMime(mapItem)
-		if fileData, ok := mapItem["file_data"].(string); ok && fileData != "" {
-			return decodeFilePayload(fileData, filename, mimeHint)
+		if filename == "" {
+			filename, _ = mapItem["name"].(string)
 		}
-		if fileURL, ok := mapItem["file_url"].(string); ok && fileURL != "" {
-			img, ok := imageFromURLString(fileURL, mimeHint)
-			if ok {
-				img.Filename = filename
-				return img, true
+		mimeHint := partMime(mapItem)
+		for _, field := range []string{"file_data", "data", "base64", "content", "bytes", "file_content"} {
+			if fileData, ok := mapItem[field].(string); ok && fileData != "" {
+				if img, ok := decodeFilePayload(fileData, filename, mimeHint); ok {
+					return img, true
+				}
+			}
+		}
+		for _, field := range []string{"file_url", "url", "path", "file_path", "local_path"} {
+			if fileURL, ok := mapItem[field].(string); ok && fileURL != "" {
+				img, ok := imageFromURLString(fileURL, mimeHint)
+				if ok {
+					img.Filename = filename
+					return img, true
+				}
 			}
 		}
 	case "document":
@@ -229,15 +280,33 @@ func FileFromPart(mapItem map[string]any) (Image, bool) {
 		if filename == "" {
 			filename, _ = mapItem["title"].(string)
 		}
+		if filename == "" {
+			filename, _ = mapItem["name"].(string)
+		}
 		if source, ok := mapItem["source"].(map[string]any); ok {
 			mimeHint := partMime(source)
-			if dataStr, ok := source["data"].(string); ok && dataStr != "" {
-				return decodeFilePayload(dataStr, filename, mimeHint)
+			for _, field := range []string{"data", "file_data", "base64", "content", "bytes"} {
+				if dataStr, ok := source[field].(string); ok && dataStr != "" {
+					if img, ok := decodeFilePayload(dataStr, filename, mimeHint); ok {
+						return img, true
+					}
+				}
 			}
-			if urlStr, ok := source["url"].(string); ok && urlStr != "" {
-				img, ok := imageFromURLString(urlStr, mimeHint)
-				if ok {
-					img.Filename = filename
+			for _, field := range []string{"url", "file_url", "path"} {
+				if urlStr, ok := source[field].(string); ok && urlStr != "" {
+					img, ok := imageFromURLString(urlStr, mimeHint)
+					if ok {
+						img.Filename = filename
+						return img, true
+					}
+				}
+			}
+		}
+		// Flat document fields (WorkBuddy may send document without nested source).
+		mimeHint := partMime(mapItem)
+		for _, field := range []string{"data", "file_data", "base64", "content", "bytes"} {
+			if dataStr, ok := mapItem[field].(string); ok && dataStr != "" {
+				if img, ok := decodeFilePayload(dataStr, filename, mimeHint); ok {
 					return img, true
 				}
 			}
@@ -248,8 +317,12 @@ func FileFromPart(mapItem map[string]any) (Image, bool) {
 }
 
 func decodeFilePayload(payload, filename, mimeHint string) (Image, bool) {
-	if strings.HasPrefix(payload, "data:") {
-		data, decMime, err := DecodeDataURL(payload)
+	trimmed := strings.TrimSpace(payload)
+	if trimmed == "" {
+		return Image{}, false
+	}
+	if strings.HasPrefix(trimmed, "data:") {
+		data, decMime, err := DecodeDataURL(trimmed)
 		if err != nil {
 			return Image{}, false
 		}
@@ -258,18 +331,77 @@ func decodeFilePayload(payload, filename, mimeHint string) (Image, bool) {
 		}
 		return Image{Data: data, MIME: mimeHint, Filename: filename}, true
 	}
-	decoded, err := multimodal.DecodeBase64Raw(payload)
+	// WorkBuddy may send raw UTF-8 text (not base64) for .txt/.md/.code attachments.
+	// Heuristic: if payload contains newlines or non-base64 chars and is valid UTF-8,
+	// treat as raw text bytes. Base64 payloads are single-line without spaces.
+	if isLikelyRawText(trimmed) {
+		data := []byte(trimmed)
+		if mimeHint == "" {
+			mimeHint = mimeForFilename(filename)
+		}
+		return Image{Data: data, MIME: mimeHint, Filename: filename}, true
+	}
+	decoded, err := multimodal.DecodeBase64Raw(trimmed)
 	if err != nil {
+		// Last resort: treat as raw text if it looks like text.
+		if isLikelyRawText(trimmed) {
+			data := []byte(trimmed)
+			if mimeHint == "" {
+				mimeHint = mimeForFilename(filename)
+			}
+			return Image{Data: data, MIME: mimeHint, Filename: filename}, true
+		}
 		return Image{}, false
 	}
 	if mimeHint == "" {
 		if len(decoded) >= 4 && string(decoded[:4]) == "%PDF" {
 			mimeHint = "application/pdf"
 		} else {
-			mimeHint = "application/octet-stream"
+			mimeHint = mimeForFilename(filename)
 		}
 	}
 	return Image{Data: decoded, MIME: mimeHint, Filename: filename}, true
+}
+
+func isLikelyRawText(s string) bool {
+	// Base64 is typically one long line of [A-Za-z0-9+/=] without spaces/newlines.
+	// Raw text files contain newlines, spaces, or punctuation.
+	if strings.Contains(s, "\n") || strings.Contains(s, " ") {
+		return true
+	}
+	// Short payloads with punctuation are likely text, not base64.
+	if len(s) < 200 && strings.ContainsAny(s, "{}[]()<>#@!$%^&*") {
+		return true
+	}
+	return false
+}
+
+func mimeForFilename(filename string) string {
+	ext := strings.ToLower(filename)
+	switch {
+	case strings.HasSuffix(ext, ".pdf"):
+		return "application/pdf"
+	case strings.HasSuffix(ext, ".txt"), strings.HasSuffix(ext, ".log"):
+		return "text/plain"
+	case strings.HasSuffix(ext, ".md"), strings.HasSuffix(ext, ".markdown"):
+		return "text/markdown"
+	case strings.HasSuffix(ext, ".json"):
+		return "application/json"
+	case strings.HasSuffix(ext, ".csv"):
+		return "text/csv"
+	case strings.HasSuffix(ext, ".html"), strings.HasSuffix(ext, ".htm"):
+		return "text/html"
+	case strings.HasSuffix(ext, ".png"):
+		return "image/png"
+	case strings.HasSuffix(ext, ".jpg"), strings.HasSuffix(ext, ".jpeg"):
+		return "image/jpeg"
+	case strings.HasSuffix(ext, ".gif"):
+		return "image/gif"
+	case strings.HasSuffix(ext, ".webp"):
+		return "image/webp"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // BuildToolChoiceInstruction returns a prompt suffix based on the tool_choice parameter.
@@ -907,7 +1039,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
-					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it.\n\n"+
+					"- If a file or image is already attached directly to this message (shown as [File attached: ...] or uploaded to this chat), read it natively from the attachment — NEVER call Read/Glob/Bash to re-read it (the file is virtual and does not exist on disk; calling Read will fail with 'File does not exist').\n\n"+
 					"Available tools:\n%s%s",
 				connectorNote,
 				string(defsJSON),

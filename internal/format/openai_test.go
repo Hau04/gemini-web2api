@@ -1030,5 +1030,78 @@ func TestParseToolCallsNormalizesDeferExecuteToolArguments(t *testing.T) {
 	}
 }
 
+func TestFileFromPartWorkBuddyAttachment(t *testing.T) {
+	// WorkBuddy sends attached files as {"type":"attachment","filename":...,"data":...}
+	// with raw UTF-8 text (not base64) for .txt files.
+	rawText := "# Code Context\n\npackage main\n\nfunc main() {}\n"
+	req := models.OpenAIChatRequest{
+		Messages: []models.OpenAIMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{"type": "text", "text": "Review this code"},
+					map[string]any{
+						"type":     "attachment",
+						"filename": "code_context.txt",
+						"data":     rawText,
+					},
+				},
+			},
+		},
+		ToolChoice: "auto",
+	}
+
+	prompt, atts, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(atts) != 1 {
+		t.Fatalf("expected 1 WorkBuddy attachment, got %d", len(atts))
+	}
+	if atts[0].Filename != "code_context.txt" {
+		t.Errorf("Filename = %q, want code_context.txt", atts[0].Filename)
+	}
+	if string(atts[0].Data) != rawText {
+		t.Errorf("Data mismatch: got %q, want raw text", string(atts[0].Data))
+	}
+	if atts[0].MIME != "text/plain" {
+		t.Errorf("MIME = %q, want text/plain", atts[0].MIME)
+	}
+	if !strings.Contains(prompt, "[File attached: code_context.txt]") {
+		t.Errorf("prompt missing file marker, got %q", prompt)
+	}
+}
+
+func TestFileFromPartDirectlyAttachedFile(t *testing.T) {
+	// WorkBuddy may also use "directly_attached_file" type with base64 data.
+	b64 := "cGFja2FnZSBtYWluCg==" // "package main\n"
+	req := models.OpenAIChatRequest{
+		Messages: []models.OpenAIMessage{
+			{
+				Role: "user",
+				Content: []any{
+					map[string]any{
+						"type":     "directly_attached_file",
+						"filename": "main.go",
+						"base64":   b64,
+					},
+				},
+			},
+		},
+		ToolChoice: "auto",
+	}
+
+	_, atts, err := MessagesToPrompt(req)
+	if err != nil {
+		t.Fatalf("MessagesToPrompt error: %v", err)
+	}
+	if len(atts) != 1 {
+		t.Fatalf("expected 1 attachment, got %d", len(atts))
+	}
+	if string(atts[0].Data) != "package main\n" {
+		t.Errorf("Data = %q, want decoded base64", string(atts[0].Data))
+	}
+}
+
 
 

@@ -630,7 +630,19 @@
     let remaining = cap;
     const decoder = typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8", { fatal: false }) : null;
     for (const att of attachments) {
-      if (!att || att.source !== "spillover" || !att.data_base64 || remaining <= 0) continue;
+      if (!att || !att.data_base64 || remaining <= 0) continue;
+      // Inline ALL text-based attachments on upload failure (spillover, api, local_*),
+      // not just spillover — otherwise WorkBuddy-attached files like code_context.txt
+      // are lost when the browser upload fails and Gemini only sees a placeholder.
+      const mime = String(att.mime || "").toLowerCase();
+      const filename = String(att.filename || "").toLowerCase();
+      const isTextLike =
+        att.source === "spillover" ||
+        mime.startsWith("text/") ||
+        mime === "application/json" ||
+        mime === "application/xml" ||
+        /\.(txt|md|markdown|json|jsonl|ndjson|csv|tsv|log|diff|patch|yaml|yml|toml|xml|html|htm|css|js|mjs|cjs|ts|tsx|jsx|go|py|java|kt|cs|cpp|c|h|rs|rb|php|swift|scala|dart|lua|r|sh|bash|zsh|ps1|bat|sql|vue|svelte|proto|graphql|tf|gradle|cmake|ini|cfg|tex|rst)$/.test(filename);
+      if (!isTextLike) continue;
       const bytes = base64ToUint8Array(att.data_base64);
       if (bytes.length === 0) continue;
       let text = "";
