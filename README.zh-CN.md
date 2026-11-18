@@ -1,4 +1,4 @@
-<!-- markdown-translator:ab2ae06f113f444c84e92f07a83578efddeea76407d9ab90ba201a5d0a8a4278 -->
+<!-- markdown-translator:38f14a416678b63795c58ff9041fc8761d1e138864beaf7a59854853f86ec386 -->
 # Gemini-web2api
 
 <p align="center">
@@ -115,9 +115,43 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **笔记**: 如果你配置了一个cookie文件`config.json`（例如`"cookie_file": "/app/cookie.txt"`），记得也要挂载你的 cookie 文件：`-v ./cookie.txt:/app/cookie.txt`.
+> **笔记**: 撰写文件挂载`./data:/app/data`用于持久 cookie 存储。放`"cookie_file": "/app/data/cookie.json"`在你的`config.json`因此扩展同步的 cookie 在容器重新启动后仍然存在。 （安装`./cookie.json`直接也可以，但是 Docker 创建了一个*目录*如果该文件尚不存在 - data-dir 挂载会避免使用该脚枪。）
 >
 > **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
+
+### 5. 远程 NAS / Cloudflare 隧道设置（Cookie 同步模式）
+
+在您的 NAS 上运行服务器，通过 Cloudflare Tunnel (HTTPS) 公开，并让浏览器扩展自动将 cookie 同步到它 — 然后您可以完全关闭浏览器：
+
+**服务器`config.json`在网络存储上：**
+
+```json
+{
+  "api_keys": ["sk-your-secret-api-key"],
+  "cookie_file": "/app/data/cookie.json",
+  "bridge_token": "pick-a-long-random-token",
+  "notify_webhook": "https://ntfy.sh/your-unique-topic",
+  "notify_format": "ntfy"
+}
+```
+
+* **`bridge_token`**：保护所有人的共享秘密`/bridge/*`端点（cookie 推送、状态、冻结报告）。**必需的**当可以从互联网访问该端口时 - 没有它任何人都可以覆盖您的会话 cookie。
+* **`api_keys`**: 保护`/v1/*`API 端点照常。
+* **`notify_webhook`**：当会话 cookie 过期（Google 拒绝它们）时，服务器每次过期都会在此处发布警报。使用免费的[ntfy.sh](https://ntfy.sh)主题（在手机上订阅）、Discord webhook (`"notify_format": "discord"`), 松弛 (`"slack"`)，或任何通用 JSON webhook (`"generic"`).
+
+**扩展弹出窗口 → 服务器连接：**
+
+1. **服务器地址**：您的隧道 URL，例如`https://gemini.example.com`（尾随`/v1`自动处理）
+2. **桥接令牌**： 相同`bridge_token`值作为服务器配置
+3. 点击**立即保存并同步**— 扩展程序立即推送 cookie 并验证连接。
+
+**每日流量：**
+
+1. 打开`gemini.google.com`一次 → cookies 在几秒钟内自动推送（或单击“立即保存并同步”）
+2. 关闭浏览器 — NAS 通过直接 cookie 模式继续提供服务
+3. 几天后，当 XSRF 令牌过期时，您会收到推送通知→打开 Gemini 一次→自动重新同步
+
+> **安全**：Cloudflare Tunnel 已为您提供 HTTPS。这`bridge_token`添加应用程序级身份验证，因此仅隧道 URL 不足以推送 cookie。保留两者设置。
 
 ## 客户端配置
 
@@ -202,6 +236,18 @@ gemini-4-argon@think=2              # Medium
 gemini-4-argon@think=4              # Low (default for standard models)
 ```
 
+### 聊天会话模式（新聊天与继续聊天）
+
+在**桥接模式**，每个请求要么在打开的 Gemini 选项卡中启动新的聊天，要么附加到当前打开的聊天中。控制它的三种方法（按优先顺序排列）：
+
+1. **每个请求的型号后缀**— 追加`@new`（或者`@fresh`/`@newchat`）强制进行新的聊天，`@continue`（或者`@cont`）以继续附加到打开的聊天中。结合`@think=N`以任意顺序：
+   ```text
+   gemini-4-hydrogen@new                # this request starts a brand-new chat
+   gemini-4-hydrogen@think=0@continue   # deep thinking, keep the open chat (incl. Gemini memory)
+   ```
+2. **扩展弹出“聊天模式”选择器**—*自动（推荐）*/*总是有新的聊天*/*继续打开聊天*。选择被推送到服务器（`POST /bridge/chatmode`）并持续存在直到发生改变。和*继续打开聊天*，首先单击 Gemini 历史记录侧栏中的任何旧聊天 - API 轮流然后继续添加到该对话。
+3. **自动启发式（默认）**— 全新的客户端对话（例如 WorkBuddy“新聊天”）启动新的浏览器聊天；后续回合继续进行。
+
 ### 模型检查头
 
 每个 API 响应（JSON 和流式 SSE）都包含指示实际模型路由的 HTTP 响应标头：
@@ -211,7 +257,7 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 ## 高级功能（独家）
 
-### 1. 动态模型发现和上游路由头
+### 1.动态模型发现和上游路由头
 
 当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`）匹配 Web 应用程序行为，允许 Gemini 4 Argon 等模型正确路由。
 
@@ -256,9 +302,10 @@ SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_s
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
 ```
 
-**替代方案（浏览器扩展）**:
+**替代方案（浏览器扩展 - 自动）**:
 
 * **内置扩展**：使用中包含的浏览器扩展`extension/`目录！跟随[`extension/README.md`](extension/README.md)要在 Chrome/Edge 中加载解压后的文件，请打开 Gemini Web 或 Gemini Enterprise，然后单击“一键下载 cookie.json”。
+* **自动 Cookie 同步 (v1.4.0+)**：该扩展现在包含一个后台服务工作者，可以自动将您的 Google 会话 cookie 推送到`localhost:8081`每 2 分钟，在选项卡更新和 cookie 更改时。这为**直接 Cookie 模式后备**— 当 Chrome 冻结您的 Gemini 选项卡（内存保护程序）或网桥停止运行时，服务器会使用您同步的 cookie 自动切换到直接 RPC 模式，无需手动干预。检查扩展弹出窗口的“Cookie 同步（直接模式）”指示器以验证其是否处于活动状态。
 * **3rd 方扩展**：或者使用 Chrome Web Store / Firefox Add-ons 中的“Cookie-Editor”，导出为标题字符串，然后保存到`cookie.txt`.
 
 ### 经过身份验证的帐户路径和 XSRF 令牌
@@ -381,11 +428,14 @@ https://gemini.google.com/u/1/app/...
   "cookie_file": null,
   "proxy": null,
   "impersonate": null,
-  "log_requests": true
+  "log_requests": true,
+  "bridge_token": null,
+  "notify_webhook": null,
+  "notify_format": "ntfy"
 }
 ```
 
-什么时候`api_keys`是空的`[]`，身份验证已禁用。设置按键后，`/v1/*`端点需要`Authorization: Bearer <key>`.
+什么时候`api_keys`是空的`[]`，身份验证已禁用。设置按键后，`/v1/*`端点需要`Authorization: Bearer <key>`。什么时候`bridge_token`已设定，`/bridge/*`端点（扩展 cookie 同步、桥接控制）需要`X-Bridge-Token`header — 在扩展弹出窗口的服务器连接部分设置相同的标记。
 
 ## 代理人
 
