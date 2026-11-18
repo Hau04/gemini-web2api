@@ -17,6 +17,7 @@ type App struct {
 	Gem        *gemini.Client
 	Tokens     *multimodal.TokenCache
 	Bridge     *bridge.Hub
+	CookieSync *cookieSyncState
 	HTTPClient *http.Client
 	Logf       func(format string, args ...any)
 	Version    string
@@ -38,6 +39,11 @@ func createHTTPClient(cfg config.Config) *http.Client {
 }
 
 func New(cfg config.Config, version string) *App {
+	// Default the cookie file so browser-pushed session cookies (extension auto
+	// sync) and the manual "Download cookie.json" workflow work out of the box.
+	if cfg.CookieFile == "" {
+		cfg.CookieFile = "cookie.json"
+	}
 	gemClient := gemini.NewClient(cfg)
 
 	logFn := func(format string, args ...any) {
@@ -63,10 +69,12 @@ func New(cfg config.Config, version string) *App {
 		Gem:        gemClient,
 		Tokens:     multimodal.NewTokenCache(cfg, gemClient.Cookies, httpClient),
 		Bridge:     hub,
+		CookieSync: newCookieSyncState(),
 		HTTPClient: httpClient,
 		Logf:       logFn,
 		Version:    version,
 	}
+	gemClient.OnAuthError = app.CookieSync.RecordAuthError
 
 	return app
 }
@@ -87,6 +95,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /bridge/heartbeat", a.handleBridgeHeartbeat)
 	mux.HandleFunc("GET /bridge/poll", a.handleBridgePoll)
 	mux.HandleFunc("POST /bridge/chunk", a.handleBridgeChunk)
+	mux.HandleFunc("POST /bridge/frozen", a.handleBridgeFrozen)
+	mux.HandleFunc("POST /bridge/cookies", a.handleBridgeCookies)
+	mux.HandleFunc("GET /bridge/cookie-status", a.handleCookieStatus)
 
 	handler := a.withAuthAndLogging(mux)
 	handler = a.withCORS(handler)

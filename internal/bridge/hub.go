@@ -127,6 +127,8 @@ type Hub struct {
 	seq                   atomic.Uint64
 	tabName               string
 	lastHeartbeat         time.Time
+	frozen                atomic.Bool
+	degradedUntil         time.Time
 	clientHeartbeats      map[string]time.Time
 	pending               []*Request
 	inFlight              map[string]*inFlightEntry
@@ -345,9 +347,62 @@ func (h *Hub) CooldownRemaining() time.Duration {
 	return 0
 }
 
+// SetFrozen records whether the browser tab is currently frozen by Chrome
+// (Memory Saver / Energy Saver). A frozen tab cannot run the content script,
+// so requests must route via the direct cookie mode instead.
+func (h *Hub) SetFrozen(frozen bool) {
+	h.frozen.Store(frozen)
+}
+
+// IsFrozen reports whether the connected browser tab is frozen.
+func (h *Hub) IsFrozen() bool {
+	return h.frozen.Load()
+}
+
+// MarkDegraded marks the bridge as unreliable for d (e.g. after a generation
+// timed out with zero chunks because the tab froze or stalled). While degraded,
+// the server prefers the direct cookie mode when session cookies are available.
+func (h *Hub) MarkDegraded(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	until := time.Now().Add(d)
+	if until.After(h.degradedUntil) {
+		h.degradedUntil = until
+	}
+}
+
+// IsDegraded reports whether the bridge is within a degradation window.
+func (h *Hub) IsDegraded() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return time.Now().Before(h.degradedUntil)
+}
+
+// DegradedRemaining returns how long the degradation window has left (0 if none).
+func (h *Hub) DegradedRemaining() time.Duration {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if time.Now().Before(h.degradedUntil) {
+		return time.Until(h.degradedUntil)
+	}
+	return 0
+}
+
+// ClearDegraded lifts the degradation window (called after a successful bridge
+// turn or when the tab resumes from a frozen state).
+func (h *Hub) ClearDegraded() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.degradedUntil = time.Time{}
+}
+
 // IsConnected returns true if a browser tab sent a poll/heartbeat within the last 45 seconds,
 // or if an active generation is still in flight within the 180s window.
+// A frozen tab (Chrome Memory Saver / Energy Saver) never counts as connected.
 func (h *Hub) IsConnected() bool {
+	if h.frozen.Load() {
+		return false
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.tabName == "" {

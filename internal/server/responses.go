@@ -140,7 +140,12 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		text = generateFastTitleResponse(prompt, sessionText)
 		a.Logf("Fast-tracking Responses API client title generation request locally: %s", text)
 	} else if a.Bridge != nil && a.Bridge.IsConnected() {
-		if a.Bridge.IsPaused() {
+		bridgeAlive := true
+		if a.Bridge.IsDegraded() && a.cookiesReady() {
+			a.Logf("Browser bridge degraded after recent timeout — routing responses request via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
+			bridgeAlive = false
+		}
+		if bridgeAlive && a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
 				"error": map[string]any{
@@ -150,36 +155,75 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		if rem := a.Bridge.CooldownRemaining(); rem > 0 {
-			rlErr := &bridge.RateLimitError{RetryAfter: rem}
-			writeBridgeRateLimitError(w, rem, rlErr.Error())
-			return
-		}
-		a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
-		prepared := a.prepareBridgeRequest(r, chatReq, prompt, images)
-		text, err = a.Bridge.GenerateWithOptions(r.Context(), bridge.GenerateOptions{
-			Prompt:      prepared.Prompt,
-			Model:       resolved.Name,
-			Attachments: prepared.Attachments,
-			NewChat:     prepared.NewChat,
-			LoopPenalty: prepared.LoopPenalty,
-		})
-		if err != nil {
-			var pErr *bridge.PausedError
-			if errors.As(err, &pErr) {
-				writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": pErr.Error(), "type": "bridge_paused"}})
+		if bridgeAlive {
+			if rem := a.Bridge.CooldownRemaining(); rem > 0 {
+				rlErr := &bridge.RateLimitError{RetryAfter: rem}
+				writeBridgeRateLimitError(w, rem, rlErr.Error())
 				return
 			}
-			var rlErr *bridge.RateLimitError
-			if errors.As(err, &rlErr) {
-				writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
+			a.Logf("Routing responses request through active browser bridge (%s)", a.Bridge.TabName())
+			prepared := a.prepareBridgeRequest(r, chatReq, prompt, images)
+			text, err = a.Bridge.GenerateWithOptions(r.Context(), bridge.GenerateOptions{
+				Prompt:      prepared.Prompt,
+				Model:       resolved.Name,
+				Attachments: prepared.Attachments,
+				NewChat:     prepared.NewChat,
+				LoopPenalty: prepared.LoopPenalty,
+			})
+			if err != nil {
+				var pErr *bridge.PausedError
+				if errors.As(err, &pErr) {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": pErr.Error(), "type": "bridge_paused"}})
+					return
+				}
+				var rlErr *bridge.RateLimitError
+				if errors.As(err, &rlErr) {
+					writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
+					return
+				}
+				// Transparent direct-mode fallback when bridge produced nothing
+				if a.cookiesReady() && r.Context().Err() == nil {
+					a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
+					a.Bridge.MarkDegraded(10 * time.Minute)
+					var fileRefs []string
+					if len(images) > 0 {
+						var uErr error
+						fileRefs, uErr = a.uploadImages(images)
+						if uErr != nil {
+							writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, uErr)}})
+							return
+						}
+					}
+					text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+					if err != nil {
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", err, err)}})
+						return
+					}
+					a.Bridge.ClearDegraded()
+				} else {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+					return
+				}
+			}
+			if strings.TrimSpace(text) != "" {
+				a.recordBridgeTurnSuccess(prepared)
+			}
+		} else {
+			// Degraded bridge — use direct cookie mode
+			var fileRefs []string
+			if len(images) > 0 {
+				fileRefs, err = a.uploadImages(images)
+				if err != nil {
+					a.Logf("Image upload error: %v", err)
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
+					return
+				}
+			}
+			text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 				return
 			}
-			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
-			return
-		}
-		if strings.TrimSpace(text) != "" {
-			a.recordBridgeTurnSuccess(prepared)
 		}
 	} else {
 		var fileRefs []string

@@ -12,6 +12,56 @@ document.addEventListener("DOMContentLoaded", async () => {
   const copyJsonBtn = document.getElementById("copyJsonBtn");
   const downloadJsonBtn = document.getElementById("downloadJsonBtn");
   const copyTxtBtn = document.getElementById("copyTxtBtn");
+  const cookieSyncBox = document.getElementById("cookieSyncBox");
+  const cookieSyncText = document.getElementById("cookieSyncText");
+  const cookieSyncDetail = document.getElementById("cookieSyncDetail");
+
+  // Fetch cookie-sync health from the server (shows frozen/degraded/session-expired).
+  async function loadCookieSyncStatus() {
+    if (!cookieSyncBox) return;
+    try {
+      const res = await fetch("http://localhost:8081/bridge/status");
+      if (!res.ok) throw new Error("http " + res.status);
+      const b = await res.json();
+      const frozen = Boolean(b.frozen);
+      const degradedSec = Number(b.degraded_sec) || 0;
+      const cookiesReady = Boolean(b.cookies_ready);
+      const lastSyncAge = Number(b.cookie_last_sync_age_sec) || null;
+      const authErr = b.cookie_auth_error || null;
+
+      if (authErr) {
+        cookieSyncBox.className = "status error";
+        cookieSyncText.textContent = "Session expired — open gemini.google.com in the browser to refresh";
+        cookieSyncDetail.style.display = "block";
+        cookieSyncDetail.textContent = authErr;
+      } else if (!cookiesReady) {
+        cookieSyncBox.className = "status warn";
+        cookieSyncText.textContent = "No cookies stored — direct mode unavailable";
+        cookieSyncDetail.style.display = "block";
+        cookieSyncDetail.textContent = "Open gemini.google.com once so the extension can auto-sync your session.";
+      } else if (frozen) {
+        cookieSyncBox.className = "status success";
+        cookieSyncText.textContent = "Active (tab frozen — serving via direct cookie mode)";
+        cookieSyncDetail.style.display = "block";
+        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+      } else if (degradedSec > 0) {
+        cookieSyncBox.className = "status success";
+        cookieSyncText.textContent = `Degraded (${degradedSec}s) — serving via direct cookie mode`;
+        cookieSyncDetail.style.display = "block";
+        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+      } else {
+        cookieSyncBox.className = "status success";
+        cookieSyncText.textContent = "Active — cookies synced for direct mode";
+        cookieSyncDetail.style.display = "block";
+        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+      }
+    } catch (e) {
+      cookieSyncBox.className = "status error";
+      cookieSyncText.textContent = "Server not reachable (Start gemini-web2api)";
+      cookieSyncDetail.style.display = "none";
+    }
+  }
+  loadCookieSyncStatus();
 
   // Load auto-refresh preference (default: false)
   if (chrome.storage && chrome.storage.local) {

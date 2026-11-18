@@ -254,8 +254,9 @@ Or use JSON format if you know your specific `SAPISID` hashing needs:
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
 ```
 
-**Alternative (browser extension)**:
+**Alternative (browser extension — automatic)**:
 - **Built-in Extension**: Use the included browser extension in the `extension/` directory! Follow [`extension/README.md`](extension/README.md) to load it unpacked in Chrome/Edge, open Gemini Web or Gemini Enterprise, and click "Download cookie.json" with 1 click.
+- **Auto Cookie Sync (v1.4.0+)**: The extension now includes a background service worker that automatically pushes your Google session cookies to `localhost:8081` every 2 minutes, on tab updates, and on cookie changes. This powers the **Direct Cookie Mode fallback** — when Chrome freezes your Gemini tab (Memory Saver) or the bridge stalls, the server automatically switches to direct RPC mode using your synced cookies, no manual intervention needed. Check the extension popup's "Cookie Sync (Direct Mode)" indicator to verify it's active.
 - **3rd-Party Extensions**: Or use "Cookie-Editor" from the Chrome Web Store / Firefox Add-ons, export as Header String, and save to `cookie.txt`.
 
 ### Authenticated account path and XSRF token
