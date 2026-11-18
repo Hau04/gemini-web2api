@@ -1,4 +1,4 @@
-<!-- markdown-translator:62dba9eec309a74d88006d57d713a432a95bf4677b56668264e4322808769359 -->
+<!-- markdown-translator:ab2ae06f113f444c84e92f07a83578efddeea76407d9ab90ba201a5d0a8a4278 -->
 # Gemini-web2api
 
 <p align="center">
@@ -100,7 +100,7 @@ cp config.example.json config.json
 docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.json ghcr.io/hau04/gemini-web2api:latest
 ```
 
-*（若不需要额外配置，可省略挂载参数 `-v ./config.json:/app/config.json` 使用默认配置运行）。*
+*（如果您没有`config.json`，简单地省略`-v ./config.json:/app/config.json`以默认设置运行）。*
 
 #### 选项 B：本地构建并运行
 
@@ -115,9 +115,9 @@ docker run -d --name gemini-web2api -p 8081:8081 -v ./config.json:/app/config.js
 docker compose up -d
 ```
 
-> **注意**：如果在 `config.json` 中配置了 Cookie 文件路径（如 `"cookie_file": "/app/cookie.txt"`），运行容器时记得同时挂载 Cookie 文件：`-v ./cookie.txt:/app/cookie.txt`。
+> **笔记**: 如果你配置了一个cookie文件`config.json`（例如`"cookie_file": "/app/cookie.txt"`），记得也要挂载你的 cookie 文件：`-v ./cookie.txt:/app/cookie.txt`.
 >
-> **注意**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
+> **笔记**：如果您得到空回复（`content: null`）使用 Docker 的默认桥接网络，切换到主机网络：`docker run --network host ...`或添加`network_mode: host`在您的撰写文件中。这是由 Gemini 的上游拒绝来自某些 Docker NAT IP 范围的请求造成的。
 
 ## 客户端配置
 
@@ -177,11 +177,11 @@ gemini
 ## 可用型号
 
 |型号|描述 |输出|
-| -------------------------------- | ------------------------------------------------------------------ | --------------- |
+| -------------------------------- | ------------------------------------------------------------------ | ---------------- |
 |`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
 |`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
-|`gemini-4-hydrogen`|高速度前沿执行模型（Gemini 4 Hydrogen）|**~20k+ 字符**|
-|`hydrogen`| gemini-4-hydrogen 的别名 |**~20k+ 字符**|
+|`gemini-4-hydrogen`|高速前沿执行模型|**~20k+ 字符**|
+|`hydrogen`| Gemini-4-氢的别名 |**~20k+ 字符**|
 |`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
 |`gemini-3.7-flash`|全能机型（Gemini 3.7 Flash）|约 12k 个字符 |
 |`gemini-3.6-flash`|全能机型（Gemini 3.6 Flash）|约 12k 个字符 |
@@ -211,7 +211,7 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 ## 高级功能（独家）
 
-### 1.动态模型发现和上游路由头
+### 1. 动态模型发现和上游路由头
 
 当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`）匹配 Web 应用程序行为，允许 Gemini 4 Argon 等模型正确路由。
 
@@ -256,9 +256,10 @@ SID=your_sid; HSID=your_hsid; SSID=your_ssid; APISID=your_apisid; SAPISID=your_s
 { "cookie": "SID=xxx; HSID=xxx; ...", "sapisid": "your_sapisid_value" }
 ```
 
-**替代方案（浏览器扩展）**：
-- **内置扩展**：使用本仓库中 `extension/` 目录下的内置浏览器扩展！按照 [`extension/README.md`](extension/README.md) 在 Chrome/Edge 中加载已解压的扩展程序，打开 Gemini Web 或 Gemini Enterprise 页面，一键点击“Download cookie.json”即可导出。
-- **第三方扩展**：或者使用 Chrome 应用商店 / Firefox 附加组件中的 “Cookie-Editor”，导出为 Header String 格式并保存到 `cookie.txt`。
+**替代方案（浏览器扩展）**:
+
+* **内置扩展**：使用中包含的浏览器扩展`extension/`目录！跟随[`extension/README.md`](extension/README.md)要在 Chrome/Edge 中加载解压后的文件，请打开 Gemini Web 或 Gemini Enterprise，然后单击“一键下载 cookie.json”。
+* **3rd 方扩展**：或者使用 Chrome Web Store / Firefox Add-ons 中的“Cookie-Editor”，导出为标题字符串，然后保存到`cookie.txt`.
 
 ### 经过身份验证的帐户路径和 XSRF 令牌
 
@@ -285,22 +286,45 @@ https://gemini.google.com/u/1/app/...
 
 专业路由需要**双子座高级版**（付费订阅）。免费的 Google 帐户 cookie 将进行身份验证，但会默默地退回到 Flash。
 
-### 🛡️ 防封禁实时网页桥接（企业版与网页版推荐方案）
+### 🛡️ 反封禁 Live Web Bridge（推荐用于企业和 Web）
 
-为了彻底杜绝 Cookie 泄露或 Google 账户被风控封禁的风险，您无需提取或导出 Cookie。直接配合浏览器打开的真实标签页即可使用：
+要完全消除 Google 帐户或 cookie 禁令的风险，您无需导出 cookie。你可以运行`gemini-web2api`在打开的浏览器选项卡旁边：
 
-1. 将 [`extension/`](extension/) 目录作为“已解压的扩展程序”加载到 Chrome 或 Edge 浏览器中（进入 `chrome://extensions` → 开启开发者模式 → 加载已解压的扩展程序）。
-2. 在浏览器中保持打开 **Gemini 企业版** (`vertexaisearch.cloud.google.com`) 或 **Gemini 网页版** (`gemini.google.com`)。
-3. 启动 `gemini-web2api`：
+1. 从以下位置加载解压的扩展[`extension/`](extension/)进入 Chrome 或 Edge (`chrome://extensions`→ 开发者模式 → 加载解压）。
+2. 保留你的**双子座企业**(`vertexaisearch.cloud.google.com`） 或者**双子座网**(`gemini.google.com`) 选项卡打开。
+3. 开始`gemini-web2api`:
    ```bash
    ./gemini-web2api --port 8081
    ```
-4. 页面右下角将出现浮动状态指示徽章：`🟢 Web2API Bridge: Connected (:8081)`。
-5. 任何发送到 `http://localhost:8081/v1/chat/completions` 的请求（来自 WorkBuddy、Cursor 或 curl）都会自动路由至您当前打开的浏览器标签页内执行，实时流式返回生成内容。
+4. 浮动状态徽章将出现在您的 Gemini 网页上：`🟢 Web2API Bridge: Connected (:8081)`.
+5. 任何请求发送至`http://localhost:8081/v1/chat/completions`（来自 WorkBuddy、Cursor 或 cursor）会自动通过您的实时浏览器选项卡进行路由，直接从 Google 的 Web UI 传输令牌。
 
-### Gemini 企业版（Vertex AI Search）支持
+#### 直接 PDF/长代码文件上传和反禁令保护（桥接模式）
 
-如果您的企业使用托管于 `https://vertexaisearch.cloud.google.com/` 的 **Gemini Enterprise**，可配置 `base_url`：
+使用 Live Web Bridge 运行时，`gemini-web2api`包括针对重复代理工具循环和 Google 频率禁令的内置保护：
+
+* **直接文件、PDF 和长代码上传**：开放人工智能`file`/`input_file`/`document`/`image_url`零件会直接上传到您打开的 Gemini 选项卡中（无需 cookie）。对于直接`localhost`代理请求（例如 WorkBuddy）、引用的本地 PDF、Office 文档、图像和**长源代码文件（`>= bridge_large_code_upload_bytes`，默认 12 KB)**&#x4F1A;逐字自动附加（最多 25 MB，每转最多 5 个文件），并且仅在磁盘上编辑时自动刷新。
+* **超大提示/工具结果溢出（`bridge_spillover_chars: 18000`)**：提示或巨大`read_file`超过 18 KB 的工具输出会自动上传为`.txt`附件而不是被猛击到网络输入框中，从而防止 UI 截断和重复重新读取。
+* **Delta 转弯上下文 (`bridge_delta_context: true`)**：同一打开的 Gemini 选项卡中的后续轮次仅发送新附加的用户/工具消息，而不是每次都重新粘贴完整的对话历史记录和工具架构（刷新或新聊天时自动重置）。
+* **自适应反禁令起搏和 429 断路器**：结合基础冷却时间（`bridge_min_interval_ms: 2500`），随机的类人抖动（`bridge_jitter_ms: 1500`），在繁重的编码循环期间渐进式突发扩展，滚动的 10 分钟窗口上限（`bridge_max_per_10min: 18`），以及自动指数冷却断路器（返回 HTTP`429`+`Retry-After`）如果 Google 发出速率限制信号。
+
+所有选项都可以调整`config.json`:
+
+```json
+{
+  "bridge_min_interval_ms": 2500,
+  "bridge_jitter_ms": 1500,
+  "bridge_max_per_10min": 18,
+  "bridge_auto_upload_local_files": true,
+  "bridge_large_code_upload_bytes": 12288,
+  "bridge_spillover_chars": 18000,
+  "bridge_delta_context": true
+}
+```
+
+### Gemini Enterprise（Vertex AI 搜索）支持
+
+如果您的组织使用**双子座企业**主办于`https://vertexaisearch.cloud.google.com/`，配置`base_url`:
 
 ```json
 {
@@ -309,19 +333,19 @@ https://gemini.google.com/u/1/app/...
 }
 ```
 
-或通过命令行启动参数：
+或者通过命令行传递：
 
 ```bash
 ./gemini-web2api --base-url https://vertexaisearch.cloud.google.com --cookie-file cookie.txt
 ```
 
-配置自定义 `base_url` 时，`gemini-web2api` 会自动将 `Origin`、`Referer`、`SAPISIDHASH` 认证计算和 RPC 端点切换为对应企业域名。
+什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
-### WorkBuddy / AI 编程智能体接入
+### WorkBuddy / AI 编码代理集成
 
-`gemini-web2api` 可无缝接入 **WorkBuddy**、**CodeBuddy**、Cursor、Claude Code、Aider 等编程助手。得益于内置的完整 OpenAI 工具调用（`tools` / `tool_calls`）支持，智能体能够自动在本地查看与编辑文件。
+`gemini-web2api`作为编码代理的嵌入式 OpenAI 兼容提供程序，例如**工作伙伴**,**码友**、光标、克劳德·代码、艾德和克莱恩。因为`gemini-web2api`本机代理 OpenAI 函数调用（`tools`/`tool_calls`），代理可以自主检查和编辑本地文件。
 
-配置 WorkBuddy (`~/.workbuddy/models.json` 或 Windows 的 `%USERPROFILE%\.workbuddy\models.json`)：
+配置 WorkBuddy 通过`~/.workbuddy/models.json`（或者`%USERPROFILE%\.workbuddy\models.json`在 Windows 上）：
 
 ```json
 [
