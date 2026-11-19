@@ -346,14 +346,23 @@ func TestUnsupportedOriginIsNotRetried(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 404 origin")
 	}
-	// 1 discovery probe + exactly 1 generation attempt — never 3 retries.
-	if stub.calls != 2 {
-		t.Fatalf("unsupported origin must not be retried: got %d upstream calls, want 2 (discovery + 1 attempt)", stub.calls)
+	// Exactly 1 upstream call: the discovery probe. Generate fails fast on the
+	// latch — no doomed generation attempt, no retries.
+	if stub.calls != 1 {
+		t.Fatalf("unsupported origin must fail fast: got %d upstream calls, want 1 (discovery probe only)", stub.calls)
 	}
 	if !c.BardUnsupported() {
 		t.Fatal("BardUnsupported must be latched after 404s")
 	}
 	if !IsUnsupported(err) {
 		t.Fatalf("error must be IsUnsupported, got: %v", err)
+	}
+
+	// A second request must not touch the network at all.
+	if _, err2 := c.Generate("hello", ModelOptions{ModelName: "gemini-2.5-pro"}, nil); err2 == nil {
+		t.Fatal("expected error for 404 origin")
+	}
+	if stub.calls != 1 {
+		t.Fatalf("latched origin must not be re-probed: got %d upstream calls, want 1", stub.calls)
 	}
 }

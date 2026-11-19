@@ -160,8 +160,10 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 		payload.BaseURL = payload.Origin
 	}
 	payload.BaseURL = sanitizeSyncedOrigin(payload.BaseURL)
+	prevOrigin := ""
 	if a.Gem != nil && a.Gem.Cookies != nil {
 		if existing, err := a.Gem.Cookies.Load(); err == nil {
+			prevOrigin = existing.BaseURL
 			if payload.XSRFToken == "" {
 				payload.XSRFToken = existing.XSRFToken
 			}
@@ -220,8 +222,11 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.CookieSync.recordSync()
-	// Fresh session — possibly from a different origin — so re-probe Bard RPC support.
-	if a.Gem != nil {
+	// A session synced from a DIFFERENT origin may support the Bard RPC even if the
+	// previous one did not (and vice versa) — reset the latch + discovery backoff
+	// so the next request re-probes. Same-origin syncs keep the latch to avoid a
+	// probe 404 after every periodic sync.
+	if a.Gem != nil && payload.BaseURL != prevOrigin {
 		a.Gem.ClearBardUnsupported()
 	}
 	a.Logf("Session cookies synced from browser extension (%d bytes, xsrf=%t, origin=%s)", len(payload.Cookie), payload.XSRFToken != "", payload.BaseURL)
