@@ -231,6 +231,12 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	// Cookie mode has no composer limit (the full prompt goes inline into the
 	// batchexecute body), so prefer it whenever the prompt would trigger spillover
 	// and no local files need the browser upload UI.
+	if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
+		// Force the one-time Bard-RPC probe (60s failure backoff) BEFORE deciding:
+		// a 404 latches BardUnsupported, so the first oversized request after a
+		// restart or cookie sync stays on the bridge instead of eating 404 retries.
+		a.Gem.EnsureModelsDiscovered()
+	}
 	if bridgeAlive && a.directModeUsable() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
 		if localAtts := a.uploadableLocalFiles(req.Messages); len(localAtts) == 0 {
 			a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing via direct cookie mode (no browser file upload needed)", len(prompt))

@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -23,6 +24,14 @@ type UpstreamError struct {
 
 func (e *UpstreamError) Error() string {
 	return e.Msg
+}
+
+// IsUnsupported reports whether err means the origin lacks the Bard web RPC
+// (Gemini Enterprise) — such errors are permanent for the session and must
+// never be retried.
+func IsUnsupported(err error) bool {
+	var ue *UpstreamError
+	return errors.As(err, &ue) && ue.Kind == "unsupported"
 }
 
 type Requester interface {
@@ -362,6 +371,9 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 					}
 				}
 				lastErr = err
+				if IsUnsupported(err) {
+					break
+				}
 			} else {
 				rawBytes, err := io.ReadAll(resp.Body)
 				_ = resp.Body.Close()
@@ -451,6 +463,9 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					}
 				}
 				lastErr = err
+				if IsUnsupported(err) {
+					break
+				}
 			} else {
 				err = c.streamAttempt(resp.Body, parser, emit)
 				_ = resp.Body.Close()

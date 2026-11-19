@@ -147,6 +147,10 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		// Same spillover-avoidance as /v1/chat/completions: cookie mode inlines
 		// oversized prompts instead of uploading a .txt through the browser UI.
+		if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
+			// Probe Bard-RPC support first (404 latches BardUnsupported).
+			a.Gem.EnsureModelsDiscovered()
+		}
 		if bridgeAlive && a.directModeUsable() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
 			if localAtts := a.uploadableLocalFiles(chatReq.Messages); len(localAtts) == 0 {
 				a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing responses request via direct cookie mode", len(prompt))
