@@ -326,7 +326,19 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
 			}
 		}
-		return c.generateViaDiscovery(prompt)
+		// Try captured template first (from extension net-hook capture)
+		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
+			return c.generateViaDiscovery(prompt)
+		}
+		// Try direct streamAssist endpoint call with session cookies
+		if c.Cfg.DiscoveryEngineEndpoint != "" {
+			return c.generateViaDiscoveryDirect(prompt)
+		}
+		return "", &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab so the extension can capture a streamAssist template",
+		}
 	}
 
 	cookieInfo, _ := c.Cookies.Load()
@@ -429,6 +441,19 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 			}
 		}
 		return c.generateViaDiscoveryStream(prompt, emit)
+		// Try captured template first (from extension net-hook capture)
+		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
+			return c.generateViaDiscoveryStream(prompt, emit)
+		}
+		// Try direct streamAssist endpoint call with session cookies
+		if c.Cfg.DiscoveryEngineEndpoint != "" {
+			return c.generateViaDiscoveryDirectStream(prompt, emit)
+		}
+		return &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab so the extension can capture a streamAssist template",
+		}
 	}
 
 	cookieInfo, _ := c.Cookies.Load()

@@ -81,16 +81,23 @@ func (a *App) cookiesReady() bool {
 }
 
 // directModeUsable reports whether direct cookie mode can actually serve a
-// request: cookies present AND either the synced origin serves the Bard web RPC
+// request: cookies present AND either the synced origin serves the Bard web RPC,
 // or a Discovery Engine streamAssist template has been captured (Enterprise
-// replay path). Use this for routing/fallback decisions; use cookiesReady for
-// session-health reporting.
+// replay path), or a Discovery Engine streamAssist endpoint is configured.
+// Use this for routing/fallback decisions; use cookiesReady for session-health
+// reporting.
 func (a *App) directModeUsable() bool {
 	if !a.cookiesReady() {
 		return false
 	}
 	if a.Gem != nil && a.Gem.BardUnsupported() {
-		return a.Gem.HasDiscoveryTemplate()
+		if a.Gem.HasDiscoveryTemplate() {
+			return true
+		}
+		if a.Cfg.DiscoveryEngineEndpoint != "" {
+			return true
+		}
+		return false
 	}
 	return true
 }
