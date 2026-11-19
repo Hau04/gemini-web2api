@@ -28,6 +28,16 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 
 	cookieInfo, _ := cookieCache.Load()
 
+	// The SAPISID hash must be computed for the same origin the cookies were
+	// synced from (e.g. vertexaisearch.cloud.google.com for Gemini Enterprise),
+	// not always gemini.google.com. Fall back to gemini.google.com when no
+	// origin was synced.
+	origin := cookieInfo.BaseURL
+	if origin == "" {
+		origin = "https://gemini.google.com"
+	}
+	prefix := gemini.AccountPrefix(authUser)
+
 	// Step 1: Initiate resumable upload
 	startHeaders := make(http.Header)
 	startHeaders.Set("Push-ID", pushID)
@@ -39,12 +49,14 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 	startHeaders.Set("X-Goog-Upload-Command", "start")
 	startHeaders.Set("Content-Type", "application/x-www-form-urlencoded;charset=utf-8")
 	startHeaders.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	startHeaders.Set("Origin", origin)
+	startHeaders.Set("Referer", origin+prefix+"/app")
 
 	if cookieInfo.Cookie != "" {
 		startHeaders.Set("Cookie", cookieInfo.Cookie)
 	}
 	if cookieInfo.SAPISID != "" {
-		startHeaders.Set("Authorization", gemini.SAPISIDHash(cookieInfo.SAPISID))
+		startHeaders.Set("Authorization", gemini.SAPISIDHashWithOrigin(cookieInfo.SAPISID, origin))
 	}
 
 	startURL := "https://content-push.googleapis.com/upload/"
@@ -74,6 +86,8 @@ func UploadImage(client gemini.Requester, tokens PageTokens, imgBytes []byte, mi
 	uploadHeaders.Set("X-Goog-Upload-Offset", "0")
 	uploadHeaders.Set("Content-Type", "application/octet-stream")
 	uploadHeaders.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	uploadHeaders.Set("Origin", origin)
+	uploadHeaders.Set("Referer", origin+prefix+"/app")
 
 	req2, err := http.NewRequest("POST", uploadURL, bytes.NewReader(imgBytes))
 	if err != nil {

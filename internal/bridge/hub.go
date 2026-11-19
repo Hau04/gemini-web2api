@@ -387,6 +387,11 @@ func (h *Hub) CooldownRemaining() time.Duration {
 // frozen also fails every in-flight turn immediately: the frozen tab will never
 // finish them, and the error lets the server retry via direct cookie mode while
 // the API client is still connected (instead of hanging until the client gives up).
+// SetFrozen records whether the browser tab is frozen by Chrome (Memory Saver /
+// Energy Saver). A frozen tab cannot run the content script, so requests must
+// route via direct cookie mode instead. Transitioning to frozen fails every
+// in-flight turn immediately: the frozen tab will never finish them, and the
+// error lets the server retry via direct cookie mode.
 func (h *Hub) SetFrozen(frozen bool) {
 	h.frozen.Store(frozen)
 	if frozen {
