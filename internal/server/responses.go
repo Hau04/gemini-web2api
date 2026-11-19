@@ -141,23 +141,18 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		a.Logf("Fast-tracking Responses API client title generation request locally: %s", text)
 	} else if a.Bridge != nil && a.Bridge.IsConnected() {
 		bridgeAlive := true
-		if a.Bridge.IsDegraded() && a.directModeUsable() {
-			a.Logf("Browser bridge degraded after recent timeout — routing responses request via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
+		// Prefer direct cookie mode when session cookies are available
+		// (synced by the extension), unless the prompt is oversized and would
+		// trigger .txt spillover — the bridge uploads the .txt through the
+		// browser's file composer (prepareBridgeRequest →
+		// SpilloverOversizedPrompt), avoiding Enterprise batchexecute body
+		// size limits for fully inlined prompts.
+		if a.cookiesReady() && !(a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars && bridgeAlive) {
 			bridgeAlive = false
 		}
-		// Same spillover-avoidance as /v1/chat/completions: cookie mode inlines
-		// oversized prompts instead of uploading a .txt through the browser UI.
-		if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
-			// Probe Bard-RPC support first (404 latches BardUnsupported).
-			a.Gem.EnsureModelsDiscovered()
-		}
-		if bridgeAlive && a.directModeUsable() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
-			if localAtts := a.uploadableLocalFiles(chatReq.Messages); len(localAtts) == 0 {
-				a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing responses request via direct cookie mode", len(prompt))
-				bridgeAlive = false
-			} else {
-				a.Logf("Prompt %d chars exceeds bridge spillover threshold — keeping bridge route to attach %d local file(s)", len(prompt), len(localAtts))
-			}
+		if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() {
+			a.Logf("Browser bridge degraded after recent timeout — routing responses request via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
+			bridgeAlive = false
 		}
 		if bridgeAlive && a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}
@@ -255,7 +250,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		if !a.directModeUsable() {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
-				"message": "browser bridge is not connected and direct cookie mode is unavailable on this origin (missing session cookies, or a Gemini Enterprise origin without the direct web RPC) — open Gemini in Chrome with the extension so the browser bridge can serve requests",
+				"message": "direct cookie mode is unavailable: no session cookies have been synced from the browser extension — open Gemini in Chrome so the extension can sync your session cookies, then retry",
 				"type":    "bridge_offline",
 			}})
 			return

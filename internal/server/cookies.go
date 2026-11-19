@@ -80,15 +80,14 @@ func (a *App) cookiesReady() bool {
 	return info.SAPISID != "" || strings.Contains(info.Cookie, "__Secure-1PSID")
 }
 
-// directModeUsable reports whether direct cookie mode can actually serve a
-// request: cookies present AND the synced origin hasn't told us it lacks the
-// Bard web RPC (Gemini Enterprise speaks Discovery Engine streamAssist —
-// bridge-only). Use this for routing/fallback decisions; use cookiesReady for
-// session-health reporting.
+// directModeUsable reports whether direct cookie mode can serve a request:
+// session cookies are present (synced by the browser extension). We do NOT gate
+// this on the Bard/RPC probe: on Gemini Enterprise origins the model-discovery
+// endpoint 404s, but the actual generate RPC can still be reached with valid
+// session cookies, so a discovery 404 must not permanently disable cookie mode.
+// Use this for routing/fallback decisions; use cookiesReady for session-health
+// reporting.
 func (a *App) directModeUsable() bool {
-	if a.Gem != nil && a.Gem.BardUnsupported() {
-		return false
-	}
 	return a.cookiesReady()
 }
 

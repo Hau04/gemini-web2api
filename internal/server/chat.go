@@ -217,34 +217,27 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if an authenticated browser tab is connected via the extension bridge.
-	// A frozen tab (Chrome Memory Saver) never counts as connected. A degraded bridge
-	// (recent zero-content timeout) is skipped while session cookies are available —
-	// otherwise we still prefer the bridge over failing outright.
+	// Route through direct cookie mode whenever session cookies are available
+	// (synced by the browser extension). A frozen tab (Chrome Memory Saver)
+	// never counts as connected, and a degraded bridge is skipped while cookies
+	// are available — we prefer cookies over the live browser tab.
+	//
+	// The bridge is kept only for oversized prompts that would trigger .txt
+	// spillover: prepareBridgeRequest → SpilloverOversizedPrompt uploads the
+	// oversized prompt as a .txt attachment through the browser's file composer,
+	// avoiding any Enterprise batchexecute body size limits for fully inlined
+	// prompts. Normal-sized prompts go through direct cookie mode (prompt inlined).
 	bridgeAlive := a.Bridge != nil && a.Bridge.IsConnected()
+
+	if a.cookiesReady() && !(a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars && bridgeAlive) {
+		bridgeAlive = false
+	}
+
 	if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() {
 		a.Logf("Browser bridge degraded after recent timeout — routing via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
 		bridgeAlive = false
 	}
-	// Oversized prompts would be spilled into a .txt attachment and uploaded through
-	// the browser's file UI — which stalls on some Gemini Enterprise frontends.
-	// Cookie mode has no composer limit (the full prompt goes inline into the
-	// batchexecute body), so prefer it whenever the prompt would trigger spillover
-	// and no local files need the browser upload UI.
-	if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
-		// Force the one-time Bard-RPC probe (60s failure backoff) BEFORE deciding:
-		// a 404 latches BardUnsupported, so the first oversized request after a
-		// restart or cookie sync stays on the bridge instead of eating 404 retries.
-		a.Gem.EnsureModelsDiscovered()
-	}
-	if bridgeAlive && a.directModeUsable() && a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
-		if localAtts := a.uploadableLocalFiles(req.Messages); len(localAtts) == 0 {
-			a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing via direct cookie mode (no browser file upload needed)", len(prompt))
-			bridgeAlive = false
-		} else {
-			a.Logf("Prompt %d chars exceeds bridge spillover threshold — keeping bridge route to attach %d local file(s)", len(prompt), len(localAtts))
-		}
-	}
+
 	if bridgeAlive {
 		if a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}
@@ -708,7 +701,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if !a.directModeUsable() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
-			"message": "browser bridge is not connected and direct cookie mode is unavailable on this origin (missing session cookies, or a Gemini Enterprise origin without the direct web RPC) — open Gemini in Chrome with the extension so the browser bridge can serve requests",
+			"message": "direct cookie mode is unavailable: no session cookies have been synced from the browser extension — open Gemini in Chrome so the extension can sync your session cookies, then retry",
 			"type":    "bridge_offline",
 		}})
 		return
