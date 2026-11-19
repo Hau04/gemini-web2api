@@ -274,9 +274,14 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if req.Stream {
-			if !startSSE(w) {
-				return
-			}
+			// SSE is committed (status 200 + role chunk + keepalives) only once a
+			// browser tab actually claims the queued request (onPickup below). Until
+			// then nothing has been written, so a dead tab (pickup timeout) can be
+			// answered with a real HTTP error instead of a 200 stream carrying a
+			// hidden error chunk that clients surface as an empty/stuck completion.
+			var streamStarted bool
+			var stopKeepalive chan struct{}
+			var doneKeepalive chan struct{}
 
 			var sseMu sync.Mutex
 			safeWriteSSE := func(data any) error {
@@ -290,54 +295,66 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				return writeSSEDone(w)
 			}
 
-			firstChunk := models.OpenAIChatResponse{
-				ID:      cid,
-				Object:  "chat.completion.chunk",
-				Created: time.Now().Unix(),
-				Model:   resolved.Name,
-				Choices: []models.OpenAIChoice{
-					{
-						Index: 0,
-						Delta: &models.OpenAIDelta{
-							Role: "assistant",
-						},
-						FinishReason: nil,
-					},
-				},
-			}
-			_ = safeWriteSSE(firstChunk)
-
-			// Keepalive ticker flushes empty delta chunks ({}) every 5s with mutex synchronization
-			// to keep client stream parsers active and prevent idle timeouts.
-			stopKeepalive := make(chan struct{})
-			doneKeepalive := make(chan struct{})
-			keepaliveTicker := time.NewTicker(5 * time.Second)
-			go func() {
-				defer close(doneKeepalive)
-				defer keepaliveTicker.Stop()
-				for {
-					select {
-					case <-keepaliveTicker.C:
-						pingChunk := models.OpenAIChatResponse{
-							ID:      cid,
-							Object:  "chat.completion.chunk",
-							Created: time.Now().Unix(),
-							Model:   resolved.Name,
-							Choices: []models.OpenAIChoice{
-								{
-									Index: 0,
-									Delta: &models.OpenAIDelta{},
-								},
-							},
-						}
-						_ = safeWriteSSE(pingChunk)
-					case <-stopKeepalive:
-						return
-					case <-r.Context().Done():
-						return
-					}
+			onPickup := func() error {
+				if streamStarted {
+					return nil
 				}
-			}()
+				if !startSSE(w) {
+					return errors.New("client disconnected before bridge stream start")
+				}
+				streamStarted = true
+
+				// Emit first chunk with role to match OpenAI streaming protocol.
+				firstChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIDelta{
+								Role: "assistant",
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				_ = safeWriteSSE(firstChunk)
+
+				// Keepalive ticker flushes empty delta chunks ({}) every 5s with mutex synchronization
+				// to keep client stream parsers active and prevent idle timeouts.
+				stopKeepalive = make(chan struct{})
+				doneKeepalive = make(chan struct{})
+				keepaliveTicker := time.NewTicker(5 * time.Second)
+				go func() {
+					defer close(doneKeepalive)
+					defer keepaliveTicker.Stop()
+					for {
+						select {
+						case <-keepaliveTicker.C:
+							pingChunk := models.OpenAIChatResponse{
+								ID:      cid,
+								Object:  "chat.completion.chunk",
+								Created: time.Now().Unix(),
+								Model:   resolved.Name,
+								Choices: []models.OpenAIChoice{
+									{
+										Index: 0,
+										Delta: &models.OpenAIDelta{},
+									},
+								},
+							}
+							_ = safeWriteSSE(pingChunk)
+						case <-stopKeepalive:
+							return
+						case <-r.Context().Done():
+							return
+						}
+					}
+				}()
+				return nil
+			}
 
 		var fullText strings.Builder
 		var bufferedTail strings.Builder
@@ -407,11 +424,14 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			return nil
 		}
 
-		emitErr := a.Bridge.GenerateStreamWithOptions(r.Context(), bridgeOpts, emitDelta)
+		emitErr := a.Bridge.GenerateStreamWithPickupHook(r.Context(), bridgeOpts, onPickup, emitDelta)
 		if emitErr != nil && !streamedAny && fullText.Len() == 0 && a.directModeUsable() && r.Context().Err() == nil {
 			// The bridge produced nothing before failing (e.g. the tab froze or was
 			// discarded mid-turn). Fall back to the direct cookie mode and mark the
 			// bridge degraded so subsequent requests skip it until the tab recovers.
+			if !streamStarted {
+				_ = onPickup()
+			}
 			a.Logf("Browser bridge failed before streaming (%v) — retrying via direct cookie mode", emitErr)
 			a.Bridge.MarkDegraded(10 * time.Minute)
 			fullText.Reset()
@@ -431,8 +451,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		close(stopKeepalive)
-		<-doneKeepalive
+		if emitErr == nil && !streamStarted {
+			// Zero-content turn whose claim raced teardown — commit the stream now
+			// so the success chunks below have valid SSE framing.
+			_ = onPickup()
+		}
+		if streamStarted {
+			close(stopKeepalive)
+			<-doneKeepalive
+		}
 
 		if emitErr == nil {
 			if strings.TrimSpace(fullText.String()) != "" {
@@ -541,6 +568,25 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				}
 				_ = safeWriteDone()
 			} else {
+				if !streamStarted {
+					// Nothing has been written — answer with a real HTTP status the
+					// client can surface instead of a 200 stream with hidden error.
+					a.Logf("Bridge request failed before stream start: %v", emitErr)
+					var pErr *bridge.PausedError
+					var rlErr *bridge.RateLimitError
+					var pkErr *bridge.PickupError
+					switch {
+					case errors.As(emitErr, &pErr):
+						writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": pErr.Error(), "type": "bridge_paused"}})
+					case errors.As(emitErr, &rlErr):
+						writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
+					case errors.As(emitErr, &pkErr):
+						writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": fmt.Sprintf("%v", emitErr), "type": "bridge_offline"}})
+					default:
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", emitErr)}})
+					}
+					return
+				}
 				a.Logf("Bridge chat stream error: %v", emitErr)
 				if r.Context().Err() == nil {
 					if !streamedAny {
@@ -602,7 +648,12 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			}
 			a.Bridge.ClearDegraded()
 			} else {
-				writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+				var pkErr *bridge.PickupError
+				if errors.As(err, &pkErr) {
+					writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": fmt.Sprintf("%v", err), "type": "bridge_offline"}})
+				} else {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+				}
 				return
 			}
 		}

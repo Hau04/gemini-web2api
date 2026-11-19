@@ -13,6 +13,8 @@
 const DEFAULT_SERVER_URL = "http://localhost:8081";
 const SYNC_ALARM = "web2api_cookie_sync";
 const SYNC_PERIOD_MIN = 2;
+const WATCHDOG_ALARM = "web2api_bridge_watchdog";
+const WATCHDOG_PERIOD_MIN = 0.5;
 
 const COOKIE_DOMAINS = [
   "google.com",
@@ -204,6 +206,83 @@ async function reportFrozen(tab, frozen) {
 // onUpdated multiple times per tab lifecycle event).
 const frozenTabs = new Map();
 
+// Bridge liveness watchdog: a discarded or frozen tab silently kills the content
+// script's poll loop, and the server would otherwise queue requests into a 45s
+// pickup timeout. Ping each Gemini tab every 30s; when the loop is provably
+// dead, report the tab frozen immediately so the server fails fast with an
+// actionable error, and try re-injecting bridge.js (its install guard makes a
+// re-injection into a live context a no-op).
+async function watchdogSweep() {
+  let tabs = [];
+  try {
+    const a = await chrome.tabs.query({ url: "*://gemini.google.com/*" });
+    const b = await chrome.tabs.query({ url: "*://vertexaisearch.cloud.google.com/*" });
+    const c = await chrome.tabs.query({ url: "*://business.gemini.google/*" });
+    tabs = [...a, ...b, ...c];
+  } catch (e) {
+    return;
+  }
+
+  for (const t of tabs) {
+    if (!t || !t.id || !GEMINI_URL_RE.test(t.url || "")) continue;
+
+    let answered = false;
+    let alive = false;
+    let busy = false;
+    let lastPollAt = 0;
+    try {
+      const reply = await Promise.race([
+        chrome.tabs.sendMessage(t.id, { action: "web2api-ping" }),
+        new Promise((resolve) => setTimeout(() => resolve(null), 4000)),
+      ]);
+      if (reply && reply.alive) {
+        answered = true;
+        alive = true;
+        busy = Boolean(reply.busy);
+        lastPollAt = Number(reply.last_poll_at) || 0;
+      }
+    } catch (e) {
+      // "Receiving end does not exist": no content script listener (old version,
+      // or the context died). Try reviving below.
+    }
+
+    if (!answered && !t.discarded) {
+      // Safe: bridge.js early-returns when already installed in a live context.
+      try {
+        await chrome.scripting.executeScript({ target: { tabId: t.id }, files: ["bridge.js"] });
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+        const retry = await Promise.race([
+          chrome.tabs.sendMessage(t.id, { action: "web2api-ping" }),
+          new Promise((resolve) => setTimeout(resolve, 4000)),
+        ]);
+        if (retry && retry.alive) {
+          answered = true;
+          alive = true;
+          busy = Boolean(retry.busy);
+          lastPollAt = Number(retry.last_poll_at) || 0;
+        }
+      } catch (e) {}
+    }
+
+    // Only report frozen on positive evidence of death — a discarded tab, or a
+    // live script whose poll loop has been stalled for >90s while idle. A tab
+    // that never answers (old version) or answers slowly mid-turn is left alone;
+    // the server's pickup watchdog covers those.
+    let stale = Boolean(t.discarded);
+    if (answered && alive && !busy && lastPollAt > 0 && Date.now() - lastPollAt > 90000) {
+      stale = true;
+    }
+
+    if (stale && frozenTabs.get(t.id) !== true) {
+      frozenTabs.set(t.id, true);
+      reportFrozen(t, true);
+    } else if (!stale && answered && frozenTabs.get(t.id) === true) {
+      frozenTabs.set(t.id, false);
+      reportFrozen(t, false);
+    }
+  }
+}
+
 // Runtime listeners — only register in a real extension environment
 // (skipped under Node.js unit tests where `chrome` is undefined).
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.runtime) {
@@ -235,6 +314,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.alarms.create(SYNC_ALARM, { periodInMinutes: SYNC_PERIOD_MIN });
+  chrome.alarms.create(WATCHDOG_ALARM, { periodInMinutes: WATCHDOG_PERIOD_MIN });
   syncCookiesNow("install");
 });
 
@@ -245,6 +325,8 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm && alarm.name === SYNC_ALARM) {
     syncCookiesNow("alarm");
+  } else if (alarm && alarm.name === WATCHDOG_ALARM) {
+    watchdogSweep();
   }
 });
 

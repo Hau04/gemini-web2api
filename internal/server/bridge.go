@@ -172,11 +172,16 @@ func (a *App) handleBridgeFrozen(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
+	changed := a.Bridge.IsFrozen() != payload.Frozen
 	a.Bridge.SetFrozen(payload.Frozen)
 	if payload.Frozen {
-		a.Logf("Browser tab reported FROZEN (%s) — routing new requests via direct cookie mode until it resumes", payload.Tab)
+		if changed {
+			a.Logf("Browser tab reported FROZEN (%s) — routing new requests via direct cookie mode until it resumes", payload.Tab)
+		}
 	} else {
-		a.Logf("Browser tab resumed (%s) — browser bridge available again", payload.Tab)
+		if changed {
+			a.Logf("Browser tab resumed (%s) — browser bridge available again", payload.Tab)
+		}
 		a.Bridge.ClearDegraded()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
