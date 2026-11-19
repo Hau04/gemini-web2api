@@ -109,7 +109,10 @@ func (c *Client) DiscoverModels() ([]DiscoveredModel, error) {
 		q.Set("bl", bl)
 	}
 
-	baseURL := c.Cfg.BaseURL
+	baseURL := cookieInfo.BaseURL
+	if baseURL == "" {
+		baseURL = c.Cfg.BaseURL
+	}
 	if baseURL == "" {
 		baseURL = "https://gemini.google.com"
 	}

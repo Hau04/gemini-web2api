@@ -64,19 +64,26 @@ func (c *TokenCache) fetchPageTokens() PageTokens {
 		At:     "",
 	}
 
-	baseURL := c.cfg.BaseURL
+	cookieInfo, _ := c.cookie.Load()
+	baseURL := cookieInfo.BaseURL
+	if baseURL == "" {
+		baseURL = c.cfg.BaseURL
+	}
 	if baseURL == "" {
 		baseURL = "https://gemini.google.com"
 	}
+	authUser := c.cfg.AuthUser
+	if authUser == "" && cookieInfo.AuthUser != "" {
+		authUser = cookieInfo.AuthUser
+	}
 
-	reqURL := fmt.Sprintf("%s%s/app", baseURL, gemini.AccountPrefix(c.cfg.AuthUser))
+	reqURL := fmt.Sprintf("%s%s/app", baseURL, gemini.AccountPrefix(authUser))
 	req, err := http.NewRequest("GET", reqURL, nil)
 	if err != nil {
 		return tokens
 	}
 
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	cookieInfo, _ := c.cookie.Load()
 	if cookieInfo.Cookie != "" {
 		req.Header.Set("Cookie", cookieInfo.Cookie)
 	}

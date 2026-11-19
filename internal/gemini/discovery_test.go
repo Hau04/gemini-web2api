@@ -243,3 +243,48 @@ func TestResolveModelHeaderMatchesDiscoveredByName(t *testing.T) {
 		t.Errorf("hydrogen must name-match its discovered entry, got %s", hdr)
 	}
 }
+
+func TestBuildHeadersUsesSyncedOriginOverConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := tmpDir + "/cookie.json"
+	content := `{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc","xsrf_token":"tok","base_url":"https://vertexaisearch.cloud.google.com"}`
+	if err := os.WriteFile(cookieFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Config{
+		CookieFile: cookieFile,
+		BaseURL:    "https://gemini.google.com",
+	}
+	c := NewClient(cfg)
+	c.Cookies = NewCookieCache(cookieFile)
+
+	h := c.buildHeaders()
+	if got := h.Get("Origin"); got != "https://vertexaisearch.cloud.google.com" {
+		t.Errorf("Origin = %q, want synced vertexaisearch origin (config base_url must not win)", got)
+	}
+	if got := h.Get("Referer"); !strings.HasPrefix(got, "https://vertexaisearch.cloud.google.com/") {
+		t.Errorf("Referer = %q, want vertexaisearch origin", got)
+	}
+}
+
+func TestBuildHeadersFallsBackToConfigBaseURL(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := tmpDir + "/cookie.json"
+	content := `{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`
+	if err := os.WriteFile(cookieFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Config{
+		CookieFile: cookieFile,
+		BaseURL:    "https://vertexaisearch.cloud.google.com",
+	}
+	c := NewClient(cfg)
+	c.Cookies = NewCookieCache(cookieFile)
+
+	h := c.buildHeaders()
+	if got := h.Get("Origin"); got != "https://vertexaisearch.cloud.google.com" {
+		t.Errorf("Origin = %q, want configured base_url when no synced origin", got)
+	}
+}

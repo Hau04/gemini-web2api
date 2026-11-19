@@ -39,6 +39,14 @@ func (a *App) buildBridgeStatusPayload() map[string]any {
 		"cookies_ready": a.cookiesReady(),
 	}
 	lastSync, authErr, authErrAt := a.CookieSync.snapshot()
+	if a.Gem != nil {
+		payload["configured_base_url"] = a.Gem.Cfg.BaseURL
+		if a.Gem.Cookies != nil {
+			if info, err := a.Gem.Cookies.Load(); err == nil && info.BaseURL != "" {
+				payload["synced_origin"] = info.BaseURL
+			}
+		}
+	}
 	if !lastSync.IsZero() {
 		payload["cookie_last_sync"] = lastSync.UTC().Format(time.RFC3339)
 		payload["cookie_last_sync_age_sec"] = int(time.Since(lastSync).Seconds())

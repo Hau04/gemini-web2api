@@ -18,6 +18,11 @@ type CookieInfo struct {
 	AuthUser  string
 	XSRFToken string
 	GeminiBL  string
+	// BaseURL is the origin of the tab the extension harvested this session from
+	// (e.g. https://vertexaisearch.cloud.google.com). XSRF tokens are
+	// origin-specific, so direct-mode requests must target this origin, not
+	// necessarily the configured base_url.
+	BaseURL   string
 }
 
 type CookieCache struct {
@@ -64,6 +69,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 	var authUser string
 	var xsrfToken string
 	var geminiBL string
+	var baseURL string
 
 	if strings.HasPrefix(content, "{") {
 		var data struct {
@@ -72,6 +78,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 			AuthUser  json.RawMessage `json:"auth_user"`
 			XSRFToken *string         `json:"xsrf_token"`
 			GeminiBL  *string         `json:"gemini_bl"`
+			BaseURL   *string         `json:"base_url"`
 		}
 		if err := json.Unmarshal([]byte(content), &data); err == nil {
 			cookieStr = data.Cookie
@@ -87,6 +94,9 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 			}
 			if data.GeminiBL != nil {
 				geminiBL = *data.GeminiBL
+			}
+			if data.BaseURL != nil {
+				baseURL = *data.BaseURL
 			}
 		}
 	} else {
@@ -111,6 +121,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 		AuthUser:  authUser,
 		XSRFToken: xsrfToken,
 		GeminiBL:  geminiBL,
+		BaseURL:   baseURL,
 	}
 
 	return c.info, nil
