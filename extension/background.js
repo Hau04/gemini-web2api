@@ -124,6 +124,7 @@ async function syncCookiesNow(reason) {
     // Try to grab the XSRF token from any open Gemini-ish tab (best effort).
     let xsrf = "";
     let authUser = "";
+    let harvestOrigin = "";
     try {
       const tabs = await chrome.tabs.query({ url: "*://gemini.google.com/*" });
       const entTabs = await chrome.tabs.query({ url: "*://vertexaisearch.cloud.google.com/*" });
@@ -133,12 +134,19 @@ async function syncCookiesNow(reason) {
         xsrf = await extractXsrfFromTab(tab.id);
         const m = (tab.url || "").match(/\/u\/(\d+)\//);
         if (m) authUser = m[1];
+        // XSRF tokens are origin-specific — tell the server which origin this
+        // session came from so direct-mode requests target it, not a stale
+        // configured base_url.
+        try {
+          harvestOrigin = new URL(tab.url).origin;
+        } catch (e) {}
       }
     } catch (e) {}
 
     const payload = { cookie: cookieString, sapisid };
     if (xsrf) payload.xsrf_token = xsrf;
     if (authUser) payload.auth_user = authUser;
+    if (harvestOrigin) payload.origin = harvestOrigin;
 
     const cfg = await getBridgeConfig();
     const res = await fetch(`${cfg.url}/bridge/cookies`, {

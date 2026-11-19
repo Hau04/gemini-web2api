@@ -227,3 +227,100 @@ func TestDefaultCookieFile(t *testing.T) {
 		t.Errorf("expected default cookie_file 'cookie.json', got %q", app.Cfg.CookieFile)
 	}
 }
+
+func TestHandleBridgeCookiesStoresOrigin(t *testing.T) {
+	app, cookieFile := newCookieTestApp(t)
+
+	payload := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123","xsrf_token":"tok","origin":"https://vertexaisearch.cloud.google.com"}`
+	req := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload))
+	w := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(cookieFile)
+	if err != nil {
+		t.Fatalf("cookie file not written: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("stored cookie file is invalid JSON: %v", err)
+	}
+	if stored["base_url"] != "https://vertexaisearch.cloud.google.com" {
+		t.Errorf("expected synced origin stored as base_url, got %q", stored["base_url"])
+	}
+
+	// The cookie-mode client must expose the synced origin so direct-mode
+	// requests target the same origin the XSRF token was harvested from.
+	if app.Gem == nil || app.Gem.Cookies == nil {
+		t.Fatal("expected gemini client with cookie cache")
+	}
+	info, err := app.Gem.Cookies.Load()
+	if err != nil {
+		t.Fatalf("cookie load failed: %v", err)
+	}
+	if info.BaseURL != "https://vertexaisearch.cloud.google.com" {
+		t.Errorf("CookieInfo.BaseURL = %q, want vertexaisearch origin", info.BaseURL)
+	}
+}
+
+func TestHandleBridgeCookiesRejectsForeignOrigin(t *testing.T) {
+	app, cookieFile := newCookieTestApp(t)
+
+	payload := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123","xsrf_token":"tok","origin":"https://evil.example.com"}`
+	req := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload))
+	w := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	data, err := os.ReadFile(cookieFile)
+	if err != nil {
+		t.Fatalf("cookie file not written: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("stored cookie file is invalid JSON: %v", err)
+	}
+	if _, present := stored["base_url"]; present {
+		t.Errorf("foreign origin must not be persisted, got base_url=%q", stored["base_url"])
+	}
+}
+
+func TestHandleBridgeCookiesPreservesOriginOnLaterSync(t *testing.T) {
+	app, cookieFile := newCookieTestApp(t)
+
+	// First sync carries the origin.
+	payload := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123","xsrf_token":"tok","origin":"https://vertexaisearch.cloud.google.com"}`
+	req := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload))
+	w := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("first sync expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Second sync omits it (older extension) — must not wipe it.
+	payload2 := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123"}`
+	req2 := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload2))
+	w2 := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second sync expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+
+	data, err := os.ReadFile(cookieFile)
+	if err != nil {
+		t.Fatalf("cookie file not written: %v", err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("stored cookie file is invalid JSON: %v", err)
+	}
+	if stored["base_url"] != "https://vertexaisearch.cloud.google.com" {
+		t.Errorf("synced origin must survive origin-less pushes, got %q", stored["base_url"])
+	}
+}

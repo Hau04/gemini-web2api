@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -79,6 +80,27 @@ func (a *App) cookiesReady() bool {
 	return info.SAPISID != "" || strings.Contains(info.Cookie, "__Secure-1PSID")
 }
 
+// sanitizeSyncedOrigin validates an extension-reported origin/base_url before it
+// is persisted into the cookie file: https:// URLs only, known Gemini-family
+// hosts only (the extension can only harvest XSRF tokens from these origins).
+// Returns "" for anything else.
+func sanitizeSyncedOrigin(raw string) string {
+	raw = strings.TrimSpace(strings.TrimRight(raw, "/"))
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "gemini.google.com", "vertexaisearch.cloud.google.com", "business.gemini.google":
+		return "https://" + host
+	}
+	return ""
+}
+
 // handleBridgeCookies receives session cookies pushed by the browser extension's
 // background service worker and persists them to the cookie file. The direct-mode
 // client's CookieCache reloads the file on its next use (mtime-based), so fresh
@@ -91,6 +113,8 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 		AuthUser  string `json:"auth_user"`
 		XSRFToken string `json:"xsrf_token"`
 		GeminiBL  string `json:"gemini_bl"`
+		BaseURL   string `json:"base_url"`
+		Origin    string `json:"origin"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON payload"})
@@ -119,7 +143,11 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Merge: never let a cookies-only push wipe a previously stored XSRF token,
-	// BL value, or auth_user that this push did not include.
+	// BL value, auth_user, or synced origin that this push did not include.
+	if payload.BaseURL == "" {
+		payload.BaseURL = payload.Origin
+	}
+	payload.BaseURL = sanitizeSyncedOrigin(payload.BaseURL)
 	if a.Gem != nil && a.Gem.Cookies != nil {
 		if existing, err := a.Gem.Cookies.Load(); err == nil {
 			if payload.XSRFToken == "" {
@@ -130,6 +158,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 			}
 			if payload.AuthUser == "" {
 				payload.AuthUser = existing.AuthUser
+			}
+			if payload.BaseURL == "" {
+				payload.BaseURL = existing.BaseURL
 			}
 		}
 	}
@@ -146,6 +177,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.GeminiBL != "" {
 		stored["gemini_bl"] = payload.GeminiBL
+	}
+	if payload.BaseURL != "" {
+		stored["base_url"] = payload.BaseURL
 	}
 
 	data, err := json.Marshal(stored)
@@ -174,7 +208,7 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.CookieSync.recordSync()
-	a.Logf("Session cookies synced from browser extension (%d bytes, xsrf=%t)", len(payload.Cookie), payload.XSRFToken != "")
+	a.Logf("Session cookies synced from browser extension (%d bytes, xsrf=%t, origin=%s)", len(payload.Cookie), payload.XSRFToken != "", payload.BaseURL)
 
 	_, authErr, authErrAt := a.CookieSync.snapshot()
 	resp := map[string]any{
@@ -200,6 +234,14 @@ func (a *App) handleCookieStatus(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"configured": a.cookiesReady(),
 		"auth_error": nil,
+	}
+	if a.Gem != nil {
+		resp["configured_base_url"] = a.Gem.Cfg.BaseURL
+		if a.Gem.Cookies != nil {
+			if info, err := a.Gem.Cookies.Load(); err == nil {
+				resp["synced_origin"] = info.BaseURL
+			}
+		}
 	}
 	if !lastSync.IsZero() {
 		resp["last_sync"] = lastSync.UTC().Format(time.RFC3339)

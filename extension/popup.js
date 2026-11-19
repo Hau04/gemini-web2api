@@ -109,6 +109,17 @@ document.addEventListener("DOMContentLoaded", async () => {
       const cookiesReady = Boolean(b.cookies_ready);
       const lastSyncAge = Number(b.cookie_last_sync_age_sec) || null;
       const authErr = b.cookie_auth_error || null;
+      const syncedOrigin = b.synced_origin || "";
+      const configuredBaseUrl = b.configured_base_url || "";
+
+      const syncDetail = (base) => {
+        let d = base;
+        if (syncedOrigin) d += (d ? " · " : "") + `Origin: ${syncedOrigin.replace("https://", "")}`;
+        if (syncedOrigin && configuredBaseUrl && syncedOrigin !== configuredBaseUrl) {
+          d += ` (config base_url is ${configuredBaseUrl.replace("https://", "")} — requests follow the synced origin)`;
+        }
+        return d;
+      };
 
       if (authErr) {
         cookieSyncBox.className = "status error";
@@ -124,17 +135,17 @@ document.addEventListener("DOMContentLoaded", async () => {
         cookieSyncBox.className = "status success";
         cookieSyncText.textContent = "Active (tab frozen — serving via direct cookie mode)";
         cookieSyncDetail.style.display = "block";
-        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+        cookieSyncDetail.textContent = syncDetail(lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "");
       } else if (degradedSec > 0) {
         cookieSyncBox.className = "status success";
         cookieSyncText.textContent = `Degraded (${degradedSec}s) — serving via direct cookie mode`;
         cookieSyncDetail.style.display = "block";
-        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+        cookieSyncDetail.textContent = syncDetail(lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "");
       } else {
         cookieSyncBox.className = "status success";
         cookieSyncText.textContent = "Active — cookies synced for direct mode";
         cookieSyncDetail.style.display = "block";
-        cookieSyncDetail.textContent = lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "";
+        cookieSyncDetail.textContent = syncDetail(lastSyncAge !== null ? `Last sync ${lastSyncAge}s ago` : "");
       }
     } catch (e) {
       cookieSyncBox.className = "status error";

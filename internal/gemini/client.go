@@ -120,10 +120,25 @@ func (c *Client) SetBL(bl string) {
 	c.bl = bl
 }
 
+// effectiveBaseURL returns the origin direct-mode requests must target: the
+// origin of the tab that most recently synced cookies (its XSRF token and
+// SAPISID hash are only valid there) wins over the static config base_url.
+func (c *Client) effectiveBaseURL() string {
+	if c.Cookies != nil {
+		if info, err := c.Cookies.Load(); err == nil && info.BaseURL != "" {
+			return info.BaseURL
+		}
+	}
+	if c.Cfg.BaseURL != "" {
+		return c.Cfg.BaseURL
+	}
+	return "https://gemini.google.com"
+}
+
 // UpdateBLIfNeeded fetches the latest BL from Gemini and updates it if different from current.
 // Returns (newBL, changed, error).
 func (c *Client) UpdateBLIfNeeded() (string, bool, error) {
-	newBL, err := FetchLatestBLWithBaseURL(c.HTTP, c.Cfg.BaseURL)
+	newBL, err := FetchLatestBLWithBaseURL(c.HTTP, c.effectiveBaseURL())
 	if err != nil {
 		return "", false, err
 	}
@@ -145,7 +160,10 @@ func (c *Client) buildHeaders() http.Header {
 		authUser = cookieInfo.AuthUser
 	}
 
-	baseURL := c.Cfg.BaseURL
+	baseURL := cookieInfo.BaseURL
+	if baseURL == "" {
+		baseURL = c.Cfg.BaseURL
+	}
 	if baseURL == "" {
 		baseURL = "https://gemini.google.com"
 	}
@@ -258,6 +276,10 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
 		cfg.AuthUser = cookieInfo.AuthUser
 	}
+	if cookieInfo.BaseURL != "" {
+		cfg.BaseURL = cookieInfo.BaseURL
+	}
+	c.Logf("Routing direct cookie-mode request to %s (model=%s)", cfg.BaseURL, opt.ModelName)
 
 	reqUUID := strings.ToUpper(uuidV4())
 	extra := make(map[int]any, len(opt.Extra)+1)
@@ -340,6 +362,9 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 	}
 	if cfg.AuthUser == "" && cookieInfo.AuthUser != "" {
 		cfg.AuthUser = cookieInfo.AuthUser
+	}
+	if cookieInfo.BaseURL != "" {
+		cfg.BaseURL = cookieInfo.BaseURL
 	}
 
 	reqUUID := strings.ToUpper(uuidV4())

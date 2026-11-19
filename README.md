@@ -392,6 +392,8 @@ Or pass via command-line:
 
 When `base_url` is customized, `gemini-web2api` automatically switches its `Origin`, `Referer`, `SAPISIDHASH` calculations, and RPC endpoints to match your enterprise domain.
 
+**Browser-synced sessions (cookie mode):** XSRF tokens are origin-specific. When the extension syncs cookies, it also reports the origin of the tab it harvested from; the server persists it into the cookie file and uses it for all direct cookie-mode requests (discovery + generation + page-token fetch + BL refresh) — it takes precedence over `base_url`. So if you ever open `gemini.google.com` after configuring `vertexaisearch.cloud.google.com`, the server follows the tab, not the stale config. The `GET /bridge/cookies` status now reports both `synced_origin` and `configured_base_url`; a mismatch (`configured=gemini.google.com` + `synced=vertexaisearch...`) is exactly what an upstream HTTP 400 on every batchexecute means — either sync from the right tab or fix `base_url`.
+
 ### WorkBuddy / AI Coding Agent Integration
 
 `gemini-web2api` works as a drop-in OpenAI-compatible provider for coding agents like **WorkBuddy**, **CodeBuddy**, Cursor, Claude Code, Aider, and Cline. Because `gemini-web2api` natively proxies OpenAI function calling (`tools` / `tool_calls`), agents can autonomously inspect and edit local files.
