@@ -80,6 +80,18 @@ func (a *App) cookiesReady() bool {
 	return info.SAPISID != "" || strings.Contains(info.Cookie, "__Secure-1PSID")
 }
 
+// directModeUsable reports whether direct cookie mode can actually serve a
+// request: cookies present AND the synced origin hasn't told us it lacks the
+// Bard web RPC (Gemini Enterprise speaks Discovery Engine streamAssist —
+// bridge-only). Use this for routing/fallback decisions; use cookiesReady for
+// session-health reporting.
+func (a *App) directModeUsable() bool {
+	if a.Gem != nil && a.Gem.BardUnsupported() {
+		return false
+	}
+	return a.cookiesReady()
+}
+
 // sanitizeSyncedOrigin validates an extension-reported origin/base_url before it
 // is persisted into the cookie file: https:// URLs only, known Gemini-family
 // hosts only (the extension can only harvest XSRF tokens from these origins).
@@ -208,6 +220,10 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.CookieSync.recordSync()
+	// Fresh session — possibly from a different origin — so re-probe Bard RPC support.
+	if a.Gem != nil {
+		a.Gem.ClearBardUnsupported()
+	}
 	a.Logf("Session cookies synced from browser extension (%d bytes, xsrf=%t, origin=%s)", len(payload.Cookie), payload.XSRFToken != "", payload.BaseURL)
 
 	_, authErr, authErrAt := a.CookieSync.snapshot()

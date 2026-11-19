@@ -41,7 +41,7 @@ func (c *Client) DiscoveredModels() []DiscoveredModel {
 // EnsureModelsDiscovered performs dynamic model discovery if cookies are configured.
 // It is thread-safe and retries on failure after a 60-second cooldown.
 func (c *Client) EnsureModelsDiscovered() {
-	if c.Cookies == nil {
+	if c.Cookies == nil || c.BardUnsupported() {
 		return
 	}
 	info, err := c.Cookies.Load()
@@ -148,6 +148,9 @@ func (c *Client) DiscoverModels() ([]DiscoveredModel, error) {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			c.MarkBardUnsupported()
+		}
 		return nil, fmt.Errorf("batchexecute status %d", resp.StatusCode)
 	}
 

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/config"
@@ -53,6 +54,12 @@ type Client struct {
 	accountCapFld int
 	discMu        sync.Mutex
 	lastDiscFail  time.Time
+
+	// bardUnsupported latches true when the current origin answers the Bard web
+	// RPC paths with HTTP 404 — Gemini Enterprise (vertexaisearch.cloud.google.com)
+	// speaks the Discovery Engine streamAssist API instead, so direct cookie mode
+	// can never work there and requests must use the browser bridge.
+	bardUnsupported atomic.Bool
 }
 
 func NewClient(cfg config.Config) *Client {
@@ -197,7 +204,35 @@ func (c *Client) buildHeaders() http.Header {
 	return h
 }
 
+// BardUnsupported reports whether the synced origin lacks the Bard web RPC
+// (HTTP 404 observed) — i.e. a Gemini Enterprise deployment where direct
+// cookie mode cannot work and the browser bridge is the only path.
+func (c *Client) BardUnsupported() bool {
+	return c.bardUnsupported.Load()
+}
+
+// MarkBardUnsupported latches the no-Bard-RPC state (logged once per latch).
+func (c *Client) MarkBardUnsupported() {
+	if c.bardUnsupported.CompareAndSwap(false, true) {
+		log.Printf("Origin does not serve the Bard web RPC (HTTP 404) — Gemini Enterprise detected; direct cookie mode disabled, requests will use the browser bridge")
+	}
+}
+
+// ClearBardUnsupported resets the latch — called when fresh cookies sync, since
+// a new session may come from a different origin that does serve the Bard RPC.
+func (c *Client) ClearBardUnsupported() {
+	c.bardUnsupported.Store(false)
+}
+
 func (c *Client) triageStatus(resp *http.Response) error {
+	if resp.StatusCode == http.StatusNotFound {
+		c.MarkBardUnsupported()
+		return &UpstreamError{
+			Status: resp.StatusCode,
+			Kind:   "unsupported",
+			Msg:    "origin does not serve the Bard web RPC (HTTP 404) — Gemini Enterprise deployment; use the browser bridge (keep the Gemini tab open)",
+		}
+	}
 	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
 		// A redirect to accounts.google.com means the session cookies expired or the
 		// account was signed out — distinct from an IP-level sorry/index block.
