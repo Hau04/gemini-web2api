@@ -129,7 +129,23 @@ async function syncCookiesNow(reason) {
       const tabs = await chrome.tabs.query({ url: "*://gemini.google.com/*" });
       const entTabs = await chrome.tabs.query({ url: "*://vertexaisearch.cloud.google.com/*" });
       const bizTabs = await chrome.tabs.query({ url: "*://business.gemini.google/*" });
-      const tab = [...tabs, ...entTabs, ...bizTabs].find((t) => t && t.id);
+      const allTabs = [...tabs, ...entTabs, ...bizTabs];
+      const tab = allTabs.find((t) => t && t.id);
+
+      // Keep bridge tabs alive: Chrome Memory Saver discards idle tabs, killing
+      // the content script's poll/heartbeat loops — and a frozen tab cannot even
+      // report itself frozen (or fire timers). Opt every Gemini tab out of
+      // discarding, and proactively report any tab already discarded (the
+      // tabs.onUpdated event is not reliably fired for discard transitions).
+      for (const t of allTabs) {
+        if (!t || !t.id) continue;
+        try { await chrome.tabs.update(t.id, { autoDiscardable: false }); } catch (e) {}
+        if (t.discarded && frozenTabs.get(t.id) !== true) {
+          frozenTabs.set(t.id, true);
+          reportFrozen(t, true);
+        }
+      }
+
       if (tab) {
         xsrf = await extractXsrfFromTab(tab.id);
         const m = (tab.url || "").match(/\/u\/(\d+)\//);
@@ -193,6 +209,9 @@ const frozenTabs = new Map();
 if (typeof chrome !== "undefined" && chrome.tabs && chrome.runtime) {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (!tab || !tab.url || !GEMINI_URL_RE.test(tab.url)) return;
+
+  // Never let Memory Saver discard bridge tabs (kills the poll/heartbeat loops).
+  try { chrome.tabs.update(tabId, { autoDiscardable: false }).catch(() => {}); } catch (e) {}
 
   // Chrome exposes discarded (Memory Saver) as tab.discarded=true. When a tab is
   // discarded its content script is killed — from the server's point of view the

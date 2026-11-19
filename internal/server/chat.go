@@ -648,6 +648,21 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The bridge is not serving this request. Probe Bard-RPC support (60s failure
+	// backoff) and fail fast when direct cookie mode cannot work — no session
+	// cookies, or a Gemini Enterprise origin without the Bard RPC — with an
+	// actionable error instead of burning a doomed upstream attempt.
+	if a.cookiesReady() {
+		a.Gem.EnsureModelsDiscovered()
+	}
+	if !a.directModeUsable() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
+			"message": "browser bridge is not connected and direct cookie mode is unavailable on this origin (missing session cookies, or a Gemini Enterprise origin without the direct web RPC) — open Gemini in Chrome with the extension so the browser bridge can serve requests",
+			"type":    "bridge_offline",
+		}})
+		return
+	}
+
 	// Direct Gemini API mode: upload images to Gemini storage via cookies.
 	var fileRefs []string
 	if len(images) > 0 {

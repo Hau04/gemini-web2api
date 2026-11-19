@@ -227,10 +227,14 @@ func (c *Client) MarkBardUnsupported() {
 	}
 }
 
-// ClearBardUnsupported resets the latch — called when fresh cookies sync, since
-// a new session may come from a different origin that does serve the Bard RPC.
+// ClearBardUnsupported resets the latch — called when a fresh session syncs from
+// a DIFFERENT origin. Also resets the discovery backoff so the next request
+// re-probes immediately instead of waiting out the previous failure window.
 func (c *Client) ClearBardUnsupported() {
 	c.bardUnsupported.Store(false)
+	c.discMu.Lock()
+	c.lastDiscFail = time.Time{}
+	c.discMu.Unlock()
 }
 
 func (c *Client) triageStatus(resp *http.Response) error {
@@ -311,6 +315,15 @@ func (c *Client) triageStatus(resp *http.Response) error {
 
 func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
 	c.EnsureModelsDiscovered()
+	// Fail fast on origins without the Bard web RPC (Gemini Enterprise): the probe
+	// above latches the fact — a direct request can never succeed there.
+	if c.BardUnsupported() {
+		return "", &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "origin does not serve the Bard web RPC (Gemini Enterprise) — direct cookie mode cannot work; requests must use the browser bridge",
+		}
+	}
 
 	cookieInfo, _ := c.Cookies.Load()
 	cfg := c.Cfg
@@ -401,6 +414,15 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 
 func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
 	c.EnsureModelsDiscovered()
+	// Same fail-fast as Generate: an origin without the Bard web RPC can never
+	// serve a direct request.
+	if c.BardUnsupported() {
+		return &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "origin does not serve the Bard web RPC (Gemini Enterprise) — direct cookie mode cannot work; requests must use the browser bridge",
+		}
+	}
 
 	cookieInfo, _ := c.Cookies.Load()
 	cfg := c.Cfg

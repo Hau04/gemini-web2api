@@ -264,20 +264,81 @@ func TestOversizedPromptStaysOnBridgeWhenBardUnsupported(t *testing.T) {
 	}
 }
 
-// A fresh cookie sync must re-enable direct mode probing (new session may be a
-// different origin).
-func TestCookieSyncClearsBardUnsupported(t *testing.T) {
+// A fresh cookie sync must re-enable direct mode probing when the session moved
+// to a different origin; same-origin syncs keep the latch (no re-probe churn).
+func TestCookieSyncNewOriginClearsBardUnsupported(t *testing.T) {
 	app, _ := newCookieTestApp(t)
+
+	// Establish a stored Enterprise origin.
+	payload1 := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123","origin":"https://vertexaisearch.cloud.google.com"}`
+	req1 := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload1))
+	w1 := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first sync expected 200, got %d: %s", w1.Code, w1.Body.String())
+	}
+
 	app.Gem.MarkBardUnsupported()
 
-	payload := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123"}`
-	req := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload))
-	w := httptest.NewRecorder()
-	app.Handler().ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	// Same-origin sync: latch must survive (periodic syncs are frequent).
+	req2 := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload1))
+	w2 := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("second sync expected 200, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if !app.Gem.BardUnsupported() {
+		t.Fatal("same-origin cookie sync must NOT clear the BardUnsupported latch")
+	}
+
+	// Different origin: latch must clear so the next request re-probes.
+	payload3 := `{"cookie":"SAPISID=abc123; __Secure-1PSID=xyz","sapisid":"abc123","origin":"https://gemini.google.com"}`
+	req3 := httptest.NewRequest(http.MethodPost, "/bridge/cookies", strings.NewReader(payload3))
+	w3 := httptest.NewRecorder()
+	app.Handler().ServeHTTP(w3, req3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("third sync expected 200, got %d: %s", w3.Code, w3.Body.String())
 	}
 	if app.Gem.BardUnsupported() {
-		t.Fatal("cookie sync must clear the BardUnsupported latch")
+		t.Fatal("cookie sync from a new origin must clear the BardUnsupported latch")
+	}
+}
+
+// When no browser tab is connected AND direct cookie mode cannot serve the
+// request (no cookies, or an Enterprise origin latched as Bard-unsupported),
+// the handler must fail fast with an actionable 503 instead of a cryptic
+// upstream 502.
+func TestBridgeOfflineWithoutDirectModeReturns503(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookie.json")
+	if err := os.WriteFile(cookieFile, []byte(`{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.CookieFile = cookieFile
+	cfg.RetryAttempts = 1
+	cfg.RequestTimeoutSec = 2
+
+	app := New(cfg, "test")
+	app.Gem.HTTP = failingRequester{}
+	app.Gem.MarkBardUnsupported()
+	handler := app.Handler()
+
+	// No heartbeat: the bridge reports disconnected.
+	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when neither bridge nor direct mode is usable, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "bridge_offline") {
+		t.Fatalf("expected bridge_offline error type, got: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "open Gemini in Chrome") {
+		t.Fatalf("error must tell the user to open the tab, got: %s", rec.Body.String())
 	}
 }
