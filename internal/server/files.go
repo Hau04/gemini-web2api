@@ -430,6 +430,28 @@ func codeFenceLangForFilename(name string) string {
 	}
 }
 
+// PromptMayReferenceLocalFiles reports whether the latest user message contains
+// path-like or attachment-notice references that DiscoverLocalUploadFiles would
+// try to read from disk and attach through the browser bridge. Pure string
+// check — no disk I/O — used for routing decisions before the bridge path runs.
+func PromptMayReferenceLocalFiles(messages []models.OpenAIMessage) bool {
+	if len(messages) == 0 {
+		return false
+	}
+	last := messages[len(messages)-1]
+	if last.Role != "user" && last.Role != "" {
+		return false
+	}
+	text, _ := format.ExtractMessageContent(last)
+	if strings.TrimSpace(text) == "" {
+		return false
+	}
+	if len(ExtractCandidatePaths(text)) > 0 {
+		return true
+	}
+	return len(ExtractAttachedFilenames(text)) > 0
+}
+
 // DiscoverLocalUploadFiles inspects the latest message (when it is a user turn) for references
 // to existing local PDFs, Office documents, media files, or long source code files
 // (>= largeCodeMinBytes) and reads them for direct upload through the browser bridge.

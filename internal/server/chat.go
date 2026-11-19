@@ -226,6 +226,16 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		a.Logf("Browser bridge degraded after recent timeout — routing via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
 		bridgeAlive = false
 	}
+	// Oversized prompts would be spilled into a .txt attachment and uploaded through
+	// the browser's file UI — which stalls on some Gemini Enterprise frontends.
+	// Cookie mode has no composer limit (the full prompt goes inline into the
+	// batchexecute body), so prefer it whenever the prompt would trigger spillover
+	// and no local files need the browser upload UI.
+	if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 &&
+		len(prompt) > a.Cfg.BridgeSpilloverChars && !PromptMayReferenceLocalFiles(req.Messages) {
+		a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing via direct cookie mode (no browser file upload needed)", len(prompt))
+		bridgeAlive = false
+	}
 	if bridgeAlive {
 		if a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}

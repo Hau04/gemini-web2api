@@ -145,6 +145,13 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			a.Logf("Browser bridge degraded after recent timeout — routing responses request via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
 			bridgeAlive = false
 		}
+		// Same spillover-avoidance as /v1/chat/completions: cookie mode inlines
+		// oversized prompts instead of uploading a .txt through the browser UI.
+		if bridgeAlive && a.cookiesReady() && a.Cfg.BridgeSpilloverChars > 0 &&
+			len(prompt) > a.Cfg.BridgeSpilloverChars && !PromptMayReferenceLocalFiles(chatReq.Messages) {
+			a.Logf("Prompt %d chars exceeds bridge spillover threshold — routing responses request via direct cookie mode", len(prompt))
+			bridgeAlive = false
+		}
 		if bridgeAlive && a.Bridge.IsPaused() {
 			pErr := &bridge.PausedError{}
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
