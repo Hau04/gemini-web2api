@@ -701,7 +701,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 	if !a.directModeUsable() {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{
-			"message": "direct cookie mode is unavailable: no session cookies have been synced from the browser extension — open Gemini in Chrome so the extension can sync your session cookies, then retry",
+			"message": "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json (your streamAssist URL from Google Cloud Console), or send one prompt through the open Gemini tab so the extension can capture a streamAssist template, then close the tab",
 			"type":    "bridge_offline",
 		}})
 		return
