@@ -318,3 +318,42 @@ func TestTriageStatus500DoesNotLatchBardUnsupported(t *testing.T) {
 		t.Fatal("non-404 status must not latch BardUnsupported")
 	}
 }
+
+type counting404Requester struct{ calls int }
+
+func (s *counting404Requester) Do(req *http.Request) (*http.Response, error) {
+	s.calls++
+	return &http.Response{
+		StatusCode: http.StatusNotFound,
+		Body:       io.NopCloser(strings.NewReader("Not Found")),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestUnsupportedOriginIsNotRetried(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookie.json")
+	content := `{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc","xsrf_token":"tok"}`
+	if err := os.WriteFile(cookieFile, []byte(content), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	c := NewClient(config.Config{CookieFile: cookieFile, RetryAttempts: 3})
+	stub := &counting404Requester{}
+	c.HTTP = stub
+
+	_, err := c.Generate("hello", ModelOptions{ModelName: "gemini-2.5-pro"}, nil)
+	if err == nil {
+		t.Fatal("expected error for 404 origin")
+	}
+	// 1 discovery probe + exactly 1 generation attempt — never 3 retries.
+	if stub.calls != 2 {
+		t.Fatalf("unsupported origin must not be retried: got %d upstream calls, want 2 (discovery + 1 attempt)", stub.calls)
+	}
+	if !c.BardUnsupported() {
+		t.Fatal("BardUnsupported must be latched after 404s")
+	}
+	if !IsUnsupported(err) {
+		t.Fatalf("error must be IsUnsupported, got: %v", err)
+	}
+}
