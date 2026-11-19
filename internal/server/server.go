@@ -60,6 +60,7 @@ func New(cfg config.Config, version string) *App {
 		cfg.BridgeMaxPer10Min,
 	)
 	hub.SetHourlyLimit(cfg.BridgeMaxPerHour)
+	hub.SetNoContentTimeout(time.Duration(cfg.BridgeNoContentTimeoutSec) * time.Second)
 	if cfg.BridgePacingStateFile != "" {
 		hub.SetPacingStateFile(cfg.BridgePacingStateFile)
 	}

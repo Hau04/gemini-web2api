@@ -1841,6 +1841,109 @@ func TestBridgeChatModeOverridePrecedence(t *testing.T) {
 	})
 }
 
+func TestBridgeFrozenTabFailsInFlightTurnImmediately(t *testing.T) {
+	hub := bridge.NewHub()
+	hub.SetPacing(0, 0, 0)
+	hub.UpdateTabSession("gemini.google.com", "tab_frz", "1")
+
+	pickedUp := make(chan struct{})
+	go func() {
+		defer close(pickedUp)
+		req, _ := hub.WaitForNextRequestForSession(context.Background(), "gemini.google.com", "tab_frz", "1", 2*time.Second)
+		_ = req // tab picks up the request, then Chrome freezes it before it can produce anything
+	}()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := hub.Generate(context.Background(), "hello", "gemini-4-hydrogen")
+		errCh <- err
+	}()
+
+	<-pickedUp
+	// Chrome Memory Saver freezes the tab mid-turn (e.g. while it is uploading a
+	// spilled prompt attachment): the in-flight turn must abort at once so the
+	// server can fall back to direct cookie mode while the client is still connected.
+	hub.SetFrozen(true)
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "frozen") {
+			t.Fatalf("expected frozen abort error, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("in-flight turn was not aborted when the tab froze")
+	}
+
+	// A resumed tab must not re-run the abandoned turn.
+	hub.SetFrozen(false)
+	if req, _ := hub.WaitForNextRequestForSession(context.Background(), "gemini.google.com", "tab_frz", "1", 300*time.Millisecond); req != nil {
+		t.Fatalf("abandoned request must not be redelivered, got %+v", req)
+	}
+}
+
+func TestBridgeNoContentTimeoutFailsStuckTurn(t *testing.T) {
+	hub := bridge.NewHub()
+	hub.SetPacing(0, 0, 0)
+	hub.SetNoContentTimeout(150 * time.Millisecond)
+	hub.UpdateTabSession("gemini.google.com", "tab_stuck", "1")
+
+	go func() {
+		req, _ := hub.WaitForNextRequestForSession(context.Background(), "gemini.google.com", "tab_stuck", "1", 2*time.Second)
+		if req == nil {
+			return
+		}
+		// Simulate a throttled background tab: only empty keepalive chunks (each
+		// resetting the 240s idle timer), never any content — forever.
+		for i := 0; i < 30; i++ {
+			if err := hub.SubmitChunk(bridge.Chunk{ID: req.ID, Status: "upload"}); err != nil {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+	}()
+
+	start := time.Now()
+	_, err := hub.Generate(context.Background(), "hello", "gemini-4-hydrogen")
+	if err == nil || !strings.Contains(err.Error(), "no content") {
+		t.Fatalf("expected no-content timeout error, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("no-content timeout took too long: %v", elapsed)
+	}
+}
+
+func TestBridgeGeneratingPhaseResetsNoContentWindow(t *testing.T) {
+	hub := bridge.NewHub()
+	hub.SetPacing(0, 0, 0)
+	hub.SetNoContentTimeout(150 * time.Millisecond)
+	hub.UpdateTabSession("gemini.google.com", "tab_gen", "1")
+
+	go func() {
+		req, _ := hub.WaitForNextRequestForSession(context.Background(), "gemini.google.com", "tab_gen", "1", 2*time.Second)
+		if req == nil {
+			return
+		}
+		// A tab whose Gemini answer is still being generated reports phase
+		// "generating" — that is real progress and must keep the turn alive
+		// beyond the no-content window even before the first text arrives.
+		for i := 0; i < 12; i++ {
+			if err := hub.SubmitChunk(bridge.Chunk{ID: req.ID, Status: "generating"}); err != nil {
+				return
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+		_ = hub.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "answer", Done: true})
+	}()
+
+	text, err := hub.Generate(context.Background(), "hello", "gemini-4-hydrogen")
+	if err != nil {
+		t.Fatalf("generating-phase keepalives must not trip the no-content cap: %v", err)
+	}
+	if text != "answer" {
+		t.Fatalf("expected %q, got %q", "answer", text)
+	}
+}
+
 func TestBridgePersistentPacingStateSurvivesRestartAndHourlyLimit(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "pacing_state.json")
 

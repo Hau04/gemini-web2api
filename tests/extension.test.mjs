@@ -764,6 +764,47 @@ test("findModelOption and findModelTriggerElement NEVER click blog.google announ
   assert.equal(bridge.findModelOption(target, null, doc), realOption);
 });
 
+test("findModelOption picks the exact entry from a Gemini Enterprise model picker (all models)", () => {
+  const { doc, el, txt } = createMockDOM();
+
+  // Replicates the real Enterprise picker: trigger button + overlay menu with
+  // Auto (subtitle), 4 Hydrogen, 4 Carbon, 4 Argon, 3.8 Flash, 3.5 Flash, 2.5 Pro.
+  const trigger = el("button", { "aria-haspopup": "menu" });
+  trigger.appendChild(txt("Auto"));
+  doc.body.appendChild(trigger);
+
+  const overlay = el("div", { class: "cdk-overlay-pane", role: "menu" });
+  const items = {};
+  const labels = [
+    ["Auto", "We choose the best fit"],
+    ["Gemini 4 Hydrogen", ""],
+    ["Gemini 4 Carbon", ""],
+    ["Gemini 4 Argon", ""],
+    ["Gemini 3.8 Flash", ""],
+    ["Gemini 3.5 Flash", ""],
+    ["Gemini 2.5 Pro", ""]
+  ];
+  for (const [label, sub] of labels) {
+    const item = el("button", { role: "menuitemradio" });
+    item.appendChild(txt(label + (sub ? "\n" + sub : "")));
+    overlay.appendChild(item);
+    items[label] = item;
+  }
+  doc.body.appendChild(overlay);
+
+  const pick = (requested) => bridge.findModelOption(bridge.resolveModelKeywords(requested), trigger, doc);
+
+  assert.equal(pick("gemini-4-argon"), items["Gemini 4 Argon"], "argon must select Argon, not stay on Hydrogen");
+  assert.equal(pick("gemini-4-carbon"), items["Gemini 4 Carbon"]);
+  assert.equal(pick("gemini-4-hydrogen"), items["Gemini 4 Hydrogen"]);
+  assert.equal(pick("carbon"), items["Gemini 4 Carbon"], "aliases must work");
+  assert.equal(pick("gemini-3.8-flash"), items["Gemini 3.8 Flash"], "3.8 must not fall onto 3.5 Flash");
+  assert.equal(pick("gemini-3.5-flash"), items["Gemini 3.5 Flash"], "3.5 must not fall onto 3.8 Flash");
+  assert.equal(pick("gemini-3.5-flash-thinking"), items["Gemini 3.5 Flash"]);
+  assert.equal(pick("gemini-2.5-pro"), items["Gemini 2.5 Pro"]);
+  assert.equal(pick("gemini-auto"), items["Auto"]);
+});
+
 test("isRateLimitMessage detects Google 429 / quota / traffic warnings", () => {
   assert.equal(bridge.isRateLimitMessage("HTTP 429"), true);
   assert.equal(bridge.isRateLimitMessage("Too many requests, please try again later"), true);

@@ -171,16 +171,37 @@
     return false;
   }
 
+  // Maps a requested API model name to picker-matching info:
+  //   keywords: candidate option text must contain one of these (lowercased)
+  //   exclude:  word-boundary tokens belonging to OTHER picker entries — a
+  //             candidate containing any of them is rejected (prevents clicking
+  //             the whole menu container, and tells 3.8 Flash apart from 3.5).
   function resolveModelKeywords(requestedModel) {
     const m = String(requestedModel || "").trim().toLowerCase();
     if (!m) return null;
-    if (m.includes("hydrogen")) return { family: "hydrogen", keywords: ["gemini 4 hydrogen", "hydrogen"], label: "Gemini 4 Hydrogen" };
-    if (m.includes("argon")) return { family: "argon", keywords: ["gemini 4 argon", "argon"], label: "Gemini 4 Argon" };
-    if (m.includes("carbon")) return { family: "carbon", keywords: ["gemini 4 carbon", "carbon"], label: "Gemini 4 Carbon" };
-    if (m.includes("flash")) return { family: "flash", keywords: ["flash"], label: "Gemini Flash" };
-    if (m.includes("pro")) return { family: "pro", keywords: ["pro"], label: "Gemini Pro" };
-    if (m === "auto" || m === "gemini-auto") return { family: "auto", keywords: ["auto"], label: "Auto" };
+    const FAMILIES = ["hydrogen", "carbon", "argon"];
+    if (m.includes("hydrogen")) return { family: "hydrogen", keywords: ["gemini 4 hydrogen", "hydrogen"], exclude: ["carbon", "argon"], label: "Gemini 4 Hydrogen" };
+    if (m.includes("argon")) return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["hydrogen", "carbon"], label: "Gemini 4 Argon" };
+    if (m.includes("carbon")) return { family: "carbon", keywords: ["gemini 4 carbon", "carbon"], exclude: ["hydrogen", "argon"], label: "Gemini 4 Carbon" };
+    if (m === "gemini-4" || m === "gemini 4") return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["hydrogen", "carbon"], label: "Gemini 4 Argon" }; // server registry aliases gemini-4 -> argon
+    const fm = m.match(/(\d+(?:\.\d+)?)[\s-]*flash/) || m.match(/flash[\s-]*(\d+(?:\.\d+)?)/);
+    if (fm) {
+      const v = fm[1];
+      return { family: "flash", keywords: [`gemini ${v} flash`, `${v} flash`, v], exclude: FAMILIES.concat(["pro", "auto"]), label: `Gemini ${v} Flash` };
+    }
+    const pm = m.match(/(\d+(?:\.\d+)?)[\s-]*pro/) || m.match(/pro[\s-]*(\d+(?:\.\d+)?)/);
+    if (pm) {
+      const v = pm[1];
+      return { family: "pro", keywords: [`gemini ${v} pro`, `${v} pro`, v], exclude: FAMILIES.concat(["flash", "auto"]), label: `Gemini ${v} Pro` };
+    }
+    if (m.includes("flash")) return { family: "flash", keywords: ["flash"], exclude: FAMILIES.concat(["pro", "auto"]), label: "Gemini Flash" };
+    if (m.includes("pro")) return { family: "pro", keywords: ["pro"], exclude: FAMILIES.concat(["flash", "auto"]), label: "Gemini Pro" };
+    if (m === "auto" || m === "gemini-auto") return { family: "auto", keywords: ["auto"], exclude: FAMILIES.concat(["flash", "pro"]), label: "Auto" };
     return null;
+  }
+
+  function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
   function escapeHtml(str) {
@@ -977,7 +998,9 @@
     const searchRoot = root || (typeof document !== "undefined" ? document : null);
     if (!searchRoot) return null;
 
-    const competing = ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
+    const competing = (Array.isArray(target.exclude) && target.exclude.length > 0)
+      ? target.exclude
+      : ALL_MODEL_FAMILIES.filter((f) => f !== target.family);
     const all = queryDeep("*", searchRoot);
     const matches = [];
 
@@ -996,7 +1019,7 @@
       if (!target.keywords.some((kw) => lower.includes(kw))) continue;
 
       // Reject menu containers that list multiple competing models together
-      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(lower))) {
+      if (competing.some((other) => new RegExp(`\\b${escapeRegExp(other)}\\b`, "i").test(lower))) {
         continue;
       }
 
@@ -1014,7 +1037,7 @@
 
       const cText = String(extractControlLabel(clickable) || clickable.innerText || clickable.textContent || "").trim();
       if (!cText || cText.length > 160 || PROMO_LINK_TEXT_RE.test(cText)) continue;
-      if (competing.some((other) => new RegExp(`\\b${other}\\b`, "i").test(cText.toLowerCase()))) {
+      if (competing.some((other) => new RegExp(`\\b${escapeRegExp(other)}\\b`, "i").test(cText.toLowerCase()))) {
         continue;
       }
 
@@ -1455,6 +1478,9 @@
   let lastFocusedInput = null;
   let autoRefreshEnabled = false;
   let currentActiveStream = null;
+  // Current turn phase, reported with keepalive chunks so the server can tell a
+  // working tab (phase advances / "generating") from a frozen or stuck one.
+  let currentTurnPhase = "idle";
   let activeNetCapture = null;
   let convGen = 1;
   let lastConvUrlKey = `${location.pathname}${location.search}`;
@@ -2742,7 +2768,9 @@
     try {
     // 0. If WorkBuddy/client started a brand-new chat, open a fresh Gemini chat first
     // so previous conversation memory & files never bleed into the new chat!
+    currentTurnPhase = "starting";
     if (newChat) {
+      currentTurnPhase = "new-chat";
       setStatus("busy", "Web2API: Starting fresh chat... ✨");
       try {
         await startFreshChatOnPage();
@@ -2755,6 +2783,7 @@
     let inputArea = await findChatInput(5000);
 
     // B. Switch model dropdown if the requested model specifies a known family
+    currentTurnPhase = "model-select";
     try {
       await ensureModelSelected(model);
     } catch (e) {
@@ -2769,6 +2798,7 @@
     let uploadedSuccessfully = false;
     const uniqueAttachments = deduplicateAttachments(attachments);
     if (uniqueAttachments.length > 0) {
+      currentTurnPhase = "upload";
       const label = uniqueAttachments.map((a) => (a && a.filename) || "file").join(", ");
       setStatus("busy", `Web2API: Uploading ${label}... 📎`);
       try {
@@ -2805,6 +2835,7 @@
     activeNetCapture = netCapture;
 
     try {
+      currentTurnPhase = "paste";
       let inputResult = setInputValue(inputArea, effectivePrompt);
       if (!inputResult.ok) {
         console.warn("[Web2API Bridge] Initial setInputValue left input empty; re-locating composer and retrying...");
@@ -2821,6 +2852,7 @@
         : 220 + Math.floor(Math.random() * 280);
       await new Promise((r) => setTimeout(r, preSendDelay));
 
+      currentTurnPhase = "submit";
       let submitSuccess = await submitPrompt(inputArea, netCapture);
       if (!submitSuccess && !netCapture.started && !netCapture.active && !isGenerating(netCapture)) {
         // Give slower Gemini Enterprise / post-upload network requests a generous grace window
@@ -2848,6 +2880,7 @@
       );
 
       // C. Watch for Streaming Response (Network primary, DOM fallback)
+      currentTurnPhase = "generating";
       await observeResponseStream(reqId, inputArea, effectivePrompt, baselineMap, netCapture, {
         submitSuccess,
         inputResult,
@@ -2877,6 +2910,7 @@
     }
     } finally {
       clearInterval(keepaliveTimer);
+      currentTurnPhase = "idle";
     }
   }
 
@@ -3248,7 +3282,8 @@
         id: id,
         text: chunkText,
         done: isDone,
-        error: err || ""
+        error: err || "",
+        status: currentTurnPhase
       };
       if (rateLimited) {
         payload.rate_limited = true;

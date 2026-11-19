@@ -97,6 +97,11 @@ var MODELS = map[string]Model{
 		Desc:  "Pro with enhanced output (experimental)",
 		Extra: map[int]any{31: 2, 80: 3},
 	},
+	"gemini-2.5-pro": {
+		Mode:  3,
+		Think: 4,
+		Desc:  "Gemini 2.5 Pro (bridge selects it in the tab picker; direct mode routes via its discovered upstream ID)",
+	},
 	"gemini-auto": {
 		Mode:  4,
 		Think: 4,

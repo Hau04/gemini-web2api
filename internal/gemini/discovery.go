@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -270,12 +271,70 @@ func firstString(vs ...any) string {
 	return ""
 }
 
+var modelVersionRe = regexp.MustCompile(`\d+\.\d+`)
+
+// modelNameTokens extracts distinctive lowercase tokens from a registry model name
+// for matching against discovered display names: "gemini-4-argon" -> ["argon"],
+// "gemini-3.8-flash" -> ["3.8", "flash"], "gemini-2.5-pro" -> ["2.5", "pro"].
+// Returns nil when the name carries no distinctive token (e.g. "gemini-4" or a
+// version-less "gemini-flash-lite" — too ambiguous for safe name matching).
+func modelNameTokens(name string) []string {
+	n := strings.ToLower(strings.TrimSpace(name))
+	for _, fam := range []string{"hydrogen", "argon", "carbon"} {
+		if strings.Contains(n, fam) {
+			return []string{fam}
+		}
+	}
+	fam := ""
+	if strings.Contains(n, "flash") {
+		fam = "flash"
+	} else if strings.Contains(n, "pro") {
+		fam = "pro"
+	}
+	if fam == "" {
+		return nil
+	}
+	ver := modelVersionRe.FindString(n)
+	if ver == "" {
+		return nil
+	}
+	return []string{ver, fam}
+}
+
+// matchDiscoveredByName returns the discovered model whose display text contains
+// every distinctive token of the requested model name (word-boundary matched so
+// "pro" never hits "professional"), or nil when nothing matches.
+func matchDiscoveredByName(models []DiscoveredModel, name string) *DiscoveredModel {
+	tokens := modelNameTokens(name)
+	if len(tokens) == 0 {
+		return nil
+	}
+	tokenRes := make([]*regexp.Regexp, 0, len(tokens))
+	for _, tok := range tokens {
+		tokenRes = append(tokenRes, regexp.MustCompile(`\b`+regexp.QuoteMeta(tok)+`\b`))
+	}
+	for i := range models {
+		text := strings.ToLower(models[i].Display + " " + models[i].Category + " " + models[i].Desc)
+		ok := true
+		for _, re := range tokenRes {
+			if !re.MatchString(text) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return &models[i]
+		}
+	}
+	return nil
+}
+
 // resolveModelHeader builds the upstream x-goog-ext-525001261-jspb header value
 // and returns the target upstream mode ID.
 // Model headers are only attached when the model explicitly configures a ModelHeader
 // in the registry and the session has authenticated cookies.
 func (c *Client) resolveModelHeader(opt ModelOptions, reqUUID string) (string, int) {
-	if opt.ModelHeader == "" || c.Cookies == nil {
+	if c.Cookies == nil {
 		return "", opt.ModelID
 	}
 
@@ -290,12 +349,24 @@ func (c *Client) resolveModelHeader(opt ModelOptions, reqUUID string) (string, i
 	capFld := c.accountCapFld
 	c.modelsMu.RUnlock()
 
-	var target *DiscoveredModel
-	for i := range models {
-		if models[i].ID == opt.ModelHeader {
-			target = &models[i]
-			break
+	// Name match first: the static registry reuses a single header ID for several
+	// 4.x models (argon/carbon/hydrogen all share it), while discovery returns each
+	// model's true upstream ID — matching by display name routes argon/carbon/etc.
+	// to the model the user actually asked for instead of the registry's default.
+	target := matchDiscoveredByName(models, opt.ModelName)
+	if target == nil && opt.ModelHeader != "" {
+		for i := range models {
+			if models[i].ID == opt.ModelHeader {
+				target = &models[i]
+				break
+			}
 		}
+	}
+
+	if opt.ModelHeader == "" && target == nil {
+		// No static header configured and no discovered model matches the name —
+		// keep the legacy headerless routing.
+		return "", opt.ModelID
 	}
 
 	targetID := opt.ModelHeader

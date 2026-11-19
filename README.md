@@ -222,6 +222,7 @@ Supports Google native API endpoints:
 | `gemini-3.5-flash-thinking`      | Extended thinking, longest output            | **~20k chars**  |
 | `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth                      | ~15k chars      |
 | `gemini-3.1-pro`                 | Advanced math & code (needs Pro cookie)      | ~12k chars      |
+| `gemini-2.5-pro`                 | Gemini 2.5 Pro                               | ~12k chars      |
 | `gemini-auto`                    | Auto model selection                         | varies          |
 | `gemini-flash-lite`              | Fastest answers, lightweight                 | ~10k chars      |
 
@@ -239,10 +240,12 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 In **bridge mode**, each request either starts a fresh chat in the open Gemini tab or appends to the chat currently open there. Three ways to control it, in priority order:
 
-1. **Per-request model suffix** — append `@new` (or `@fresh`/`@newchat`) to force a fresh chat, `@continue` (or `@cont`) to keep appending to the open chat. Combines with `@think=N` in any order:
+1. **Per-request model suffix** — append `@new` (or `@fresh`/`@newchat`) to force a fresh chat, `@continue` (or `@cont`) to keep appending to the open chat. Works on **any** model name or alias, and combines with `@think=N` in any order:
    ```text
    gemini-4-hydrogen@new                # this request starts a brand-new chat
-   gemini-4-hydrogen@think=0@continue   # deep thinking, keep the open chat (incl. Gemini memory)
+   gemini-4-carbon@continue             # keep the open chat (incl. Gemini memory)
+   gemini-4-carbon@think=0@continue     # deep thinking, keep the open chat
+   carbon@new                           # aliases work too
    ```
 2. **Extension popup "Chat Mode" selector** — *Auto (recommended)* / *Always new chat* / *Continue open chat*. The choice is pushed to the server (`POST /bridge/chatmode`) and persists until changed. With *Continue open chat*, click any old chat in the Gemini history sidebar first — API turns then keep adding to that conversation.
 3. **Auto heuristic (default)** — a brand-new client conversation (e.g. WorkBuddy "New Chat") starts a fresh browser chat; follow-up turns continue it.
@@ -258,6 +261,8 @@ Every API response (both JSON and streaming SSE) includes HTTP response headers 
 ### 1. Dynamic Model Discovery & Upstream Routing Headers
 
 When authenticated with account cookies, the proxy dynamically queries Gemini's `otAQ7b` RPC during startup to discover available models and account tier capacity. It attaches the required upstream routing headers (`x-goog-ext-525001261-jspb`) matching web application behavior, allowing models like Gemini 4 Argon to route properly.
+
+Discovered models are matched **by display name** (e.g. `gemini-4-carbon` → the discovered "4 Carbon" entry), so every model in the account's picker gets its own true upstream ID — argon/carbon/hydrogen no longer share one static header. In **bridge mode** the extension selects the exact entry in the web model dropdown (including versioned entries like `3.8 Flash` vs `3.5 Flash` and `2.5 Pro`).
 
 ### 2. Vision / Multimodal Uploads
 
@@ -350,6 +355,7 @@ When running with the Live Web Bridge, `gemini-web2api` includes built-in protec
 - **Direct File, PDF & Long-Code Upload**: OpenAI `file` / `input_file` / `document` / `image_url` parts are uploaded straight into your open Gemini tab (no cookies required). For direct `localhost` agent requests (such as WorkBuddy), referenced local PDFs, Office documents, images, and **long source code files (`>= bridge_large_code_upload_bytes`, default 12 KB)** are automatically attached verbatim (up to 25 MB, max 5 files/turn) and automatically refreshed only when edited on disk.
 - **Oversized Prompt / Tool-Result Spillover (`bridge_spillover_chars: 18000`)**: Prompts or huge `read_file` tool outputs exceeding 18 KB are automatically uploaded as a `.txt` attachment instead of being slammed into the web input box, preventing UI truncation and repetitive re-reads.
 - **Delta-Turn Context (`bridge_delta_context: true`)**: Follow-up turns in the same open Gemini tab send only the newly appended user/tool messages rather than re-pasting the full conversation history and tool schemas every turn (auto-resets on refresh or New Chat).
+- **Frozen/Stuck Tab Failover (`bridge_no_content_timeout_sec: 120`)**: If Chrome freezes the tab mid-turn (Memory Saver) the in-flight request is aborted instantly and retried via direct cookie mode — instead of hanging until your client times out. Turns that produce only keepalives (no content) for longer than this limit are also failed over; a tab actively generating (`"generating"` phase) is never cut off by this cap. Set to `0` to disable.
 - **Adaptive Anti-Ban Pacing & 429 Circuit Breaker**: Combines base cooldown (`bridge_min_interval_ms: 2500`), random human-like jitter (`bridge_jitter_ms: 1500`), progressive burst scaling during heavy coding loops, a rolling 10-minute window cap (`bridge_max_per_10min: 18`), and an automatic exponential cool-off circuit breaker (returning HTTP `429` + `Retry-After`) if Google signals rate limiting.
 
 All options can be tuned in `config.json`:
@@ -362,7 +368,8 @@ All options can be tuned in `config.json`:
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 12288,
   "bridge_spillover_chars": 18000,
-  "bridge_delta_context": true
+  "bridge_delta_context": true,
+  "bridge_no_content_timeout_sec": 120
 }
 ```
 
