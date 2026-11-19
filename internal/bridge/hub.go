@@ -46,6 +46,11 @@ type Chunk struct {
 	Done        bool   `json:"done,omitempty"`
 	Error       string `json:"error,omitempty"`
 	RateLimited bool   `json:"rate_limited,omitempty"`
+	// Status carries the content script's current turn phase on keepalive
+	// (empty-text) chunks: "starting", "new-chat", "model-select", "upload",
+	// "paste", "submit", "generating". The server uses it to tell a working tab
+	// (phase advances / generating) from a stuck one during long no-content phases.
+	Status      string `json:"status,omitempty"`
 }
 
 // PausedError is returned when the user temporarily pauses the bridge from the
@@ -130,6 +135,7 @@ type Hub struct {
 	frozen                atomic.Bool
 	degradedUntil         time.Time
 	chatModeOverride      string
+	noContentTimeout      time.Duration
 	clientHeartbeats      map[string]time.Time
 	pending               []*Request
 	inFlight              map[string]*inFlightEntry
@@ -350,9 +356,47 @@ func (h *Hub) CooldownRemaining() time.Duration {
 
 // SetFrozen records whether the browser tab is currently frozen by Chrome
 // (Memory Saver / Energy Saver). A frozen tab cannot run the content script,
-// so requests must route via the direct cookie mode instead.
+// so requests must route via the direct cookie mode instead. Transitioning to
+// frozen also fails every in-flight turn immediately: the frozen tab will never
+// finish them, and the error lets the server retry via direct cookie mode while
+// the API client is still connected (instead of hanging until the client gives up).
 func (h *Hub) SetFrozen(frozen bool) {
 	h.frozen.Store(frozen)
+	if frozen {
+		h.failAllInFlight("browser tab frozen by Chrome (Memory Saver / Energy Saver) mid-turn — aborting so the server can retry via direct cookie mode")
+	}
+}
+
+// failAllInFlight delivers an error chunk to every active waiter and drops
+// the corresponding queued requests so a tab that wakes up later never re-runs a
+// turn the server has already abandoned.
+func (h *Hub) failAllInFlight(msg string) {
+	h.mu.Lock()
+	type waiter struct {
+		id string
+		ch chan Chunk
+	}
+	ws := make([]waiter, 0, len(h.waiters))
+	for id, ch := range h.waiters {
+		ws = append(ws, waiter{id: id, ch: ch})
+		delete(h.inFlight, id)
+	}
+	remaining := h.pending[:0]
+	for _, r := range h.pending {
+		if _, abandoned := h.waiters[r.ID]; abandoned {
+			continue
+		}
+		remaining = append(remaining, r)
+	}
+	h.pending = remaining
+	h.mu.Unlock()
+
+	for _, w := range ws {
+		select {
+		case w.ch <- Chunk{ID: w.id, Error: msg, Done: true}:
+		default:
+		}
+	}
 }
 
 // IsFrozen reports whether the connected browser tab is frozen.
@@ -395,6 +439,16 @@ func (h *Hub) ClearDegraded() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.degradedUntil = time.Time{}
+}
+
+// SetNoContentTimeout caps how long a bridge turn may run without any content
+// (only empty keepalive chunks) before it is failed so the server can fall back
+// to direct cookie mode. Keeps frozen/throttled tabs from hanging a request
+// until the API client gives up. 0 disables the cap (legacy behavior).
+func (h *Hub) SetNoContentTimeout(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.noContentTimeout = d
 }
 
 // SetChatMode stores the chat-session override controlled from the extension
@@ -994,6 +1048,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	h.recentDispatches = append(h.recentDispatches, time.Now())
 	h.pruneRecentLocked(time.Now())
 	h.savePacingStateLocked()
+	noContentTimeout := h.noContentTimeout
 	select {
 	case h.pollNotify <- struct{}{}:
 	default:
@@ -1015,8 +1070,27 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	}()
 
 	const idleTimeout = 240 * time.Second
+	// Absolute ceiling for any bridge turn, even one whose tab keeps sending
+	// keepalive chunks — past this the turn is declared stuck and failed.
+	const absoluteMaxTurn = 10 * time.Minute
 	idleTimer := time.NewTimer(idleTimeout)
 	defer idleTimer.Stop()
+
+	// No-content watchdog: fires when the turn has produced nothing but empty
+	// keepalive chunks for too long — the classic signature of a tab frozen by
+	// Chrome mid-upload (throttled timers squeak a keepalive ~1/min, resetting
+	// the idle timer forever) or one that went fully silent. "generating" phase
+	// reports from the content script are real progress and reset this watchdog.
+	var noContentC <-chan time.Time
+	var noContentTimer *time.Timer
+	if noContentTimeout > 0 {
+		noContentTimer = time.NewTimer(noContentTimeout)
+		noContentC = noContentTimer.C
+		defer noContentTimer.Stop()
+	}
+
+	turnStartedAt := time.Now()
+	lastPhase := ""
 
 	for {
 		select {
@@ -1043,7 +1117,14 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 			if chunk.Error != "" {
 				return errors.New(chunk.Error)
 			}
+			if chunk.Status != "" {
+				lastPhase = chunk.Status
+			}
 			if chunk.Text != "" {
+				if noContentTimer != nil {
+					noContentTimer.Stop()
+					noContentC = nil
+				}
 				if err := emit(chunk.Text); err != nil {
 					return err
 				}
@@ -1051,6 +1132,19 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 			if chunk.Done {
 				return nil
 			}
+			if chunk.Text == "" && chunk.Status == "generating" && noContentTimer != nil {
+				// Gemini is thinking/streaming — genuine progress, not a stuck tab.
+				noContentTimer.Reset(noContentTimeout)
+			}
+			if time.Since(turnStartedAt) > absoluteMaxTurn {
+				return errors.New("browser bridge turn exceeded the 10-minute absolute limit without completing — the tab is stuck; check the Gemini tab and retry")
+			}
+		case <-noContentC:
+			phase := lastPhase
+			if phase == "" {
+				phase = "unknown"
+			}
+			return fmt.Errorf("browser bridge produced no content within %ds (tab likely frozen or stuck in phase %q — e.g. attachment upload stalled); the server will retry via direct cookie mode when available", int(noContentTimeout.Seconds()), phase)
 		case <-idleTimer.C:
 			return errors.New("browser bridge generation timed out (240s with no data from the browser tab — the Gemini tab may be laggy, throttled in the background, or stuck uploading; check the tab and retry)")
 		}

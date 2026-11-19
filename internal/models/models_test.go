@@ -162,6 +162,15 @@ func TestResolve(t *testing.T) {
 			wantErr:      false,
 		},
 		{
+			input:        "gemini-2.5-pro",
+			defaultName:  "gemini-3.6-flash",
+			wantName:     "gemini-2.5-pro",
+			wantMode:     3,
+			wantThink:    4,
+			wantFallback: false,
+			wantErr:      false,
+		},
+		{
 			input:       "gemini-3.6-flash@think=abc",
 			defaultName: "gemini-3.6-flash",
 			wantErr:     true,
