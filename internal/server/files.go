@@ -452,6 +452,22 @@ func PromptMayReferenceLocalFiles(messages []models.OpenAIMessage) bool {
 	return len(ExtractAttachedFilenames(text)) > 0
 }
 
+// uploadableLocalFiles returns local files referenced by the latest user message
+// that ACTUALLY exist on this server's disk and would be attached through the
+// browser bridge. Used for routing: a prompt that merely *mentions* paths (which
+// coding-agent prompts do constantly) must not be pinned to the bridge when the
+// files cannot be read here and nothing would be uploaded anyway.
+func (a *App) uploadableLocalFiles(messages []models.OpenAIMessage) []bridge.Attachment {
+	if !a.Cfg.BridgeAutoUploadLocalFiles {
+		return nil
+	}
+	if !PromptMayReferenceLocalFiles(messages) {
+		return nil // fast path: no path-like strings at all, skip disk I/O
+	}
+	atts, _ := DiscoverLocalUploadFiles(messages, map[string]string{}, a.Cfg.BridgeLargeCodeUploadBytes)
+	return atts
+}
+
 // DiscoverLocalUploadFiles inspects the latest message (when it is a user turn) for references
 // to existing local PDFs, Office documents, media files, or long source code files
 // (>= largeCodeMinBytes) and reads them for direct upload through the browser bridge.

@@ -34,6 +34,7 @@ type Config struct {
 	BridgeDeltaContext         bool     `json:"bridge_delta_context"`
 	BridgeAutoNewChat          bool     `json:"bridge_auto_new_chat"`
 	BridgeNoContentTimeoutSec  int      `json:"bridge_no_content_timeout_sec"`
+	BridgePickupTimeoutSec     int      `json:"bridge_pickup_timeout_sec"`
 	BridgeToken                string   `json:"bridge_token"`
 	NotifyWebhook              string   `json:"notify_webhook"`
 	NotifyFormat               string   `json:"notify_format"`
@@ -68,6 +69,7 @@ func Default() Config {
 		BridgeDeltaContext:         true,
 		BridgeAutoNewChat:          true,
 		BridgeNoContentTimeoutSec:  120,
+		BridgePickupTimeoutSec:     45,
 		BridgeToken:                "",
 		NotifyWebhook:              "",
 		NotifyFormat:               "ntfy",
@@ -116,6 +118,7 @@ func Load(path string) (Config, error) {
 		BridgeDeltaContext         *bool     `json:"bridge_delta_context"`
 		BridgeAutoNewChat          *bool     `json:"bridge_auto_new_chat"`
 		BridgeNoContentTimeoutSec  *int      `json:"bridge_no_content_timeout_sec"`
+		BridgePickupTimeoutSec     *int      `json:"bridge_pickup_timeout_sec"`
 		BridgeToken                *string   `json:"bridge_token"`
 		NotifyWebhook              *string   `json:"notify_webhook"`
 		NotifyFormat               *string   `json:"notify_format"`
@@ -205,6 +208,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.BridgeNoContentTimeoutSec != nil && *aux.BridgeNoContentTimeoutSec >= 0 {
 		cfg.BridgeNoContentTimeoutSec = *aux.BridgeNoContentTimeoutSec
+	}
+	if aux.BridgePickupTimeoutSec != nil && *aux.BridgePickupTimeoutSec >= 0 {
+		cfg.BridgePickupTimeoutSec = *aux.BridgePickupTimeoutSec
 	}
 	if aux.BridgeToken != nil {
 		cfg.BridgeToken = *aux.BridgeToken

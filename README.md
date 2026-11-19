@@ -353,9 +353,10 @@ To completely eliminate the risk of Google account or cookie bans, you do not ne
 When running with the Live Web Bridge, `gemini-web2api` includes built-in protections against repetitive agent tool loops and Google frequency bans:
 
 - **Direct File, PDF & Long-Code Upload**: OpenAI `file` / `input_file` / `document` / `image_url` parts are uploaded straight into your open Gemini tab (no cookies required). For direct `localhost` agent requests (such as WorkBuddy), referenced local PDFs, Office documents, images, and **long source code files (`>= bridge_large_code_upload_bytes`, default 12 KB)** are automatically attached verbatim (up to 25 MB, max 5 files/turn) and automatically refreshed only when edited on disk.
-- **Oversized Prompt / Tool-Result Spillover (`bridge_spillover_chars: 18000`)**: Prompts or huge `read_file` tool outputs exceeding 18 KB are automatically uploaded as a `.txt` attachment instead of being slammed into the web input box, preventing UI truncation and repetitive re-reads. **When session cookies are synced and healthy, oversized prompts skip the browser entirely** and are served by direct cookie mode (the full prompt goes inline into the batchexecute body — no browser file upload, which stalls on some Gemini Enterprise frontends). Requests whose latest user message references local files stay on the bridge so the files can be attached.
+- **Oversized Prompt / Tool-Result Spillover (`bridge_spillover_chars: 18000`)**: Prompts or huge `read_file` tool outputs exceeding 18 KB are automatically uploaded as a `.txt` attachment instead of being slammed into the web input box, preventing UI truncation and repetitive re-reads. **When session cookies are synced and healthy, oversized prompts skip the browser entirely** and are served by direct cookie mode (the full prompt goes inline into the batchexecute body — no browser file upload, which stalls on some Gemini Enterprise frontends). Only requests whose latest user message references local files that **actually exist on the server's disk** stay on the bridge so the files can be attached — merely mentioning a path in the prompt (as coding agents constantly do) never pins a request to the bridge.
 - **Delta-Turn Context (`bridge_delta_context: true`)**: Follow-up turns in the same open Gemini tab send only the newly appended user/tool messages rather than re-pasting the full conversation history and tool schemas every turn (auto-resets on refresh or New Chat).
 - **Frozen/Stuck Tab Failover (`bridge_no_content_timeout_sec: 120`)**: If Chrome freezes the tab mid-turn (Memory Saver) the in-flight request is aborted instantly and retried via direct cookie mode — instead of hanging until your client times out. Turns that produce only keepalives (no content) for longer than this limit are also failed over; a tab actively generating (`"generating"` phase) is never cut off by this cap. Set to `0` to disable.
+- **Unclaimed-Request Failover (`bridge_pickup_timeout_sec: 45`)**: If a queued request is not picked up by any browser tab within this window — the signature of a stalled extension poll loop or a sleeping Chrome MV3 service worker (tab heartbeats but never polls) — the request is failed fast and retried via direct cookie mode. Once a tab claims the request, this timer hands off to the no-content watchdog. Set to `0` to disable.
 - **Adaptive Anti-Ban Pacing & 429 Circuit Breaker**: Combines base cooldown (`bridge_min_interval_ms: 2500`), random human-like jitter (`bridge_jitter_ms: 1500`), progressive burst scaling during heavy coding loops, a rolling 10-minute window cap (`bridge_max_per_10min: 18`), and an automatic exponential cool-off circuit breaker (returning HTTP `429` + `Retry-After`) if Google signals rate limiting.
 
 All options can be tuned in `config.json`:
@@ -369,7 +370,8 @@ All options can be tuned in `config.json`:
   "bridge_large_code_upload_bytes": 12288,
   "bridge_spillover_chars": 18000,
   "bridge_delta_context": true,
-  "bridge_no_content_timeout_sec": 120
+  "bridge_no_content_timeout_sec": 120,
+  "bridge_pickup_timeout_sec": 45
 }
 ```
 
