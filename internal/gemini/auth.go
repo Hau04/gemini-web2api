@@ -138,8 +138,18 @@ func SAPISIDHashWithOrigin(sapisid, origin string) string {
 	if origin == "" {
 		origin = "https://gemini.google.com"
 	}
+	return SAPISIDHashWithScope(sapisid, origin)
+}
+
+// SAPISIDHashWithScope computes the first-party SAPISIDHASH authorization value
+// for an arbitrary scope string (the page origin for web RPCs, or an OAuth
+// scope for googleapis endpoints).
+func SAPISIDHashWithScope(sapisid, scope string) string {
+	if sapisid == "" {
+		return ""
+	}
 	ts := time.Now().Unix()
-	input := fmt.Sprintf("%d %s %s", ts, sapisid, origin)
+	input := fmt.Sprintf("%d %s %s", ts, sapisid, scope)
 	h := sha1.Sum([]byte(input))
 	return fmt.Sprintf("SAPISIDHASH %d_%s", ts, hex.EncodeToString(h[:]))
 }

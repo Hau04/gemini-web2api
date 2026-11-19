@@ -223,7 +223,7 @@ func (c *Client) BardUnsupported() bool {
 // MarkBardUnsupported latches the no-Bard-RPC state (logged once per latch).
 func (c *Client) MarkBardUnsupported() {
 	if c.bardUnsupported.CompareAndSwap(false, true) {
-		log.Printf("Origin does not serve the Bard web RPC (HTTP 404) — Gemini Enterprise detected; direct cookie mode disabled, requests will use the browser bridge")
+		log.Printf("Origin does not serve the Bard web RPC (HTTP 404) — Gemini Enterprise detected; direct mode switches to Discovery Engine replay (when a template is captured) and the browser bridge")
 	}
 }
 
@@ -315,9 +315,19 @@ func (c *Client) triageStatus(resp *http.Response) error {
 
 func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (string, error) {
 	c.EnsureModelsDiscovered()
-	// Direct cookie mode is attempted whenever session cookies are available
-	// (see directModeUsable). A model-discovery 404 on Gemini Enterprise must
-	// not prevent the actual generate RPC from being tried with valid cookies.
+	// Origins without the Bard web RPC (Gemini Enterprise) cannot use
+	// batchexecute — replay the captured Discovery Engine streamAssist request
+	// instead (works with the browser closed), or fail with an actionable error.
+	if c.BardUnsupported() {
+		if len(fileRefs) > 0 {
+			return "", &UpstreamError{
+				Status: http.StatusNotFound,
+				Kind:   "unsupported",
+				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
+			}
+		}
+		return c.generateViaDiscovery(prompt)
+	}
 
 	cookieInfo, _ := c.Cookies.Load()
 	cfg := c.Cfg
@@ -408,9 +418,18 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 
 func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []string, emit func(string) error) error {
 	c.EnsureModelsDiscovered()
-	// Direct cookie mode is attempted whenever session cookies are available
-	// (see directModeUsable). A model-discovery 404 on Gemini Enterprise must
-	// not prevent the actual generate RPC from being tried with valid cookies.
+	// Same routing as Generate: no Bard web RPC means the Discovery Engine
+	// streamAssist replay path (or an actionable error).
+	if c.BardUnsupported() {
+		if len(fileRefs) > 0 {
+			return &UpstreamError{
+				Status: http.StatusNotFound,
+				Kind:   "unsupported",
+				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
+			}
+		}
+		return c.generateViaDiscoveryStream(prompt, emit)
+	}
 
 	cookieInfo, _ := c.Cookies.Load()
 	cfg := c.Cfg

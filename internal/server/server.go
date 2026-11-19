@@ -101,6 +101,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /bridge/cookies", a.handleBridgeCookies)
 	mux.HandleFunc("GET /bridge/cookie-status", a.handleCookieStatus)
 	mux.HandleFunc("POST /bridge/chatmode", a.handleBridgeChatMode)
+	mux.HandleFunc("POST /bridge/reqtemplate", a.handleBridgeReqTemplate)
+	mux.HandleFunc("GET /bridge/reqtemplate", a.handleBridgeReqTemplate)
 
 	handler := a.withAuthAndLogging(mux)
 	handler = a.withCORS(handler)
