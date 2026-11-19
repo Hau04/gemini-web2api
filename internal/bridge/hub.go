@@ -136,6 +136,7 @@ type Hub struct {
 	degradedUntil         time.Time
 	chatModeOverride      string
 	noContentTimeout      time.Duration
+	pickupTimeout         time.Duration
 	clientHeartbeats      map[string]time.Time
 	pending               []*Request
 	inFlight              map[string]*inFlightEntry
@@ -449,6 +450,18 @@ func (h *Hub) SetNoContentTimeout(d time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.noContentTimeout = d
+}
+
+// SetPickupTimeout caps how long a queued request may wait before any browser
+// tab claims it. Covers the "poll loop stalled / MV3 service worker asleep"
+// failure where the tab looks connected but never polls — the request would
+// otherwise sit in the queue until the no-content watchdog fires. Once a tab
+// claims the request this timer is irrelevant (the no-content watchdog takes
+// over). 0 disables the cap.
+func (h *Hub) SetPickupTimeout(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pickupTimeout = d
 }
 
 // SetChatMode stores the chat-session override controlled from the extension
@@ -1049,6 +1062,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	h.pruneRecentLocked(time.Now())
 	h.savePacingStateLocked()
 	noContentTimeout := h.noContentTimeout
+	pickupTimeout := h.pickupTimeout
 	select {
 	case h.pollNotify <- struct{}{}:
 	default:
@@ -1089,6 +1103,18 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		defer noContentTimer.Stop()
 	}
 
+	// Pickup watchdog: fires when no browser tab has claimed the queued request
+	// within pickupTimeout — the signature of a stalled poll loop or a sleeping
+	// MV3 service worker (tab looks connected but never polls). Once claimed, the
+	// no-content watchdog takes over.
+	var pickupC <-chan time.Time
+	var pickupTimer *time.Timer
+	if pickupTimeout > 0 {
+		pickupTimer = time.NewTimer(pickupTimeout)
+		pickupC = pickupTimer.C
+		defer pickupTimer.Stop()
+	}
+
 	turnStartedAt := time.Now()
 	lastPhase := ""
 
@@ -1096,6 +1122,16 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-pickupC:
+			h.mu.Lock()
+			_, claimed := h.inFlight[reqID]
+			h.mu.Unlock()
+			if claimed {
+				// A tab picked it up — the no-content watchdog governs from here.
+				pickupC = nil
+				continue
+			}
+			return fmt.Errorf("browser bridge request was not picked up by any tab within %ds (extension poll loop stalled or service worker asleep); the server will retry via direct cookie mode when available", int(pickupTimeout.Seconds()))
 		case chunk, ok := <-ch:
 			if !idleTimer.Stop() {
 				select {

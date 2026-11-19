@@ -111,6 +111,55 @@ func TestOversizedPromptRoutesDirectWhenCookiesReady(t *testing.T) {
 	}
 }
 
+// Coding-agent prompts constantly mention paths (config.json, src/app.py …) that
+// do not exist on the server's disk. Such mentions must NOT pin the request to
+// the bridge: nothing could be uploaded anyway, and the browser upload UI stalls
+// on some Gemini Enterprise frontends.
+func TestOversizedPromptWithMissingFileRefRoutesDirect(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookie.json")
+	if err := os.WriteFile(cookieFile, []byte(`{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.CookieFile = cookieFile
+	cfg.RetryAttempts = 1
+	cfg.RequestTimeoutSec = 2
+
+	app := New(cfg, "test")
+	app.Gem.HTTP = failingRequester{}
+	handler := app.Handler()
+
+	hbReq := httptest.NewRequest("POST", "/bridge/heartbeat", strings.NewReader(`{"tab":"vertexaisearch.cloud.google.com","client_id":"tab_1"}`))
+	hbRec := httptest.NewRecorder()
+	handler.ServeHTTP(hbRec, hbReq)
+	if hbRec.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d", hbRec.Code)
+	}
+
+	bridgeGotRequest := make(chan bool, 1)
+	go func() {
+		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 2*time.Second)
+		bridgeGotRequest <- err == nil && req != nil
+	}()
+
+	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
+	// References a path that does NOT exist on this machine.
+	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"please fix /nonexistent/dir_9f8a7b/missing.go and ` + big + `"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if <-bridgeGotRequest {
+		t.Fatal("prompt referencing a non-existent file was routed to the bridge; want direct cookie mode")
+	}
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected direct-mode failure status, got 200: %s", rec.Body.String())
+	}
+}
+
 // When the latest user message references local files, the bridge must keep the
 // request even for oversized prompts — only the browser path can attach them.
 func TestOversizedPromptWithLocalFileRefStaysOnBridge(t *testing.T) {
@@ -137,6 +186,13 @@ func TestOversizedPromptWithLocalFileRefStaysOnBridge(t *testing.T) {
 		t.Fatalf("heartbeat failed: %d", hbRec.Code)
 	}
 
+	// The referenced file must really exist on disk — text that merely mentions
+	// a path no longer pins the request to the bridge.
+	realFile := filepath.Join(tmpDir, "report.pdf")
+	if err := os.WriteFile(realFile, []byte("%PDF-1.4 dummy"), 0o600); err != nil {
+		t.Fatalf("write pdf fixture: %v", err)
+	}
+
 	bridgeGotRequest := make(chan bool, 1)
 	go func() {
 		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 3*time.Second)
@@ -149,7 +205,7 @@ func TestOversizedPromptWithLocalFileRefStaysOnBridge(t *testing.T) {
 	}()
 
 	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
-	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"[Directly attached file(s): notes.txt.] ` + big + `"}]}`
+	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"please review ` + realFile + ` ` + big + `"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
 	rec := httptest.NewRecorder()
 	go handler.ServeHTTP(rec, req)
