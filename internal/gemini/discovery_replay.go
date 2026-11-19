@@ -521,3 +521,145 @@ func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) err
 	}
 	return lastErr
 }
+
+
+// generateViaDiscoveryDirect calls the Discovery Engine streamAssist endpoint
+// directly using session cookies, without needing a captured request template.
+// This works on Gemini Enterprise origins when the user has configured the
+// streamAssist endpoint URL in the server config.
+func (c *Client) generateViaDiscoveryDirect(prompt string) (string, error) {
+	var sb strings.Builder
+	err := c.generateViaDiscoveryDirectStream(prompt, func(delta string) error {
+		sb.WriteString(delta)
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return sb.String(), nil
+}
+
+func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(string) error) error {
+	endpoint := c.Cfg.DiscoveryEngineEndpoint
+	if endpoint == "" {
+		return &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab to capture a template",
+		}
+	}
+
+	cookieInfo, _ := c.Cookies.Load()
+
+	// Build minimal streamAssist request body
+	body := fmt.Sprintf(`{"query":{"text":"%s"}}`, jsonEscapeInner(prompt))
+
+	// Determine origin for SAPISIDHASH (prefer synced BaseURL)
+	origin := cookieInfo.BaseURL
+	if origin == "" {
+		origin = c.Cfg.BaseURL
+	}
+	if origin == "" {
+		origin = "https://gemini.google.com"
+	}
+
+	// Auth-user prefix for Referer
+	authUser := c.Cfg.AuthUser
+	if authUser == "" && cookieInfo.AuthUser != "" {
+		authUser = cookieInfo.AuthUser
+	}
+	prefix := AccountPrefix(authUser)
+
+	// Determine the endpoint's host origin for SAPISIDHASH scope
+	epOrigin := origin
+	if u, err := url.Parse(endpoint); err == nil && u.Scheme != "" && u.Host != "" {
+		epOrigin = u.Scheme + "://" + u.Host
+	}
+
+	headers := make(http.Header)
+	headers.Set("Content-Type", "application/json")
+	headers.Set("Origin", origin)
+	headers.Set("Referer", origin+prefix+"/app")
+	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	if cookieInfo.Cookie != "" {
+		headers.Set("Cookie", cookieInfo.Cookie)
+	}
+	if cookieInfo.SAPISID != "" {
+		if auth := SAPISIDHashWithOrigin(cookieInfo.SAPISID, epOrigin); auth != "" {
+			headers.Set("Authorization", auth)
+		}
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
+		req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header = headers.Clone()
+
+		resp, err := c.HTTP.Do(req)
+		if err != nil {
+			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
+			break
+		}
+
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			lastErr = &UpstreamError{
+				Status: resp.StatusCode,
+				Kind:   "http",
+				Msg:    fmt.Sprintf("streamAssist direct call rejected (HTTP %d) — session cookies may be expired: %s", resp.StatusCode, strings.TrimSpace(string(bodyText))),
+			}
+			if attempt < c.Cfg.RetryAttempts-1 {
+				time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
+				continue
+			}
+			return lastErr
+		}
+		if resp.StatusCode != http.StatusOK {
+			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			_ = resp.Body.Close()
+			return &UpstreamError{
+				Status: resp.StatusCode,
+				Kind:   "http",
+				Msg:    fmt.Sprintf("streamAssist direct call failed (HTTP %d): %s", resp.StatusCode, strings.TrimSpace(string(bodyText))),
+			}
+		}
+
+		stream := &discoveryStream{emit: emit}
+		parser := &discoveryParser{objAt: -1, onObj: stream.processObject}
+		buf := make([]byte, 32*1024)
+		for {
+			n, rerr := resp.Body.Read(buf)
+			if n > 0 {
+				parser.feed(string(buf[:n]))
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
+					_ = resp.Body.Close()
+					return &UpstreamError{Kind: "transport", Msg: rerr.Error()}
+				}
+				break
+			}
+		}
+		_ = resp.Body.Close()
+
+		if stream.failed {
+			msg := stream.failMsg
+			if msg == "" {
+				msg = "streamAssist answer state FAILED"
+			}
+			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: msg}
+		}
+		if !stream.hasText {
+			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: "streamAssist direct call returned no answer text"}
+		}
+		return stream.emitErr
+	}
+	if lastErr == nil {
+		lastErr = &UpstreamError{Status: http.StatusInternalServerError, Kind: "http", Msg: "streamAssist direct call failed with no error"}
+	}
+	return lastErr
+}

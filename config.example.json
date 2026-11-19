@@ -29,5 +29,6 @@
   "bridge_auto_new_chat": true,
   "bridge_token": "",
   "notify_webhook": "",
-  "notify_format": "ntfy"
+  "notify_format": "ntfy",
+  "discovery_engine_endpoint": ""
 }
