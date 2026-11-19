@@ -3,9 +3,11 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 )
 
 func (a *App) buildBridgeStatusPayload() map[string]any {
@@ -234,5 +236,74 @@ func (a *App) handleBridgeChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleBridgeReqTemplate stores (or reports) a captured Discovery Engine
+// streamAssist request template from the extension. On Gemini Enterprise
+// origins the server replays this template with fresh cookies and a new prompt
+// — the direct cookie mode path that works with the browser closed.
+func (a *App) handleBridgeReqTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		tpl := gemini.LoadDiscoveryTemplate(a.cookieFilePath())
+		if tpl == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"have_template": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"have_template": true,
+			"url":           tpl.URL,
+			"body_size":     len(tpl.Body),
+			"captured_at":   tpl.CapturedAt,
+		})
+		return
+	}
+
+	var payload struct {
+		URL        string            `json:"url"`
+		Method     string            `json:"method"`
+		Headers    map[string]string `json:"headers"`
+		Body       string            `json:"body"`
+		PromptHint string            `json:"prompt_hint"`
+		Tab        string            `json:"tab"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON payload"})
+		return
+	}
+	payload.URL = strings.TrimSpace(payload.URL)
+	if payload.URL == "" || strings.TrimSpace(payload.Body) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing url or body"})
+		return
+	}
+	if len(payload.Body) > 2<<20 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "template body too large"})
+		return
+	}
+	if !strings.HasPrefix(payload.URL, "https://") ||
+		(!strings.Contains(payload.URL, "googleapis.com") && !strings.Contains(payload.URL, "google.com")) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "template url must be a Google https endpoint"})
+		return
+	}
+	if payload.Method == "" {
+		payload.Method = http.MethodPost
+	}
+	if payload.Headers == nil {
+		payload.Headers = map[string]string{}
+	}
+
+	tpl := &gemini.DiscoveryTemplate{
+		URL:        payload.URL,
+		Method:     payload.Method,
+		Headers:    payload.Headers,
+		Body:       payload.Body,
+		PromptHint: strings.TrimSpace(payload.PromptHint),
+		CapturedAt: time.Now(),
+	}
+	if err := gemini.SaveDiscoveryTemplate(a.cookieFilePath(), tpl); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	a.Logf("Captured Discovery Engine request template from browser tab %q (%s, %d bytes) — Enterprise direct replay ready", payload.Tab, tpl.URL, len(tpl.Body))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

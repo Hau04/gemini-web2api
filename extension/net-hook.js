@@ -562,6 +562,28 @@
       const isUpload = !kind && classifyUploadEndpoint(url, method, body, contentType);
       const promise = origFetch.apply(this, args);
 
+      // Capture the request template for Discovery Engine replay (server-side
+      // direct mode on Gemini Enterprise). The body embeds the submitted prompt
+      // verbatim, so bridge.js can splice in a placeholder at capture time.
+      if (kind && typeof body === "string" && body.length > 0 && body.length <= 2 * 1024 * 1024) {
+        try {
+          const hdrs = {};
+          const rawHeaders = (init && init.headers) || (input && typeof input === "object" ? input.headers : null);
+          if (rawHeaders && typeof Headers !== "undefined" && rawHeaders instanceof Headers) {
+            rawHeaders.forEach((v, k) => { hdrs[k] = v; });
+          } else if (Array.isArray(rawHeaders)) {
+            for (const pair of rawHeaders) {
+              if (Array.isArray(pair) && pair[0]) hdrs[String(pair[0]).toLowerCase()] = String(pair[1] || "");
+            }
+          } else if (rawHeaders && typeof rawHeaders === "object") {
+            for (const k of Object.keys(rawHeaders)) hdrs[k.toLowerCase()] = String(rawHeaders[k] || "");
+          }
+          postToBridge("reqmeta", `reqmeta_${Date.now()}_${++streamCounter}`, url, {
+            method, headers: hdrs, body
+          });
+        } catch (e) {}
+      }
+
       if (isUpload) {
         const uploadId = `upl_${Date.now()}_${++streamCounter}`;
         postToBridge("upload_start", uploadId, url, {});
@@ -682,6 +704,8 @@
           if (String(name || "").toLowerCase() === "content-type") {
             this.__w2aContentType = String(value || "");
           }
+          if (!this.__w2aHeaders) this.__w2aHeaders = {};
+          this.__w2aHeaders[String(name || "").toLowerCase()] = String(value || "");
         } catch (e) {}
         return origSetRequestHeader.call(this, name, value);
       };
@@ -708,6 +732,13 @@
           this.addEventListener("abort", () => finishUpload(false, { error: "XHR upload aborted" }));
         } else if (kind) {
           const url = this.__w2aUrl;
+          if (typeof body === "string" && body.length > 0 && body.length <= 2 * 1024 * 1024) {
+            try {
+              postToBridge("reqmeta", `reqmeta_${Date.now()}_${++streamCounter}`, url, {
+                method: this.__w2aMethod, headers: this.__w2aHeaders || {}, body
+              });
+            } catch (e) {}
+          }
           const streamObj = startStream(kind, url);
           let offset = 0;
           let finalized = false;

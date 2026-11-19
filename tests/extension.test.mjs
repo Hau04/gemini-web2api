@@ -1202,3 +1202,40 @@ test("background helpers: normalizeServerUrl and buildBridgeHeaders", async () =
     "X-Bridge-Token": "tok123"
   });
 });
+
+// ---------------------------------------------------------------------------
+// 9. Discovery Engine request-template substitution
+// ---------------------------------------------------------------------------
+test("substitutePromptInBody splices the replay placeholder", () => {
+  const b = bridge.substitutePromptInBody;
+  const esc = bridge.jsonEscapeInner;
+
+  // Escaped prompt form inside a JSON body (quotes/newlines) — LAST occurrence wins.
+  const prompt = 'say "hi"\nnow';
+  const body = `{"history":["${esc(prompt)}"],"query":{"text":"${esc(prompt)}"}}`;
+  const out = b(body, prompt);
+  assert.ok(out.includes('"history"'));
+  assert.ok(out.indexOf("__W2A_PROMPT__") > out.indexOf('"history"'), "last occurrence must be replaced");
+  assert.equal((out.match(/__W2A_PROMPT__/g) || []).length, 1);
+
+  // Raw form when no escaping is needed.
+  const out2 = b(`{"q":"hello world"}`, "hello world");
+  assert.equal(out2, `{"q":"__W2A_PROMPT__"}`);
+
+  // Not found (background request) -> null so it never becomes a template.
+  assert.equal(b(`{"q":"title"}`, "different prompt"), null);
+  assert.equal(b("", "x"), null);
+  assert.equal(b(`{"q":"x"}`, ""), null);
+});
+
+test("jsonEscapeInner matches JSON string encoding", () => {
+  assert.equal(bridge.jsonEscapeInner("plain"), "plain");
+  const bs = String.fromCharCode(92);
+  const nl = String.fromCharCode(10);
+  const tricky = `a"b${bs}c${nl}d`;
+  const escaped = bridge.jsonEscapeInner(tricky);
+  // The escaped form must re-parse to the original when wrapped in quotes...
+  assert.equal(JSON.parse(`"${escaped}"`), tricky);
+  // ...and must differ from the raw form so substitution finds the right text.
+  assert.notEqual(escaped, tricky);
+});

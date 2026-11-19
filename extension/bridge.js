@@ -1421,11 +1421,45 @@
     return "Model did not respond. Please verify the prompt was sent on the page or refresh.";
   }
 
+  // ---------------------------------------------------------------------------
+  // Discovery Engine request-template capture (Enterprise direct replay)
+  // ---------------------------------------------------------------------------
+
+  function jsonEscapeInner(s) {
+    try {
+      return JSON.stringify(String(s)).slice(1, -1);
+    } catch (e) {
+      return String(s);
+    }
+  }
+
+  // substitutePromptInBody replaces the submitted prompt in a captured request
+  // body with the replay placeholder. Returns null when the prompt is not found
+  // (e.g. a background title request) — such bodies must never become templates.
+  function substitutePromptInBody(body, prompt) {
+    if (typeof body !== "string" || !prompt) return null;
+    const placeholder = "__W2A_PROMPT__";
+    const escaped = jsonEscapeInner(prompt);
+    if (escaped) {
+      const idx = body.lastIndexOf(escaped);
+      if (idx >= 0) {
+        return body.slice(0, idx) + placeholder + body.slice(idx + escaped.length);
+      }
+    }
+    const ridx = body.lastIndexOf(prompt);
+    if (ridx >= 0) {
+      return body.slice(0, ridx) + placeholder + body.slice(ridx + prompt.length);
+    }
+    return null;
+  }
+
   // Export pure/DOM helpers for Node.js unit testing
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       BADGE_ID,
       NET_MSG_KEY,
+      jsonEscapeInner,
+      substitutePromptInBody,
       isModelHeaderLine,
       isThinkingOnlyLine,
       cleanResponseText,
@@ -1476,6 +1510,8 @@
   let isPolling = false;
   let activeReqId = null;
   let lastPollAt = 0;
+  let lastSubmittedPrompt = "";
+  let templatePushTimer = null;
   let lastFocusedInput = null;
   let autoRefreshEnabled = false;
   let currentActiveStream = null;
@@ -1559,6 +1595,14 @@
     if (type === "upload_injected") {
       if (streamId) uploadTracker.injectedArmIds.add(streamId);
       console.log("[Web2API Bridge] File input injected via", data.method, "count:", data.count);
+      return;
+    }
+
+    // Capture the request template for Discovery Engine replay before any
+    // capture-state gating — templates must be recorded even when no bridge
+    // request is waiting (e.g. the user typed into the tab manually).
+    if (type === "reqmeta") {
+      handleReqMeta(data);
       return;
     }
 
@@ -2841,6 +2885,7 @@
 
     try {
       currentTurnPhase = "paste";
+      lastSubmittedPrompt = effectivePrompt;
       let inputResult = setInputValue(inputArea, effectivePrompt);
       if (!inputResult.ok) {
         console.warn("[Web2API Bridge] Initial setInputValue left input empty; re-locating composer and retrying...");
@@ -3305,6 +3350,52 @@
         clearTimeout(pollTimeout);
       }
     }
+  }
+
+  // Store a captured Discovery Engine request template and push it to the
+  // server (debounced), so the server can replay it in direct mode on Gemini
+  // Enterprise origins with the browser closed.
+  let pendingTemplate = null;
+
+  async function pushReqTemplate() {
+    if (!pendingTemplate) return;
+    try {
+      const res = await fetch(`${BRIDGE_URL}/bridge/reqtemplate`, {
+        method: "POST",
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(pendingTemplate)
+      });
+      if (res.ok) {
+        console.log("[Web2API Bridge] Discovery Engine request template pushed to server — direct replay enabled");
+      }
+    } catch (e) {
+      console.warn("[Web2API Bridge] Failed to push request template:", e);
+    }
+  }
+
+  function handleReqMeta(data) {
+    try {
+      const body = typeof data.body === "string" ? data.body : "";
+      if (!body || body.length > 2 * 1024 * 1024) return;
+      const templated = substitutePromptInBody(body, lastSubmittedPrompt);
+      if (!templated) {
+        // Not our prompt (background/telemetry request) — keep the last good template.
+        return;
+      }
+      pendingTemplate = {
+        url: String(data.url || ""),
+        method: String(data.method || "POST"),
+        headers: data.headers || {},
+        body: templated,
+        prompt_hint: "",
+        tab: location.hostname
+      };
+      if (templatePushTimer) clearTimeout(templatePushTimer);
+      templatePushTimer = setTimeout(() => {
+        templatePushTimer = null;
+        pushReqTemplate();
+      }, 3000);
+    } catch (e) {}
   }
 
   async function sendChunk(id, chunkText, isDone, err, rateLimited) {
