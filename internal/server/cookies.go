@@ -71,13 +71,23 @@ func (a *App) cookieFilePath() string {
 // the direct cookie mode (either SAPISID or __Secure-1PSID present).
 func (a *App) cookiesReady() bool {
 	if a.Gem == nil || a.Gem.Cookies == nil {
+		a.Logf("cookiesReady: false — Gem or Cookies is nil")
 		return false
 	}
 	info, err := a.Gem.Cookies.Load()
-	if err != nil || strings.TrimSpace(info.Cookie) == "" {
+	if err != nil {
+		a.Logf("cookiesReady: false — cookie load error: %v", err)
 		return false
 	}
-	return info.SAPISID != "" || strings.Contains(info.Cookie, "__Secure-1PSID")
+	if strings.TrimSpace(info.Cookie) == "" {
+		a.Logf("cookiesReady: false — cookie string empty (SAPISID=%q, BaseURL=%q)", info.SAPISID, info.BaseURL)
+		return false
+	}
+	if info.SAPISID != "" || strings.Contains(info.Cookie, "__Secure-1PSID") {
+		return true
+	}
+	a.Logf("cookiesReady: false — no SAPISID or __Secure-1PSID (cookie len=%d)", len(info.Cookie))
+	return false
 }
 
 // directModeUsable reports whether direct cookie mode can actually serve a
@@ -88,17 +98,22 @@ func (a *App) cookiesReady() bool {
 // reporting.
 func (a *App) directModeUsable() bool {
 	if !a.cookiesReady() {
+		a.Logf("directModeUsable: false — cookies not ready")
 		return false
 	}
 	if a.Gem != nil && a.Gem.BardUnsupported() {
 		if a.Gem.HasDiscoveryTemplate() {
+			a.Logf("directModeUsable: true — Discovery Engine template captured")
 			return true
 		}
 		if a.Cfg.DiscoveryEngineEndpoint != "" {
+			a.Logf("directModeUsable: true — Discovery Engine endpoint configured: %s", a.Cfg.DiscoveryEngineEndpoint)
 			return true
 		}
+		a.Logf("directModeUsable: false — Enterprise origin, no template captured, no discovery_engine_endpoint configured")
 		return false
 	}
+	a.Logf("directModeUsable: true — Bard web RPC available")
 	return true
 }
 
