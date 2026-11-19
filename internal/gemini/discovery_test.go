@@ -1,6 +1,8 @@
 package gemini
 
 import (
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -286,5 +288,33 @@ func TestBuildHeadersFallsBackToConfigBaseURL(t *testing.T) {
 	h := c.buildHeaders()
 	if got := h.Get("Origin"); got != "https://vertexaisearch.cloud.google.com" {
 		t.Errorf("Origin = %q, want configured base_url when no synced origin", got)
+	}
+}
+
+func TestTriageStatus404LatchesBardUnsupported(t *testing.T) {
+	c := NewClient(config.Config{})
+	if c.BardUnsupported() {
+		t.Fatal("fresh client must not be marked unsupported")
+	}
+	resp := &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Header: make(http.Header)}
+	err := c.triageStatus(resp)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if !c.BardUnsupported() {
+		t.Fatal("404 must latch BardUnsupported")
+	}
+	c.ClearBardUnsupported()
+	if c.BardUnsupported() {
+		t.Fatal("ClearBardUnsupported must reset the latch")
+	}
+}
+
+func TestTriageStatus500DoesNotLatchBardUnsupported(t *testing.T) {
+	c := NewClient(config.Config{})
+	resp := &http.Response{StatusCode: http.StatusInternalServerError, Body: io.NopCloser(strings.NewReader("err")), Header: make(http.Header)}
+	_ = c.triageStatus(resp)
+	if c.BardUnsupported() {
+		t.Fatal("non-404 status must not latch BardUnsupported")
 	}
 }

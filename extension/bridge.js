@@ -3230,6 +3230,11 @@
     isPolling = true;
 
     while (true) {
+      // Hard timeout on the long-poll: the server holds polls for ~20s, but a hung
+      // socket (tunnel blip, browser throttling) would otherwise freeze this loop
+      // forever while heartbeats keep firing — requests then queue up unclaimed.
+      const controller = new AbortController();
+      const pollTimeout = setTimeout(() => controller.abort(), 30000);
       try {
         syncConversationGeneration();
         const tabParam = encodeURIComponent(location.hostname);
@@ -3239,7 +3244,8 @@
           `${BRIDGE_URL}/bridge/poll?tab=${tabParam}&client=${clientParam}&conv_gen=${convParam}`,
           {
             method: "GET",
-            headers: bridgeHeaders({ Accept: "application/json" })
+            headers: bridgeHeaders({ Accept: "application/json" }),
+            signal: controller.signal
           }
         );
 
@@ -3270,8 +3276,13 @@
           }
         }
       } catch (err) {
+        if (err && err.name === "AbortError") {
+          console.warn("[Web2API Bridge] Poll exceeded 30s — restarting poll loop");
+        }
         setStatus("disconnected");
         await new Promise((r) => setTimeout(r, 2500));
+      } finally {
+        clearTimeout(pollTimeout);
       }
     }
   }
