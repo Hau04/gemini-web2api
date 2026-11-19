@@ -1475,6 +1475,7 @@
 
   let isPolling = false;
   let activeReqId = null;
+  let lastPollAt = 0;
   let lastFocusedInput = null;
   let autoRefreshEnabled = false;
   let currentActiveStream = null;
@@ -1653,7 +1654,11 @@
   // Listen for messages from popup
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-      if (msg.action === "refresh") {
+      if (msg.action === "web2api-ping") {
+        // Liveness probe for the background watchdog: the service worker uses
+        // this to tell a healthy poll loop from a stalled one.
+        sendResponse({ alive: true, busy: Boolean(activeReqId), last_poll_at: lastPollAt });
+      } else if (msg.action === "refresh") {
         resetOrRefreshPage();
         sendResponse({ ok: true });
       } else if (msg.action === "forceFinish") {
@@ -3225,11 +3230,26 @@
     }).catch(() => {});
   });
 
+  // The page is going away (navigation, reload, or tab discard) — tell the
+  // server NOW so it stops routing requests to a poll loop that will never come
+  // back. fetch(keepalive) survives page teardown and carries the token headers.
+  window.addEventListener("pagehide", () => {
+    try {
+      fetch(`${BRIDGE_URL}/bridge/frozen`, {
+        method: "POST",
+        keepalive: true,
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ frozen: true, client_id: CLIENT_ID, tab: location.hostname })
+      }).catch(() => {});
+    } catch (e) {}
+  });
+
   async function pollServer() {
     if (isPolling) return;
     isPolling = true;
 
     while (true) {
+      lastPollAt = Date.now();
       // Hard timeout on the long-poll: the server holds polls for ~20s, but a hung
       // socket (tunnel blip, browser throttling) would otherwise freeze this loop
       // forever while heartbeats keep firing — requests then queue up unclaimed.

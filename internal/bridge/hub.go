@@ -30,6 +30,20 @@ type Request struct {
 	Attachments []Attachment `json:"attachments,omitempty"`
 	NewChat     bool         `json:"new_chat,omitempty"`
 	CreatedAt   time.Time    `json:"created_at"`
+
+	// claimed is closed when a browser tab takes this request off the queue.
+	// The generate call uses it to fire its pickup hook at exactly that moment.
+	claimed   chan struct{}
+	claimOnce sync.Once
+}
+
+// markClaimed signals that a browser tab has claimed this request. Safe to call
+// multiple times and on requests without a claim channel.
+func (r *Request) markClaimed() {
+	if r.claimed == nil {
+		return
+	}
+	r.claimOnce.Do(func() { close(r.claimed) })
 }
 
 type GenerateOptions struct {
@@ -87,6 +101,18 @@ func (e *RateLimitError) Error() string {
 		return fmt.Sprintf("bridge rate-limit cooldown active (%s); retry after %ds", e.Cause, secs)
 	}
 	return fmt.Sprintf("bridge rate-limit cooldown active; retry after %ds", secs)
+}
+
+// PickupError is returned when no browser tab claimed the queued request within
+// the pickup window — the tab is gone or its poll loop is dead. It is typed so
+// HTTP handlers can answer with a real status code (nothing has been streamed
+// yet) instead of committing to a 200 stream.
+type PickupError struct {
+	Timeout time.Duration
+}
+
+func (e *PickupError) Error() string {
+	return fmt.Sprintf("browser bridge request was not picked up by any tab within %ds (the Gemini tab is gone or its extension poll loop is dead) — open or reload the Gemini tab in Chrome", int(e.Timeout.Seconds()))
 }
 
 func looksLikeRateLimitError(msg string) bool {
@@ -733,6 +759,7 @@ func (h *Hub) WaitForNextRequestForSession(ctx context.Context, tabName, clientI
 				assignedAt: time.Now(),
 			}
 			h.mu.Unlock()
+			req.markClaimed()
 			return req, nil
 		}
 
@@ -763,6 +790,7 @@ func (h *Hub) WaitForNextRequestForSession(ctx context.Context, tabName, clientI
 				entry.assignedAt = time.Now()
 				req := entry.req
 				h.mu.Unlock()
+				req.markClaimed()
 				return req, nil
 			}
 		}
@@ -996,6 +1024,16 @@ func (h *Hub) GenerateStream(ctx context.Context, prompt, model string, emit fun
 // browser extension, serializing concurrent dispatches and applying adaptive anti-ban
 // pacing plus 429 circuit-breaker protection.
 func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOptions, emit func(string) error) error {
+	return h.GenerateStreamWithPickupHook(ctx, opts, nil, emit)
+}
+
+// GenerateStreamWithPickupHook behaves like GenerateStreamWithOptions but calls
+// onPickup (exactly once, from a helper goroutine) at the moment a browser tab
+// claims the queued request. Handlers use it to delay committing to an SSE 200
+// until the tab has actually picked the work up, so pickup failures can be
+// reported as real HTTP errors. Emitted chunks are held back until onPickup has
+// returned, so stream-start bytes are never raced by content.
+func (h *Hub) GenerateStreamWithPickupHook(ctx context.Context, opts GenerateOptions, onPickup func() error, emit func(string) error) error {
 	if !h.IsConnected() {
 		return errors.New("no browser tab connected to the bridge")
 	}
@@ -1051,6 +1089,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 		Attachments: opts.Attachments,
 		NewChat:     opts.NewChat,
 		CreatedAt:   time.Now(),
+		claimed:     make(chan struct{}),
 	}
 
 	ch := make(chan Chunk, 512)
@@ -1068,6 +1107,37 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 	default:
 	}
 	h.mu.Unlock()
+
+	// Claim watch: run onPickup the moment a tab takes the request, and hold
+	// back emitted chunks until onPickup has finished (stream-start ordering).
+	turnDone := make(chan struct{})
+	if onPickup != nil {
+		hookDone := make(chan struct{})
+		// LIFO defer ordering: this wait runs AFTER close(turnDone) below, so the
+		// claim watcher always unblocks — and the caller only resumes once
+		// onPickup has fully settled (its stream-start state is then visible).
+		defer func() { <-hookDone }()
+		go func() {
+			defer close(hookDone)
+			select {
+			case <-req.claimed:
+				_ = onPickup()
+			case <-turnDone:
+				// A claim may have raced the turn ending — never drop the hook.
+				select {
+				case <-req.claimed:
+					_ = onPickup()
+				default:
+				}
+			}
+		}()
+		origEmit := emit
+		emit = func(s string) error {
+			<-hookDone
+			return origEmit(s)
+		}
+	}
+	defer close(turnDone)
 
 	defer func() {
 		h.mu.Lock()
@@ -1131,7 +1201,7 @@ func (h *Hub) GenerateStreamWithOptions(ctx context.Context, opts GenerateOption
 				pickupC = nil
 				continue
 			}
-			return fmt.Errorf("browser bridge request was not picked up by any tab within %ds (extension poll loop stalled or service worker asleep); the server will retry via direct cookie mode when available", int(pickupTimeout.Seconds()))
+			return &PickupError{Timeout: pickupTimeout}
 		case chunk, ok := <-ch:
 			if !idleTimer.Stop() {
 				select {

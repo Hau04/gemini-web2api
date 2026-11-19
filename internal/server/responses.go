@@ -216,7 +216,12 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 				}
 					a.Bridge.ClearDegraded()
 				} else {
-					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+					var pkErr *bridge.PickupError
+					if errors.As(err, &pkErr) {
+						writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"message": fmt.Sprintf("%v", err), "type": "bridge_offline"}})
+					} else {
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v", err)}})
+					}
 					return
 				}
 			}
