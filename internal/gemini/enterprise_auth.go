@@ -204,6 +204,44 @@ func (c *Client) resetEnterpriseAuth() {
 	c.enterpriseAuthMu.Unlock()
 }
 
+// reuseOrCreateEnterpriseSession pins the conversation for the coming request.
+//
+// Gemini Enterprise opens a brand-new conversation for every streamAssist that
+// carries no session, which is exactly what "every message opens a new chat in
+// Gemini" looks like. Session creation used to happen only when a widget JWT was
+// available, so cookie-authenticated setups (bearer=false) never got one and
+// every single message started a fresh thread.
+func (c *Client) reuseOrCreateEnterpriseSession(session string) string {
+	if s := strings.TrimSpace(session); s != "" && !strings.HasSuffix(s, "/-") {
+		return s
+	}
+	configID := strings.TrimSpace(c.enterpriseConfigID(nil))
+	if configID == "" {
+		// No config id means widgetCreateSession cannot be called at all; the
+		// caller reports that separately.
+		return strings.TrimSpace(session)
+	}
+	created, err := c.ensureEnterpriseSession(configID)
+	if err != nil {
+		c.Logf("Gemini Enterprise: could not create an assistant session (%v) — the tenant will show every request as a new conversation", err)
+		return ""
+	}
+	c.Logf("Enterprise: continuing in assistant session %s (reused for every turn of this conversation)", shortSessionName(created))
+	return created
+}
+
+// shortSessionName keeps session logs to one readable line.
+func shortSessionName(session string) string {
+	s := strings.TrimSpace(session)
+	if s == "" {
+		return "<none>"
+	}
+	if i := strings.LastIndex(s, "/"); i >= 0 && i+1 < len(s) {
+		return s[i+1:]
+	}
+	return s
+}
+
 // fetchEnterpriseXSRF asks the GE portal for the HMAC key used to sign JWTs.
 func (c *Client) fetchEnterpriseXSRF(csesidx string) (xsrfToken, keyID string, err error) {
 	origin := c.enterpriseOrigin()

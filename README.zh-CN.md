@@ -403,6 +403,25 @@ gemini-4-argon@think=4              # Low (default for standard models)
 2. **扩展弹出“聊天模式”选择器**—*自动（推荐）*/*总是有新的聊天*/*继续打开聊天*。选择被推送到服务器（`POST /bridge/chatmode`）并持续存在直到发生改变。和*继续打开聊天*，首先单击 Gemini 历史记录侧栏中的任何旧聊天 - API 轮流然后继续添加到该对话。
 3. **自动启发式（默认）**— 全新的客户端对话（例如 WorkBuddy“新聊天”）启动新的浏览器聊天；后续回合继续进行。
 
+这个启发式只能看到客户端发来的内容：当请求**没有** assistant/tool 历史、且只有一条与上一轮不同的用户消息时触发 —— 而这恰好也是「无状态客户端」的样子。如果每条消息都在浏览器里开新聊天，可以设 `"bridge_auto_new_chat": false`、在扩展弹窗里选 *继续当前聊天*，或者用 `@continue`。标签页里没有内容时历史会整段重发，所以上下文不依赖标签页。
+
+#### 直连模式同样的问题 —— 每个进程共用一个会话
+
+没有浏览器标签页时，对话连续性由 Discovery Engine 的 **session** 决定。`/v1/model-info` 加一行日志就能确认：
+
+```
+Enterprise: continuing in assistant session 8f1c (reused for every turn of this conversation)
+Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
+```
+
+每个进程通过 `widgetCreateSession` 创建一个会话并被所有请求复用，所以一整天的消息都落在同一个 Gemini 会话里，而且**所有**客户端聊天共享它。重启、或 cookie/JWT 重置会开新会话 —— 上下文不会丢（客户端会重发历史），但租户那边的线程是新的（昨天的附件 fileId 也已经失效）。若租户拒绝创建会话，日志会明确说出来：
+
+```
+Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
+```
+
+想固定某个会话，在 `config.json` 里设 `"discovery_engine_session": "collections/…/sessions/…"`。
+
 ### 模型检查头
 
 每个 API 响应（JSON 和流式 SSE）都包含指示实际模型路由的 HTTP 响应标头：

@@ -587,13 +587,6 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		if pinned := strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint); pinned != "" && strings.Contains(pinned, "content-") {
 			endpoint = pinned
 		}
-		if s := strings.TrimSpace(session); s != "" && !strings.HasSuffix(s, "/-") {
-			session = s
-		} else if created, err := c.ensureEnterpriseSession(configID); err == nil {
-			session = created
-		} else {
-			c.Logf("Gemini Enterprise: could not create a session (%v) — continuing without one", err)
-		}
 	} else if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != "" {
 		endpoint = c.Cfg.DiscoveryEngineEndpoint
 		if !errors.Is(bearerErr, errNoCsesidx) {
@@ -606,6 +599,11 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab to capture a template",
 		}
 	}
+
+	// One conversation per process: reuse a pinned session, otherwise create one.
+	// Cookie-authenticated requests need this just as much as bearer ones —
+	// without it the tenant answers each message in a brand-new conversation.
+	session = c.reuseOrCreateEnterpriseSession(session)
 
 	fileIDsJSON := "[]"
 	if len(fileIDs) > 0 {
