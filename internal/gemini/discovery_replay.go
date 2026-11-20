@@ -460,8 +460,12 @@ func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) err
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
-		if c.Cfg.DiscoveryEngineServerToken != "" {
-			req.Header.Set("X-Server-Token", c.Cfg.DiscoveryEngineServerToken)
+		serverToken := c.Cfg.DiscoveryEngineServerToken
+		if serverToken == "" {
+			serverToken = cookieInfo.ServerToken
+		}
+		if serverToken != "" {
+			req.Header.Set("X-Server-Token", serverToken)
 		}
 
 		resp, err := c.HTTP.Do(req)
@@ -603,8 +607,12 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 			headers.Set("Authorization", auth)
 		}
 	}
-	if c.Cfg.DiscoveryEngineServerToken != "" {
-		headers.Set("X-Server-Token", c.Cfg.DiscoveryEngineServerToken)
+	serverToken := c.Cfg.DiscoveryEngineServerToken
+	if serverToken == "" {
+		serverToken = cookieInfo.ServerToken
+	}
+	if serverToken != "" {
+		headers.Set("X-Server-Token", serverToken)
 	}
 
 	var lastErr error
