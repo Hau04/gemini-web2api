@@ -254,6 +254,17 @@ and the startup banner states the same thing instead of promising a fallback. Wh
 
 `source=captured` means "a tenant-valid model is now being sent, but it is whatever the tab had selected" — set a mapping if you want a specific one. Previously the log printed `model="gemini-4-hydrogen"`, which implied the alias was sent upstream; it never was.
 
+### Authenticating the diagnostic endpoints
+
+`/v1/*` is protected by `api_keys`. Any of these forms works — `invalid api key` now tells you so in the response body:
+
+```bash
+KEY=your-key-from-config
+curl -H "Authorization: Bearer $KEY" http://localhost:8081/v1/model-info?model=gemini-4-hydrogen
+curl -H "x-api-key: $KEY"            http://localhost:8081/v1/model-info?model=gemini-4-hydrogen
+curl "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen&key=$KEY"
+```
+
 ### Discovering the tenant model id (no DevTools required)
 
 If direct mode should name the model but no tenant id is known, `gemini-web2api` now **asks the tenant instead of guessing**: one minimal `widgetStreamAssist` call carries the requested alias as `assistGenerationConfig.modelId`. If the tenant accepts it, the id is verified, cached per alias in `enterprise_models.json`, and used from then on:

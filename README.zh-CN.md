@@ -255,6 +255,17 @@ send one message in the Gemini Enterprise tab with the extension enabled …, or
 
 `source=captured` 的含义是「已经在发送租户认可的模型，但那是标签页当时选中的那个」；想要固定某个模型就配置映射。之前日志打印 `model="gemini-4-hydrogen"` 会让人以为别名被发送了 —— 实际上从来没有。
 
+### 诊断接口的鉴权
+
+`/v1/*` 受 `api_keys` 保护，以下任意一种写法都可以（`invalid api key` 的响应体现在会直接告诉你怎么传）：
+
+```bash
+KEY=配置里的密钥
+curl -H "Authorization: Bearer $KEY" "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen"
+curl -H "x-api-key: $KEY"            "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen"
+curl "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen&key=$KEY"
+```
+
 ### 自动发现租户模型 id（不用翻 DevTools）
 
 直连模式要报出模型，就必须知道租户 id。现在服务器不再靠猜，而是**直接问租户**：发一个最小的 `widgetStreamAssist`，把请求的别名当作 `assistGenerationConfig.modelId` 发过去。被接受就验证成功、按别名缓存到 `enterprise_models.json`，之后一直使用：
