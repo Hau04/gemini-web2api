@@ -124,6 +124,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Deep-Research", "disabled")
 	}
 
+	// The client's own image/video generators (WorkBuddy ships several) render the
+	// media on the client and spend its credits. Remove them so Gemini's own media
+	// tool does the work instead, and tell the model that in the prompt.
+	req, clientMediaTools := interceptClientMediaTools(req)
+	if len(clientMediaTools) > 0 {
+		w.Header().Set("X-Media-Tools-Intercepted", strings.Join(clientMediaTools, ","))
+		a.Logf("Client offered its own media tool(s) %v — removed from this request so Gemini renders the media itself (no client credits spent)", clientMediaTools)
+	}
+
 	prompt, images, err := format.MessagesToPrompt(req)
 	if err == nil {
 		// Gemini Enterprise: attach referenced files / spill oversized prompt text
@@ -135,6 +144,9 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
 	}
+	if len(clientMediaTools) > 0 {
+		prompt += format.MediaGenerationInstruction(clientMediaTools)
+	}
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -142,6 +154,17 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		ThinkMode:   resolved.Think,
 		ModelHeader: resolved.Header,
 		Extra:       resolved.Extra,
+	}
+
+	// Media only exists in the raw payload, and only a request that asked for
+	// media can produce it — so capture nothing for ordinary chats.
+	var mediaRaw strings.Builder
+	if len(clientMediaTools) > 0 {
+		gemOpt.MediaSink = func(chunk string) {
+			if mediaRaw.Len() < maxInlineChatMediaChars+1 {
+				mediaRaw.WriteString(chunk)
+			}
+		}
 	}
 
 	cid := fmt.Sprintf("chatcmpl-%s", format.RandHex(12))
@@ -667,6 +690,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
 					return
 				}
+				text += chatMediaSuffix(mediaRaw.String())
 				a.Bridge.ClearDegraded()
 			} else {
 				var pkErr *bridge.PickupError
@@ -790,6 +814,26 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if emitErr == nil {
+			// Media cannot be streamed as text deltas, so it arrives as one final
+			// content chunk right before the stop chunk.
+			if suffix := chatMediaSuffix(mediaRaw.String()); suffix != "" {
+				mediaChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index: 0,
+							Delta: &models.OpenAIDelta{
+								Content: suffix,
+							},
+							FinishReason: nil,
+						},
+					},
+				}
+				_ = writeSSEData(w, mediaChunk)
+			}
 			stopReason := "stop"
 			endChunk := models.OpenAIChatResponse{
 				ID:      cid,
@@ -817,6 +861,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
+	text += chatMediaSuffix(mediaRaw.String())
 
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {
