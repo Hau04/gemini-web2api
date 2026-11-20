@@ -447,11 +447,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
 			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin")
-			directErr := c.generateViaDiscoveryDirect(prompt)
+			_, directErr := c.generateViaDiscoveryDirect(prompt)
 			if directErr != nil {
 				c.Logf("Direct Discovery Engine call failed: %v", directErr)
 			}
-			return directErr
+			return "", directErr
 		}
 		return "", &UpstreamError{
 			Status: http.StatusNotFound,
