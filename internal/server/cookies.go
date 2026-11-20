@@ -145,13 +145,14 @@ func sanitizeSyncedOrigin(raw string) string {
 // values so cookie-only pushes never wipe a good token.
 func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
-		Cookie    string `json:"cookie"`
-		SAPISID   string `json:"sapisid"`
-		AuthUser  string `json:"auth_user"`
-		XSRFToken string `json:"xsrf_token"`
-		GeminiBL  string `json:"gemini_bl"`
-		BaseURL   string `json:"base_url"`
-		Origin    string `json:"origin"`
+		Cookie      string `json:"cookie"`
+		SAPISID     string `json:"sapisid"`
+		AuthUser    string `json:"auth_user"`
+		XSRFToken   string `json:"xsrf_token"`
+		GeminiBL    string `json:"gemini_bl"`
+		BaseURL     string `json:"base_url"`
+		Origin      string `json:"origin"`
+		ServerToken string `json:"server_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON payload"})
@@ -201,6 +202,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 			if payload.BaseURL == "" {
 				payload.BaseURL = existing.BaseURL
 			}
+			if payload.ServerToken == "" {
+				payload.ServerToken = existing.ServerToken
+			}
 		}
 	}
 
@@ -219,6 +223,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.BaseURL != "" {
 		stored["base_url"] = payload.BaseURL
+	}
+	if payload.ServerToken != "" {
+		stored["server_token"] = payload.ServerToken
 	}
 
 	data, err := json.Marshal(stored)
@@ -260,8 +267,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"ok":          true,
 		"synced_at":   time.Now().UTC().Format(time.RFC3339),
-		"has_xsrf":    payload.XSRFToken != "" || a.Cfg.XSRFToken != "",
-		"needs_xsrf":  payload.XSRFToken == "" && a.Cfg.XSRFToken == "",
+		"has_xsrf":         payload.XSRFToken != "" || a.Cfg.XSRFToken != "",
+		"has_server_token": payload.ServerToken != "" || a.Cfg.DiscoveryEngineServerToken != "",
+		"needs_xsrf":       payload.XSRFToken == "" && a.Cfg.XSRFToken == "",
 		"auth_error":  nil,
 		"cookie_file": filepath.Base(path),
 	}

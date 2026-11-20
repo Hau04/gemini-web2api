@@ -165,6 +165,10 @@ async function syncCookiesNow(reason) {
     if (xsrf) payload.xsrf_token = xsrf;
     if (authUser) payload.auth_user = authUser;
     if (harvestOrigin) payload.origin = harvestOrigin;
+    try {
+      const st = await chrome.storage.local.get(["serverToken"]);
+      if (st && st.serverToken) payload.server_token = String(st.serverToken);
+    } catch (e) {}
 
     const cfg = await getBridgeConfig();
     const res = await fetch(`${cfg.url}/bridge/cookies`, {
@@ -363,11 +367,17 @@ async function pushChatModeNow() {
   }
 }
 
-// Re-sync immediately when the user updates the server address/token in the popup.
+// Re-sync immediately when the user updates the server address/token in the popup,
+// or when the content script harvests a fresh x-server-token from widgetStreamAssist.
 chrome.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.action === "syncCookiesNow") {
+  if (!msg) return;
+  if (msg.action === "syncCookiesNow") {
     syncCookiesNow("manual");
     pushChatModeNow();
+  } else if (msg.action === "web2api-server-token" && msg.serverToken) {
+    chrome.storage.local.set({ serverToken: String(msg.serverToken) }).then(() => {
+      syncCookiesNow("server-token");
+    }).catch(() => {});
   }
 });
 }
