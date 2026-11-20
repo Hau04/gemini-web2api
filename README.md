@@ -207,10 +207,39 @@ Supports Google native API endpoints:
 - `POST /v1beta/models/{model}:generateContent` — non-streaming
 - `POST /v1beta/models/{model}:streamGenerateContent` — streaming (SSE)
 
+## WorkBuddy / MCP compatibility
+
+Built for agent runtimes that drive tools, connectors, skills and MCP servers (WorkBuddy, Claude-style agents, the OpenAI SDKs):
+
+| Feature | Behaviour |
+| --- | --- |
+| `GET /v1/models` | Every alias with `capabilities` (`tools`, `connectors`, `mcp`, `vision`, `attachments`, `json_mode`, `streaming`), `context_window`, `premium` and `research_prone` flags, so a client can filter before enabling a feature |
+| `GET /v1/models/{id}` | Single-model probe (200/404) used by agent runtimes to validate a configured id |
+| `parallel_tool_calls: false` | Enforced in the prompt: exactly one `tool_call` block per turn |
+| Duplicate / nameless tools | Merged MCP + connector sets are deduped by name; built-in declarations such as `{"type":"web_search"}` (no function name) are skipped instead of leaking a nameless entry |
+| MCP tool names | Namespaced names (`mcp__server__tool`, `server.tool`) are passed through untouched — they are executed by your client, never by Gemini |
+| Skills | Long `system`-only prompts are supported (skills are just instruction bundles); `/v1/responses` is fully supported alongside `/v1/chat/completions` |
+
+### Premium models never fall into Deep Research
+
+Neon, Hydrogen, Carbon and Argon are flagged `research_prone`, because the Gemini UI happily pushes them into Deep Research — a mode that reads the public web only and **cannot run your tools, connectors or MCP servers**. With `prevent_deep_research` (default `true`) a tool-enabled request to one of those models:
+
+- drops upstream research/browsing tools (`google_search`, `web_search`, `web_search_preview`, `deep_research`, `url_context`, `browse`, …) while keeping your real tools;
+- folds an `EXECUTION MODE` line into the `# Tool Use` preamble: Deep Research / built-in search are disabled, facts about the machine, repo, files or apps must come from a `tool_call`, and missing data must be fetched with a tool instead of researched;
+- answers with `X-Deep-Research: disabled` and logs `Execution-mode guard applied for premium model "gemini-4-neon" …`.
+
+```jsonc
+{ "prevent_deep_research": true, "tool_model": "gemini-3.8-flash" }
+```
+
+`tool_model` still wins when you want tool-enabled requests to run on a cheaper, reliable tool-caller regardless of the model the client asked for.
+
 ## Available Models
 
 | Model                            | Description                                  | Output          |
 | -------------------------------- | -------------------------------------------- | --------------- |
+| `gemini-4-neon`                  | Newest frontier model for complex work (needs Enterprise/Pro) | **~20k+ chars** |
+| `neon`, `gemini-4-neon-thinking` | Aliases for gemini-4-neon                    | **~20k+ chars** |
 | `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
 | `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
 | `gemini-4-hydrogen`              | High-speed frontier execution model          | **~20k+ chars** |
@@ -400,6 +429,19 @@ When `base_url` is customized, `gemini-web2api` automatically switches its `Orig
 
 **Discovery Engine replay (Enterprise direct mode):** the extension's net-hook captures the app's own `streamAssist` request (URL, headers, body) whenever the tab generates, splices the submitted prompt out for a `__W2A_PROMPT__` marker, and pushes the template to `POST /bridge/reqtemplate` (persisted next to the cookie file). On a latched Enterprise origin the server replays that template with fresh cookies and the new prompt — so `/v1/chat/completions` works **with the browser closed**. Templates carry the captured `Authorization` (usually SAPISIDHASH); if it has expired the server retries with freshly recomputed SAPISIDHASH values and, failing that, tells you to send one prompt through the open tab to refresh the template. Check status with `GET /bridge/reqtemplate`.
 
+**Model selection on Enterprise:** Gemini Enterprise answers with the model its assistant is configured with unless the request carries `assistGenerationConfig.modelId`. `gemini-web2api` now sends it, so a client asking for `gemini-4-hydrogen` is no longer silently downgraded to the tenant's "auto":
+
+```jsonc
+{
+  "discovery_engine_models": { "gemini-4-hydrogen": "gemini-2.5-flash", "argon": "gemini-2.5-pro" },
+  "discovery_engine_default_model_id": ""   // optional fallback for unmapped names
+}
+```
+
+Values must be model ids your tenant accepts (look at `assistGenerationConfig.modelId` in the tab's own `widgetStreamAssist` request). Names that already look like upstream ids (`gemini-2.5-pro`, `gemini-3-pro`) are passed through untouched; local aliases (`argon`/`hydrogen`/`carbon`) are never passed through, because the tenant does not know them. Captured-template replays get the same treatment: the modelId baked into the template is rewritten.
+
+**Oversized prompts on Enterprise skip the browser spillover:** the `.txt` spillover exists to dodge consumer Gemini Web composer limits. On a Discovery Engine origin the prompt is inlined into the `streamAssist` JSON body, so oversized requests now go straight to direct mode instead of waiting on a live tab (which is what produced `Bridge request failed before stream start: context canceled` + 502). The bridge is still used when direct mode has no transport at all.
+
 **Widget JWT auth (this is what fixes Enterprise 502s):** the Discovery Engine widget endpoints (`widgetStreamAssist`, `widgetCreateSession`, `widgetAddContextFile`) on `vertexaisearch.cloud.google.com` deployments do **not** accept the consumer `SAPISIDHASH` header. The app mints a short-lived HS256 JWT instead:
 
 1. `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` with your cookies → `{"xsrfToken":"<base64url HMAC key>","keyId":"<kid>"}`
@@ -409,6 +451,40 @@ When `base_url` is customized, `gemini-web2api` automatically switches its `Orig
 `gemini-web2api` does all of that automatically once it knows the **`csesidx`** (the conversation/config sequence id in the Gemini Enterprise tab URL). The extension harvests it during cookie sync (`?csesidx=…`), so a normal cookie sync is enough; otherwise set `discovery_engine_csesidx`. `discovery_engine_config_id` is also required — it is the widget `configId` the app sends (captured automatically when you attach a file in the tab). `discovery_engine_location` (default `us`, or derived from your endpoint) picks the regional widget host.
 
 Without a `csesidx` the server falls back to the old cookie-authenticated `?key=` endpoint, which is exactly the path that answers `502` / `no answer text` on most tenants — the startup banner reports which transport is in use (`Widget auth: widget JWT (csesidx=…)` vs `cookie fallback`).
+
+**Editing a long code file without the fetch loop:** when a prompt references a source file at or above `enterprise_auto_attach_min_bytes` (default: `bridge_large_code_upload_bytes`, 8 KB), the file is attached and the prompt gets a short inventory instead of the body:
+
+```
+# Attached workspace files (already loaded — do not re-read)
+- /work/app/handlers.ts — 1,842 lines, 78 KB — attached as context file "handlers.ts"
+These attachments are the current on-disk version as of this request. Do not call read_file, grep or shell cat to
+fetch their contents again ... Make the change with your edit/write tool using a targeted patch (str_replace /
+line range) — the updated file is re-attached automatically on the next turn, so no verification read is needed.
+```
+
+That removes both halves of the round-trip cost: the model never spends a turn `read_file`-ing the file, and it never has to echo the whole file back as a tool argument (the expensive output). After WorkBuddy writes the patch, the **next** request re-reads the file from disk and attaches the new bytes as a new version, so the model sees its own edit without a verification read. Uploads are content-hash cached: one upload per file *version*, zero per turn.
+
+Honest scope: the attachment is read-only context. The actual edit still goes through WorkBuddy's own write tool — but that direction is free, because content moves from the model to your disk, never back to Gemini.
+
+**How images are actually read:** `widgetAddContextFile` is the same call the Gemini Enterprise app makes when you paste a picture into its composer — the bytes land in the assistant session and `streamAssist` references them by `fileId`, so the multimodal assistant reads the image itself (vision tokens), not a filename. `gemini-web2api` uploads images byte-for-byte with their real MIME type (`image/png`, `image/jpeg`, …) and never converts them to text: `IsTextLike()` returns false for image types, so an image can never be silently inlined as garbage. The upload log proves the shape: `Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`.
+
+Images arrive by any of the three routes: OpenAI `image_url` parts (data URL or remote URL, fetched then uploaded), Google `inlineData` parts, and local paths referenced in a prompt (`.png/.jpg/.jpeg/.webp/.gif/.bmp` are auto-attached). If the tenant rejects the upload, the request fails with an actionable error instead of dropping the image.
+
+**Anti-ban attachment strategy (big files, images, PDF/Office):** on Enterprise the prompt is inlined into the `streamAssist` body, so an agent that re-sends file content every turn is exactly what trips rate limits. With an upload transport available the server now moves that content into context-file attachments instead:
+
+- files the latest user message references by path (PDF, Word, PowerPoint, images, long source files) are read from disk and attached — the model reads them natively, including images;
+- an oversized prompt, or large fenced code blocks inside it, is spilled into one `.txt` attachment and replaced by a short notice;
+- uploads are cached by content hash (`discovery_engine_upload_cache_sec`), so the same file is uploaded once and then referenced by `fileId` on later turns.
+
+```jsonc
+{
+  "enterprise_auto_attach_local_files": true,   // attach referenced local files
+  "enterprise_auto_attach_min_bytes": 0,        // 0 = reuse bridge_large_code_upload_bytes
+  "enterprise_attach_large_prompt": true        // spill oversized prompts into a .txt
+}
+```
+
+Both switches are no-ops without an upload transport (no captured template, no `discovery_engine_upload_endpoint`, no widget `csesidx`): in that case content stays inline so nothing is silently dropped. Verify with the log line `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")` — `files=0` means nothing was attached.
 
 **File attachments with the browser closed (Enterprise):** consumer Gemini Web uploads attachments through the `content-push.googleapis.com` pipeline and references them from the Bard RPC payload. Gemini Enterprise has no such pipeline — the app attaches files to the *assistant session* instead (`widgetAddContextFile` → `fileId`, then `streamAssist` with `fileIds` + `session`), so cookie mode used to answer `this Gemini Enterprise origin needs the browser bridge for image attachments`. That gap is closed:
 

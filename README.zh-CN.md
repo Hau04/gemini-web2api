@@ -208,12 +208,41 @@ gemini
 * `POST /v1beta/models/{model}:generateContent`— 非流媒体
 * `POST /v1beta/models/{model}:streamGenerateContent`— 流媒体（上交所）
 
+## WorkBuddy / MCP 兼容性
+
+面向会驱动工具、连接器、技能与 MCP 服务器的代理运行时（WorkBuddy、Claude 风格 agent、OpenAI SDK）：
+
+| 能力 | 行为 |
+| --- | --- |
+| `GET /v1/models` | 每个别名都带 `capabilities`（`tools`、`connectors`、`mcp`、`vision`、`attachments`、`json_mode`、`streaming`）、`context_window`、`premium`、`research_prone`，客户端可在启用功能前先做能力判断 |
+| `GET /v1/models/{id}` | 单模型查询（200/404），代理运行时用来校验配置的模型 id |
+| `parallel_tool_calls: false` | 在提示词中强制：每轮只能输出**一个** `tool_call` 块 |
+| 重复/无名工具 | MCP 与连接器合并后按名称去重；`{"type":"web_search"}` 这类没有函数名的内置声明会被跳过，不会污染提示词 |
+| MCP 工具名 | `mcp__server__tool`、`server.tool` 等带命名空间的名称原样透传 —— 它们由你的客户端执行，不会被 Gemini 接管 |
+| 技能 | 支持纯 `system` 长指令（技能本质就是指令包）；`/v1/responses` 与 `/v1/chat/completions` 同样完整支持 |
+
+### 高级模型不会掉进 Deep Research
+
+Neon、Hydrogen、Carbon、Argon 被标记为 `research_prone`：Gemini 界面很容易把它们切到 Deep Research，而那个模式只读公开网页、**无法调用你的工具、连接器或 MCP**。开启 `prevent_deep_research`（默认 `true`）后，带工具的请求：
+
+- 丢弃上游研究/浏览类工具（`google_search`、`web_search`、`web_search_preview`、`deep_research`、`url_context`、`browse` 等），保留你真正的工具；
+- 在 `# Tool Use` 段里注入 `EXECUTION MODE`：Deep Research 与内置搜索被禁用，关于本机、仓库、文件、应用的事实必须来自 `tool_call`，缺数据就先发工具调用而不是去研究；
+- 响应头返回 `X-Deep-Research: disabled`，日志输出 `Execution-mode guard applied for premium model "gemini-4-neon" …`。
+
+```jsonc
+{ "prevent_deep_research": true, "tool_model": "gemini-3.8-flash" }
+```
+
+若想让所有带工具的请求都走更稳定、更便宜的工具调用模型，`tool_model` 依然优先生效。
+
 ## 可用型号
 
 |型号|描述 |输出|
 | -------------------------------- | ------------------------------------------------------------------ | ---------------- |
 |`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
 |`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
+|`gemini-4-neon`|最新前沿模型（需企业版/Pro）|**~20k+ 字符**|
+|`neon`、`gemini-4-neon-thinking`| gemini-4-neon 的别名 |**~20k+ 字符**|
 |`gemini-4-hydrogen`|高速前沿执行模型|**~20k+ 字符**|
 |`hydrogen`| Gemini-4-氢的别名 |**~20k+ 字符**|
 |`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
@@ -388,6 +417,19 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
+**企业版模型选择：** Gemini Enterprise 默认使用助手自身配置的模型，除非请求里带 `assistGenerationConfig.modelId`。现在服务器会发送它，客户端指定 `gemini-4-hydrogen` 就不会再被静默降级为租户的「auto」：
+
+```jsonc
+{
+  "discovery_engine_models": { "gemini-4-hydrogen": "gemini-2.5-flash", "argon": "gemini-2.5-pro" },
+  "discovery_engine_default_model_id": ""
+}
+```
+
+值必须是租户接受的模型 id（可在标签页自身 `widgetStreamAssist` 请求的 `assistGenerationConfig.modelId` 里看到）。本身就像上游 id 的名字（`gemini-2.5-pro`、`gemini-3-pro`）会原样传递；`argon`/`hydrogen`/`carbon` 这类本地别名不会透传（租户不认识）。重放捕获模板时同样会改写模板里写死的 modelId。
+
+**企业版超长提示词不再走浏览器 `.txt` 溢出：** 该机制是为了绕过消费版输入框限制；Discovery Engine 的提示词直接内联在 `streamAssist` 的 JSON 里，因此超长请求现在直接走直连模式，不必等标签页（之前会出现 `context canceled` + 502）。只有直连完全不可用时才会退回桥接。
+
 **Widget JWT 鉴权（解决企业版 502 的关键）：** `vertexaisearch.cloud.google.com` 上的 Discovery Engine widget 接口（`widgetStreamAssist` / `widgetCreateSession` / `widgetAddContextFile`）**不接受**消费版的 `SAPISIDHASH` 头，而是使用短期 HS256 JWT：
 
 1. 带 Cookie 请求 `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` → `{"xsrfToken":"<base64url HMAC 密钥>","keyId":"<kid>"}`
@@ -397,6 +439,39 @@ https://gemini.google.com/u/1/app/...
 只要服务器知道 **`csesidx`**（企业版标签页 URL 里的会话/配置序号），以上流程全自动：扩展在同步 Cookie 时会顺带采集 `?csesidx=…`，也可以手动配置 `discovery_engine_csesidx`。还需要 `discovery_engine_config_id`（应用发出的 widget `configId`，在标签页里上传一次文件即可被捕获）。`discovery_engine_location`（默认 `us`，或从 endpoint 推导）决定区域 widget 域名。
 
 未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
+
+**编辑长代码文件，不再反复读取：** 当提示词引用了达到或超过 `enterprise_auto_attach_min_bytes`（默认复用 `bridge_large_code_upload_bytes`，8 KB）的源码文件时，文件会作为附件上传，提示词里只放一份简短清单：
+
+```
+# Attached workspace files (already loaded — do not re-read)
+- /work/app/handlers.ts — 1,842 lines, 78 KB — attached as context file "handlers.ts"
+These attachments are the current on-disk version as of this request. Do not call read_file ... re-attached
+automatically on the next turn, so no verification read is needed.
+```
+
+这样往返成本的两半都被消掉：模型不必再花一轮去 `read_file`，也不必把整个文件内容当作工具参数回吐（这是最贵的输出）。WorkBuddy 写入补丁后，**下一次**请求会重新从磁盘读取并把新版本作为新附件上传，模型无需验证性重读即可看到自己的修改。上传按内容哈希缓存：每个文件*版本*上传一次，每轮零上传。
+
+需要说清楚的边界：附件是只读上下文，真正的写入仍由 WorkBuddy 的写工具完成 —— 但那个方向是免费的，内容从模型流向你的磁盘，不会回流到 Gemini。
+
+**图片是怎么被读到的：** `widgetAddContextFile` 就是 Gemini Enterprise 应用在输入框粘贴图片时自己发出的调用 —— 字节进入助手会话，`streamAssist` 通过 `fileId` 引用，多模态助手直接读图（视觉 token），而不是只拿到一个文件名。服务器按真实 MIME 原样上传图片（`image/png`、`image/jpeg` 等），绝不会把图片转成文本：`IsTextLike()` 对图片类型返回 false，所以图片不会被悄悄内联成乱码。日志可直接验证：`Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`。
+
+图片来源有三种：OpenAI `image_url` 片段（data URL 或远程 URL，先抓取再上传）、Google `inlineData` 片段、以及提示词里引用的本地路径（`.png/.jpg/.jpeg/.webp/.gif/.bmp` 会被自动附加）。若租户拒绝上传，请求会给出可操作的报错，而不是丢弃图片。
+
+**防封号的附件策略（大文件、图片、PDF/Office）：** 企业版把提示词内联在 `streamAssist` 请求体里，所以编码代理每轮重复发送文件内容正是触发限流/封号的原因。只要上传通道可用，服务器现在会把这些内容移出提示词、改成上下文文件附件：
+
+- 最新一条用户消息里按路径引用的文件（PDF、Word、PowerPoint、图片、较长的源码）会从磁盘读取并作为附件上传，模型可直接读取，图片也能识别；
+- 超长提示词或其中的大段代码会被拆进一个 `.txt` 附件，提示词只留简短说明；
+- 上传结果按内容哈希缓存（`discovery_engine_upload_cache_sec`），同一文件只上传一次，之后复用 `fileId`。
+
+```jsonc
+{
+  "enterprise_auto_attach_local_files": true,
+  "enterprise_auto_attach_min_bytes": 0,
+  "enterprise_attach_large_prompt": true
+}
+```
+
+没有上传通道（没有捕获模板、没有 `discovery_engine_upload_endpoint`、没有 widget `csesidx`）时这两个开关自动失效，内容仍内联，不会被静默丢弃。可用日志 `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")` 验证，`files=0` 表示没有附件。
 
 **关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
 

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -92,4 +93,46 @@ func directiveKey(directive string) string {
 	default:
 		return ""
 	}
+}
+
+// applyToolPolicy enforces the "tools, not research" contract for premium,
+// research-prone models (Neon / Hydrogen / Carbon / Argon).
+//
+// Two things happen when the policy is active and the request really declares
+// tools:
+//   - upstream research/browsing tools (google_search, web_search_preview,
+//     deep_research, url_context, …) are dropped, because they are served by
+//     Gemini itself and drag the turn into Deep Research, which cannot call the
+//     client's tools, connectors or MCP servers;
+//   - req.ResearchGuard is set, which folds the execution-mode lines into the
+//     "# Tool Use" preamble the model reads before choosing a tool.
+//
+// It reports whether the guard was applied.
+func (a *App) applyToolPolicy(req *models.OpenAIChatRequest, resolved models.Resolved) bool {
+	if !a.Cfg.PreventDeepResearch || !resolved.ResearchProne || len(req.Tools) == 0 {
+		return false
+	}
+
+	kept, removed := format.StripBuiltinResearchTools(req.Tools)
+	if len(removed) > 0 {
+		req.Tools = kept
+		if a.Logf != nil {
+			a.Logf("Deep Research disabled for %q: dropped built-in research tool(s) %s — a premium model cannot execute them and they pull the turn away from the client's tools",
+				resolved.Name, strings.Join(removed, ", "))
+		}
+	}
+	if len(req.Tools) == 0 {
+		return false
+	}
+
+	req.ResearchGuard = true
+	if a.Logf != nil {
+		msg := fmt.Sprintf("Execution-mode guard applied for premium model %q: Deep Research / built-in browsing disabled, %d client tool(s) enforced",
+			resolved.Name, len(req.Tools))
+		if strings.TrimSpace(a.Cfg.ToolModel) == "" {
+			msg += " (tip: set \"tool_model\" if the model still ignores your tools)"
+		}
+		a.Logf("%s", msg)
+	}
+	return true
 }

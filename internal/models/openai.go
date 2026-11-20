@@ -5,7 +5,15 @@ type OpenAIChatRequest struct {
 	Messages   []OpenAIMessage `json:"messages"`
 	Tools      []OpenAITool    `json:"tools"`
 	ToolChoice any             `json:"tool_choice"`
-	Stream     bool            `json:"stream"`
+	// ParallelToolCalls is honoured when a client explicitly disables batching
+	// (some MCP-heavy agent runtimes need strictly one tool call per turn).
+	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
+	Stream            bool  `json:"stream"`
+
+	// ResearchGuard folds the "tools, not research" execution-mode lines into
+	// the tool preamble. Set by the server for premium, research-prone models
+	// when prevent_deep_research is on; never decoded from client JSON.
+	ResearchGuard bool `json:"-"`
 }
 
 type OpenAIMessage struct {

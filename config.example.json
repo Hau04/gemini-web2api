@@ -17,6 +17,11 @@
   "discovery_engine_upload_cache_sec": 1800,
   "discovery_engine_csesidx": "",
   "discovery_engine_location": "",
+  "discovery_engine_models": {},
+  "discovery_engine_default_model_id": "",
+  "enterprise_auto_attach_local_files": true,
+  "enterprise_auto_attach_min_bytes": 0,
+  "enterprise_attach_large_prompt": true,
   "api_keys": [
     "sk-gemini"
   ],
@@ -34,6 +39,7 @@
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 8192,
   "bridge_spillover_chars": 20000,
+  "prevent_deep_research": true,
   "bridge_delta_context": true,
   "bridge_auto_new_chat": true,
   "bridge_token": "",

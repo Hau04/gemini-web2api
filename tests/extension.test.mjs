@@ -291,6 +291,11 @@ test("streamGenerateContent filters thought:true parts and emits model answer de
 // ---------------------------------------------------------------------------
 // 4. bridge.js text sanitization & "Gemini 4 Hydrogen" regression tests
 // ---------------------------------------------------------------------------
+test("cleanResponseText drops a standalone 'Gemini 4 Neon' turn header", () => {
+  assert.equal(bridge.cleanResponseText("Gemini 4 Neon"), "");
+  assert.equal(bridge.isNonAnswerBoilerplate("Gemini 4 Neon", "hello"), true);
+});
+
 test("cleanResponseText rejects standalone 'Gemini 4 Hydrogen' and strips leading model header while preserving real mentions", () => {
   // Exact user-reported bug: model badge alone must become empty!
   assert.equal(bridge.cleanResponseText("Gemini 4 Hydrogen"), "");
@@ -331,6 +336,8 @@ test("escapeHtml preserves WorkBuddy XML tags in contenteditable fallback", () =
 });
 
 test("resolveModelKeywords respects requested model family instead of hardcoding hydrogen", () => {
+  assert.equal(bridge.resolveModelKeywords("gemini-4-neon").family, "neon");
+  assert.equal(bridge.resolveModelKeywords("neon").label, "Gemini 4 Neon");
   assert.equal(bridge.resolveModelKeywords("gemini-4-hydrogen").family, "hydrogen");
   assert.equal(bridge.resolveModelKeywords("gemini-4-argon").family, "argon");
   assert.equal(bridge.resolveModelKeywords("gemini-3.6-flash").family, "flash");

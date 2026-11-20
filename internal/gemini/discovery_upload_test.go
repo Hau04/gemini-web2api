@@ -3,6 +3,7 @@ package gemini
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -429,5 +430,90 @@ func TestPrepareEnterpriseAttachmentsNotesSkippedFiles(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "could not be attached - inline budget exhausted: drop.txt") {
 		t.Errorf("expected a note naming the skipped attachment: %s", prompt[len(prompt)-200:])
+	}
+}
+
+// Images must reach the widget API byte-for-byte with an image MIME type — that
+// is what makes the model able to actually see them (the same call the Gemini
+// Enterprise app makes when you paste a picture into the composer).
+func TestUploadEnterpriseFileSendsImageBytes(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	png := []byte("\x89PNG\r\n\x1a\n" + strings.Repeat("\x00", 32))
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		_, _ = w.Write([]byte(`{"addContextFileResponse":{"session":"collections/c/engines/e/sessions/7","fileId":"img-1"}}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+	}
+	var logs []string
+	c := NewClient(cfg)
+	c.HTTP = srv.Client()
+	c.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	fileID, session, err := c.UploadEnterpriseFile(RawFile{Name: "diagram.png", MIME: "image/png", Data: png})
+	if err != nil {
+		t.Fatalf("UploadEnterpriseFile() error = %v", err)
+	}
+	if fileID != "img-1" || session != "collections/c/engines/e/sessions/7" {
+		t.Errorf("upload = (%q, %q)", fileID, session)
+	}
+	wantB64 := base64.StdEncoding.EncodeToString(png)
+	if !strings.Contains(gotBody, `"mimeType":"image/png"`) {
+		t.Errorf("upload body lost the image MIME type: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, `"fileName":"diagram.png"`) {
+		t.Errorf("upload body lost the filename: %s", gotBody)
+	}
+	if !strings.Contains(gotBody, wantB64) {
+		t.Error("upload body does not carry the exact image bytes")
+	}
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, "image/png") || !strings.Contains(joined, "fileId=img-1") {
+		t.Errorf("upload log should report the MIME type and fileId, got: %s", joined)
+	}
+}
+
+// A binary attachment that cannot be uploaded must fail with an actionable
+// message instead of being silently turned into prompt text.
+func TestPrepareEnterpriseAttachmentsBinaryFailureIsActionable(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer srv.Close()
+
+	c := NewClient(config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+	})
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+
+	_, _, _, err := c.prepareEnterpriseAttachments("describe this", []RawFile{
+		{Name: "photo.jpg", MIME: "image/jpeg", Data: []byte("\xff\xd8\xff\xe0fakejpeg")},
+	})
+	if err == nil {
+		t.Fatal("expected an error for an un-uploadable image")
+	}
+	msg := err.Error()
+	for _, want := range []string{"photo.jpg", "image/jpeg", "cannot be inlined", "discovery_engine_csesidx"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error message should mention %q: %s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "prompt") && !strings.Contains(msg, "cannot be inlined") {
+		t.Errorf("image must not be reported as inlined text: %s", msg)
 	}
 }

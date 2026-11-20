@@ -47,7 +47,7 @@
   // Pure Text Filtering & Classification Helpers (shared with unit tests)
   // ---------------------------------------------------------------------------
 
-  const MODEL_HEADER_RE = /^(?:gemini(?:\s+\d+(?:\.\d+)?)?(?:\s+(?:hydrogen|argon|carbon|flash|pro|ultra|nano|auto|thinking|lite|enterprise|experimental|preview))*|auto|hydrogen|argon|carbon|gemini\s+enterprise)$/i;
+  const MODEL_HEADER_RE = /^(?:gemini(?:\s+\d+(?:\.\d+)?)?(?:\s+(?:neon|hydrogen|argon|carbon|flash|pro|ultra|nano|auto|thinking|lite|enterprise|experimental|preview))*|auto|neon|hydrogen|argon|carbon|gemini\s+enterprise)$/i;
   const THINKING_ONLY_RE = /^(?:thinking|generating|searching|loading|working|analyzing|reasoning|show thinking|hide thinking|thought for \d+[^.\n]*|preparing response)(?:\.{1,3}|…)?$/i;
 
   const UI_CONTROL_TERMS = new Set([
@@ -179,11 +179,12 @@
   function resolveModelKeywords(requestedModel) {
     const m = String(requestedModel || "").trim().toLowerCase();
     if (!m) return null;
-    const FAMILIES = ["hydrogen", "carbon", "argon"];
-    if (m.includes("hydrogen")) return { family: "hydrogen", keywords: ["gemini 4 hydrogen", "hydrogen"], exclude: ["carbon", "argon"], label: "Gemini 4 Hydrogen" };
-    if (m.includes("argon")) return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["hydrogen", "carbon"], label: "Gemini 4 Argon" };
-    if (m.includes("carbon")) return { family: "carbon", keywords: ["gemini 4 carbon", "carbon"], exclude: ["hydrogen", "argon"], label: "Gemini 4 Carbon" };
-    if (m === "gemini-4" || m === "gemini 4") return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["hydrogen", "carbon"], label: "Gemini 4 Argon" }; // server registry aliases gemini-4 -> argon
+    const FAMILIES = ["neon", "hydrogen", "carbon", "argon"];
+    if (m.includes("neon")) return { family: "neon", keywords: ["gemini 4 neon", "neon"], exclude: ["hydrogen", "carbon", "argon"], label: "Gemini 4 Neon" };
+    if (m.includes("hydrogen")) return { family: "hydrogen", keywords: ["gemini 4 hydrogen", "hydrogen"], exclude: ["neon", "carbon", "argon"], label: "Gemini 4 Hydrogen" };
+    if (m.includes("argon")) return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["neon", "hydrogen", "carbon"], label: "Gemini 4 Argon" };
+    if (m.includes("carbon")) return { family: "carbon", keywords: ["gemini 4 carbon", "carbon"], exclude: ["neon", "hydrogen", "argon"], label: "Gemini 4 Carbon" };
+    if (m === "gemini-4" || m === "gemini 4") return { family: "argon", keywords: ["gemini 4 argon", "argon"], exclude: ["neon", "hydrogen", "carbon"], label: "Gemini 4 Argon" }; // server registry aliases gemini-4 -> argon
     const fm = m.match(/(\d+(?:\.\d+)?)[\s-]*flash/) || m.match(/flash[\s-]*(\d+(?:\.\d+)?)/);
     if (fm) {
       const v = fm[1];

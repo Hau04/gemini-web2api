@@ -1003,6 +1003,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 	strChoice, isStr := req.ToolChoice.(string)
 	if (!isStr || strChoice != "none") && len(req.Tools) > 0 {
 		var toolDefs []models.OpenAIFunction
+		seenTool := make(map[string]bool, len(req.Tools))
 		for _, tool := range req.Tools {
 			fn := tool.Function
 			if fn.Name == "" {
@@ -1016,6 +1017,20 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 			}
 			if fn.Parameters == nil {
 				fn.Parameters = map[string]any{}
+			}
+			if name := strings.TrimSpace(fn.Name); name != "" {
+				// MCP servers (and merged connector sets) happily declare the same
+				// tool twice; a duplicate preamble only wastes prompt budget.
+				if seenTool[name] {
+					continue
+				}
+				seenTool[name] = true
+			}
+			if strings.TrimSpace(fn.Name) == "" {
+				// Built-in tool declarations such as {"type":"web_search"} carry no
+				// function name; emitting them would put a nameless entry in the
+				// prompt and widen the allowed-name set.
+				continue
 			}
 
 			toolDefs = append(toolDefs, fn)
@@ -1031,6 +1046,13 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					deferCfg.DeferExecName, deferCfg.ToolNameKey, deferCfg.ParamsKey,
 				)
 			}
+			guard := ""
+			if req.ResearchGuard {
+				guard = ExecutionModeLines("")
+			}
+			if req.ParallelToolCalls != nil && !*req.ParallelToolCalls {
+				guard += "- The client disabled parallel tool calls: emit exactly ONE tool_call block per turn, then wait for its result.\n"
+			}
 			constraint := BuildToolChoiceInstruction(req.ToolChoice)
 			defsJSON := compactToolDefinitions(toolDefs)
 			parts = append(parts, fmt.Sprintf(
@@ -1039,12 +1061,14 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"- You DO have execution access to ALL tools & connectors listed below through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files, shell, GitHub, email, or external apps — call the matching declared tools below instead.\n"+
 					"- Do NOT use Gemini's built-in web search, Deep Research, or any built-in tools for these tasks. Local files, shell commands, GitHub repos and email must be handled by emitting the declared tool_call blocks below — never research or guess their contents yourself.\n"+
 					"%s"+
+					"%s"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"- Output ONLY the tool_call block(s) when calling tools. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it (attached files are virtual uploads, not on disk — do not call Read for them).\n\n"+
 					"Available tools:\n%s%s",
 				connectorNote,
+				guard,
 				string(defsJSON),
 				constraint,
 			))

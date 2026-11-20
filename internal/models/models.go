@@ -11,55 +11,88 @@ import (
 // Mode corresponds to the Gemini upstream mode ID, Think specifies the default reasoning depth,
 // and Extra contains index-based overrides for Gemini's sparse RPC request array.
 type Model struct {
-	Mode   int         `json:"mode"`
-	Think  int         `json:"think"`
-	Desc   string      `json:"desc"`
-	Header string      `json:"header,omitempty"`
-	Extra  map[int]any `json:"extra,omitempty"`
+	Mode int `json:"mode"`
+	// ResearchProne marks the premium Gemini 4 models that the Gemini UI likes to
+	// push into Deep Research / browsing agents. Those modes cannot call the
+	// client's tools, so tool-enabled requests to them get an execution-mode
+	// guard (see prevent_deep_research).
+	ResearchProne bool        `json:"research_prone,omitempty"`
+	Think         int         `json:"think"`
+	Desc          string      `json:"desc"`
+	Header        string      `json:"header,omitempty"`
+	Extra         map[int]any `json:"extra,omitempty"`
 }
 
 var MODELS = map[string]Model{
 	"gemini-4-argon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Frontier model for complex tasks (Gemini 4 Argon, requires Google AI Pro cookie)",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Frontier model for complex tasks (Gemini 4 Argon, requires Google AI Pro cookie)",
 	},
 	"argon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-argon",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-argon",
 	},
 	"gemini-4": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-argon",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-argon",
+	},
+	"gemini-4-neon": {
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Newest frontier model for complex work (Gemini 4 Neon, requires Gemini Enterprise or Google AI Pro cookie)",
+	},
+	"neon": {
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-neon",
+	},
+	"gemini-4-neon-thinking": {
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-neon",
 	},
 	"gemini-4-hydrogen": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "High-speed frontier execution model (Gemini 4 Hydrogen)",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "High-speed frontier execution model (Gemini 4 Hydrogen)",
 	},
 	"hydrogen": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-hydrogen",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-hydrogen",
 	},
 	"gemini-4-carbon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Frontier model (Gemini 4 Carbon)",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Frontier model (Gemini 4 Carbon)",
 	},
 	"carbon": {
-		Mode:   8,
-		Think:  4,
-		Header: "95a4c0abcba24364",
-		Desc:   "Alias for gemini-4-carbon",
+		Mode:          8,
+		Think:         4,
+		Header:        "95a4c0abcba24364",
+		ResearchProne: true,
+		Desc:          "Alias for gemini-4-carbon",
 	},
 	"gemini-3.8-flash": {
 		Mode:  1,
@@ -120,12 +153,14 @@ var MODELS = map[string]Model{
 }
 
 type Resolved struct {
-	Name     string
-	Mode     int
-	Think    int
-	Header   string
-	Fallback bool
-	Extra    map[int]any
+	Name string
+	Mode int
+	// ResearchProne mirrors Model.ResearchProne for the resolved model.
+	ResearchProne bool
+	Think         int
+	Header        string
+	Fallback      bool
+	Extra         map[int]any
 	// ChatMode carries the optional chat-session directive parsed from the model
 	// suffix: "" (auto), "new" (@new — always start a fresh chat in the browser
 	// tab), or "continue" (@continue — always append to the tab's currently open
@@ -195,12 +230,13 @@ func Resolve(modelName, defaultName string) (Resolved, error) {
 	}
 
 	return Resolved{
-		Name:     modelName,
-		Mode:     cfg.Mode,
-		Think:    thinkMode,
-		Header:   cfg.Header,
-		Fallback: fallback,
-		Extra:    cfg.Extra,
-		ChatMode: chatMode,
+		Name:          modelName,
+		Mode:          cfg.Mode,
+		Think:         thinkMode,
+		Header:        cfg.Header,
+		Fallback:      fallback,
+		Extra:         cfg.Extra,
+		ResearchProne: cfg.ResearchProne,
+		ChatMode:      chatMode,
 	}, nil
 }

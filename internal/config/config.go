@@ -7,15 +7,15 @@ import (
 )
 
 type Config struct {
-	Port                       int      `json:"port"`
-	Host                       string   `json:"host"`
-	RetryAttempts              int      `json:"retry_attempts"`
-	RetryDelaySec              int      `json:"retry_delay_sec"`
-	RequestTimeoutSec          int      `json:"request_timeout_sec"`
-	GeminiBL                   string   `json:"gemini_bl"`
-	AuthUser                   string   `json:"auth_user"`
-	XSRFToken                  string   `json:"xsrf_token"`
-	DefaultModel               string   `json:"default_model"`
+	Port              int    `json:"port"`
+	Host              string `json:"host"`
+	RetryAttempts     int    `json:"retry_attempts"`
+	RetryDelaySec     int    `json:"retry_delay_sec"`
+	RequestTimeoutSec int    `json:"request_timeout_sec"`
+	GeminiBL          string `json:"gemini_bl"`
+	AuthUser          string `json:"auth_user"`
+	XSRFToken         string `json:"xsrf_token"`
+	DefaultModel      string `json:"default_model"`
 	// ToolModel redirects tool-enabled requests to another upstream model so
 	// agent tool calls stay local (e.g. gemini-4-hydrogen, whose tool_call
 	// output WorkBuddy executes, instead of a model that prefers Gemini's
@@ -36,13 +36,18 @@ type Config struct {
 	BridgeAutoUploadLocalFiles bool     `json:"bridge_auto_upload_local_files"`
 	BridgeLargeCodeUploadBytes int      `json:"bridge_large_code_upload_bytes"`
 	BridgeSpilloverChars       int      `json:"bridge_spillover_chars"`
-	BridgeDeltaContext         bool     `json:"bridge_delta_context"`
-	BridgeAutoNewChat          bool     `json:"bridge_auto_new_chat"`
-	BridgeNoContentTimeoutSec  int      `json:"bridge_no_content_timeout_sec"`
-	BridgePickupTimeoutSec     int      `json:"bridge_pickup_timeout_sec"`
-	BridgeToken                string   `json:"bridge_token"`
-	NotifyWebhook              string   `json:"notify_webhook"`
-	NotifyFormat               string   `json:"notify_format"`
+	// PreventDeepResearch keeps premium (research-prone) Gemini 4 models from
+	// drifting into Deep Research / web browsing when the request declares
+	// tools. Those modes read the public web only and cannot invoke the client's
+	// tools, connectors or MCP servers, so a tool-enabled request would fail.
+	PreventDeepResearch       bool   `json:"prevent_deep_research"`
+	BridgeDeltaContext        bool   `json:"bridge_delta_context"`
+	BridgeAutoNewChat         bool   `json:"bridge_auto_new_chat"`
+	BridgeNoContentTimeoutSec int    `json:"bridge_no_content_timeout_sec"`
+	BridgePickupTimeoutSec    int    `json:"bridge_pickup_timeout_sec"`
+	BridgeToken               string `json:"bridge_token"`
+	NotifyWebhook             string `json:"notify_webhook"`
+	NotifyFormat              string `json:"notify_format"`
 	// DiscoveryEngineEndpoint is the Gemini Enterprise Discovery Engine
 	// widgetStreamAssist endpoint URL.
 	DiscoveryEngineEndpoint string `json:"discovery_engine_endpoint"`
@@ -73,50 +78,76 @@ type Config struct {
 	// host (us, eu, global). Defaults to the value in discovery_engine_endpoint
 	// or "us".
 	DiscoveryEngineLocation string `json:"discovery_engine_location"`
+	// DiscoveryEngineModels maps a requested model name (e.g.
+	// "gemini-4-hydrogen") to the Discovery Engine modelId the tenant knows.
+	// Gemini Enterprise ignores model choice unless assistGenerationConfig is
+	// sent, so this is what makes the client's model selection take effect.
+	DiscoveryEngineModels map[string]string `json:"discovery_engine_models"`
+	// DiscoveryEngineDefaultModelID is used for requests whose model has no
+	// mapping entry. Empty leaves the tenant default (its own "auto").
+	DiscoveryEngineDefaultModelID string `json:"discovery_engine_default_model_id"`
+	// EnterpriseAutoAttachLocalFiles reads files the latest user message
+	// references by path and attaches them as context files instead of letting
+	// their content be re-inlined on every turn (the usual rate-limit cause for
+	// coding agents on Enterprise).
+	EnterpriseAutoAttachLocalFiles bool `json:"enterprise_auto_attach_local_files"`
+	// EnterpriseAutoAttachMinBytes is the minimum size for a plain-text/source
+	// file to be attached rather than left inline. 0 reuses
+	// bridge_large_code_upload_bytes.
+	EnterpriseAutoAttachMinBytes int `json:"enterprise_auto_attach_min_bytes"`
+	// EnterpriseAttachLargePrompt spills an oversized prompt (or its large code
+	// blocks) into one .txt context file so the replayed prompt stays small.
+	EnterpriseAttachLargePrompt bool `json:"enterprise_attach_large_prompt"`
 }
 
 func Default() Config {
 	return Config{
-		Port:                       8081,
-		Host:                       "0.0.0.0",
-		RetryAttempts:              3,
-		RetryDelaySec:              2,
-		RequestTimeoutSec:          300,
-		GeminiBL:                   "boq_assistant-bard-web-server_20260716.08_p0",
-		AuthUser:                   "",
-		XSRFToken:                  "",
-		DefaultModel:               "gemini-3.6-flash",
-		ToolModel:                  "",
-		LogRequests:                true,
-		CookieFile:                 "",
-		Proxy:                      "",
-		APIKeys:                    []string{},
-		Impersonate:                "",
-		TemporaryChats:             false,
-		BaseURL:                    "https://gemini.google.com",
-		BridgeMinIntervalMs:        3000,
-		BridgeJitterMs:             2000,
-		BridgeMaxPer10Min:          15,
-		BridgeMaxPerHour:           50,
-		BridgePacingStateFile:      "",
-		BridgeAutoUploadLocalFiles: true,
-		BridgeLargeCodeUploadBytes: 8192,
-		BridgeSpilloverChars:       20000,
-		BridgeDeltaContext:         true,
-		BridgeAutoNewChat:          true,
-		BridgeNoContentTimeoutSec:  120,
-		BridgePickupTimeoutSec:     45,
-		BridgeToken:                "",
-		NotifyWebhook:              "",
-		NotifyFormat:               "ntfy",
-		DiscoveryEngineEndpoint:    "",
-		DiscoveryEngineConfigID:    "",
-		DiscoveryEngineServerToken: "",
-		DiscoveryEngineUploadEndpoint: "",
-		DiscoveryEngineSession:        "",
-		DiscoveryEngineUploadCacheSec: 1800,
-		DiscoveryEngineCsesidx:        "",
-		DiscoveryEngineLocation:       "",
+		Port:                           8081,
+		Host:                           "0.0.0.0",
+		RetryAttempts:                  3,
+		RetryDelaySec:                  2,
+		RequestTimeoutSec:              300,
+		GeminiBL:                       "boq_assistant-bard-web-server_20260716.08_p0",
+		AuthUser:                       "",
+		XSRFToken:                      "",
+		DefaultModel:                   "gemini-3.6-flash",
+		ToolModel:                      "",
+		LogRequests:                    true,
+		CookieFile:                     "",
+		Proxy:                          "",
+		APIKeys:                        []string{},
+		Impersonate:                    "",
+		TemporaryChats:                 false,
+		BaseURL:                        "https://gemini.google.com",
+		BridgeMinIntervalMs:            3000,
+		BridgeJitterMs:                 2000,
+		BridgeMaxPer10Min:              15,
+		BridgeMaxPerHour:               50,
+		BridgePacingStateFile:          "",
+		BridgeAutoUploadLocalFiles:     true,
+		BridgeLargeCodeUploadBytes:     8192,
+		BridgeSpilloverChars:           20000,
+		PreventDeepResearch:            true,
+		BridgeDeltaContext:             true,
+		BridgeAutoNewChat:              true,
+		BridgeNoContentTimeoutSec:      120,
+		BridgePickupTimeoutSec:         45,
+		BridgeToken:                    "",
+		NotifyWebhook:                  "",
+		NotifyFormat:                   "ntfy",
+		DiscoveryEngineEndpoint:        "",
+		DiscoveryEngineConfigID:        "",
+		DiscoveryEngineServerToken:     "",
+		DiscoveryEngineUploadEndpoint:  "",
+		DiscoveryEngineSession:         "",
+		DiscoveryEngineUploadCacheSec:  1800,
+		DiscoveryEngineCsesidx:         "",
+		DiscoveryEngineLocation:        "",
+		DiscoveryEngineModels:          map[string]string{},
+		DiscoveryEngineDefaultModelID:  "",
+		EnterpriseAutoAttachLocalFiles: true,
+		EnterpriseAutoAttachMinBytes:   0,
+		EnterpriseAttachLargePrompt:    true,
 	}
 }
 
@@ -135,46 +166,52 @@ func Load(path string) (Config, error) {
 	// but standard unmarshal over struct fields handles JSON null for strings by leaving existing or setting zero-value if unmarshaling map/struct.
 	// Let's ensure string fields default properly if JSON has explicitly `null`.
 	var aux struct {
-		Port              *int      `json:"port"`
-		Host              *string   `json:"host"`
-		RetryAttempts     *int      `json:"retry_attempts"`
-		RetryDelaySec     *int      `json:"retry_delay_sec"`
-		RequestTimeoutSec *int      `json:"request_timeout_sec"`
-		GeminiBL          *string   `json:"gemini_bl"`
-		AuthUser          *string   `json:"auth_user"`
-		XSRFToken         *string   `json:"xsrf_token"`
-		DefaultModel      *string   `json:"default_model"`
-		ToolModel         *string   `json:"tool_model"`
-		LogRequests       *bool     `json:"log_requests"`
-		CookieFile        *string   `json:"cookie_file"`
-		Proxy             *string   `json:"proxy"`
-		APIKeys           *[]string `json:"api_keys"`
-		Impersonate                *string   `json:"impersonate"`
-		TemporaryChats             *bool     `json:"temporary_chats"`
-		BaseURL                    *string   `json:"base_url"`
-		BridgeMinIntervalMs        *int      `json:"bridge_min_interval_ms"`
-		BridgeJitterMs             *int      `json:"bridge_jitter_ms"`
-		BridgeMaxPer10Min          *int      `json:"bridge_max_per_10min"`
-		BridgeMaxPerHour           *int      `json:"bridge_max_per_hour"`
-		BridgePacingStateFile      *string   `json:"bridge_pacing_state_file"`
-		BridgeAutoUploadLocalFiles *bool     `json:"bridge_auto_upload_local_files"`
-		BridgeLargeCodeUploadBytes *int      `json:"bridge_large_code_upload_bytes"`
-		BridgeSpilloverChars       *int      `json:"bridge_spillover_chars"`
-		BridgeDeltaContext         *bool     `json:"bridge_delta_context"`
-		BridgeAutoNewChat          *bool     `json:"bridge_auto_new_chat"`
-		BridgeNoContentTimeoutSec  *int      `json:"bridge_no_content_timeout_sec"`
-		BridgePickupTimeoutSec     *int      `json:"bridge_pickup_timeout_sec"`
-		BridgeToken                *string   `json:"bridge_token"`
-		NotifyWebhook              *string   `json:"notify_webhook"`
-		NotifyFormat               *string   `json:"notify_format"`
-		DiscoveryEngineEndpoint    *string   `json:"discovery_engine_endpoint"`
-		DiscoveryEngineConfigID    *string   `json:"discovery_engine_config_id"`
-		DiscoveryEngineServerToken *string   `json:"discovery_engine_server_token"`
-		DiscoveryEngineUploadEndpoint *string `json:"discovery_engine_upload_endpoint"`
-		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
-		DiscoveryEngineUploadCacheSec *int    `json:"discovery_engine_upload_cache_sec"`
-		DiscoveryEngineCsesidx        *string `json:"discovery_engine_csesidx"`
-		DiscoveryEngineLocation       *string `json:"discovery_engine_location"`
+		Port                           *int              `json:"port"`
+		Host                           *string           `json:"host"`
+		RetryAttempts                  *int              `json:"retry_attempts"`
+		RetryDelaySec                  *int              `json:"retry_delay_sec"`
+		RequestTimeoutSec              *int              `json:"request_timeout_sec"`
+		GeminiBL                       *string           `json:"gemini_bl"`
+		AuthUser                       *string           `json:"auth_user"`
+		XSRFToken                      *string           `json:"xsrf_token"`
+		DefaultModel                   *string           `json:"default_model"`
+		ToolModel                      *string           `json:"tool_model"`
+		LogRequests                    *bool             `json:"log_requests"`
+		CookieFile                     *string           `json:"cookie_file"`
+		Proxy                          *string           `json:"proxy"`
+		APIKeys                        *[]string         `json:"api_keys"`
+		Impersonate                    *string           `json:"impersonate"`
+		TemporaryChats                 *bool             `json:"temporary_chats"`
+		BaseURL                        *string           `json:"base_url"`
+		BridgeMinIntervalMs            *int              `json:"bridge_min_interval_ms"`
+		BridgeJitterMs                 *int              `json:"bridge_jitter_ms"`
+		BridgeMaxPer10Min              *int              `json:"bridge_max_per_10min"`
+		BridgeMaxPerHour               *int              `json:"bridge_max_per_hour"`
+		BridgePacingStateFile          *string           `json:"bridge_pacing_state_file"`
+		BridgeAutoUploadLocalFiles     *bool             `json:"bridge_auto_upload_local_files"`
+		BridgeLargeCodeUploadBytes     *int              `json:"bridge_large_code_upload_bytes"`
+		BridgeSpilloverChars           *int              `json:"bridge_spillover_chars"`
+		PreventDeepResearch            *bool             `json:"prevent_deep_research"`
+		BridgeDeltaContext             *bool             `json:"bridge_delta_context"`
+		BridgeAutoNewChat              *bool             `json:"bridge_auto_new_chat"`
+		BridgeNoContentTimeoutSec      *int              `json:"bridge_no_content_timeout_sec"`
+		BridgePickupTimeoutSec         *int              `json:"bridge_pickup_timeout_sec"`
+		BridgeToken                    *string           `json:"bridge_token"`
+		NotifyWebhook                  *string           `json:"notify_webhook"`
+		NotifyFormat                   *string           `json:"notify_format"`
+		DiscoveryEngineEndpoint        *string           `json:"discovery_engine_endpoint"`
+		DiscoveryEngineConfigID        *string           `json:"discovery_engine_config_id"`
+		DiscoveryEngineServerToken     *string           `json:"discovery_engine_server_token"`
+		DiscoveryEngineUploadEndpoint  *string           `json:"discovery_engine_upload_endpoint"`
+		DiscoveryEngineSession         *string           `json:"discovery_engine_session"`
+		DiscoveryEngineUploadCacheSec  *int              `json:"discovery_engine_upload_cache_sec"`
+		DiscoveryEngineCsesidx         *string           `json:"discovery_engine_csesidx"`
+		DiscoveryEngineLocation        *string           `json:"discovery_engine_location"`
+		DiscoveryEngineModels          map[string]string `json:"discovery_engine_models"`
+		DiscoveryEngineDefaultModelID  *string           `json:"discovery_engine_default_model_id"`
+		EnterpriseAutoAttachLocalFiles *bool             `json:"enterprise_auto_attach_local_files"`
+		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
+		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -253,6 +290,9 @@ func Load(path string) (Config, error) {
 	if aux.BridgeLargeCodeUploadBytes != nil && *aux.BridgeLargeCodeUploadBytes >= 0 {
 		cfg.BridgeLargeCodeUploadBytes = *aux.BridgeLargeCodeUploadBytes
 	}
+	if aux.PreventDeepResearch != nil {
+		cfg.PreventDeepResearch = *aux.PreventDeepResearch
+	}
 	if aux.BridgeSpilloverChars != nil && *aux.BridgeSpilloverChars >= 0 {
 		cfg.BridgeSpilloverChars = *aux.BridgeSpilloverChars
 	}
@@ -300,6 +340,21 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineLocation != nil {
 		cfg.DiscoveryEngineLocation = *aux.DiscoveryEngineLocation
+	}
+	if len(aux.DiscoveryEngineModels) > 0 {
+		cfg.DiscoveryEngineModels = aux.DiscoveryEngineModels
+	}
+	if aux.DiscoveryEngineDefaultModelID != nil {
+		cfg.DiscoveryEngineDefaultModelID = *aux.DiscoveryEngineDefaultModelID
+	}
+	if aux.EnterpriseAutoAttachLocalFiles != nil {
+		cfg.EnterpriseAutoAttachLocalFiles = *aux.EnterpriseAutoAttachLocalFiles
+	}
+	if aux.EnterpriseAutoAttachMinBytes != nil {
+		cfg.EnterpriseAutoAttachMinBytes = *aux.EnterpriseAutoAttachMinBytes
+	}
+	if aux.EnterpriseAttachLargePrompt != nil {
+		cfg.EnterpriseAttachLargePrompt = *aux.EnterpriseAttachLargePrompt
 	}
 
 	return cfg, nil
