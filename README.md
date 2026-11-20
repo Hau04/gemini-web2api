@@ -234,6 +234,57 @@ Neon, Hydrogen, Carbon and Argon are flagged `research_prone`, because the Gemin
 
 `tool_model` still wins when you want tool-enabled requests to run on a cheaper, reliable tool-caller regardless of the model the client asked for.
 
+## "I selected Hydrogen, but it answers as Auto" — diagnosing model selection
+
+The model that answers is decided in three different places depending on the route, and every one of them can silently fall back. `GET /v1/model-info?model=gemini-4-hydrogen` reports which one applies right now:
+
+```jsonc
+{
+  "requested": "gemini-4-hydrogen",
+  "resolved": { "name": "gemini-4-hydrogen", "mode": 8, "think": 4, "fallback": false },
+  "origin": "discovery_engine",
+  "upstream": { "model_id": "", "source": "tenant-default", "selection_live": false },
+  "transport": ["bridge", "direct"],
+  "discovery_engine_models": {},
+  "warnings": ["Gemini Enterprise model selection is INACTIVE: discovery_engine_models is empty, so every request is answered by the tenant's auto/default model and \"gemini-4-hydrogen\" is ignored. …"]
+}
+```
+
+`upstream.source` tells you exactly what happened:
+
+| `source` | Meaning |
+| --- | --- |
+| `mapping` | `discovery_engine_models` matched — the tenant answers with the mapped model |
+| `passthrough` | the client asked for a tenant id directly (`gemini-2.5-pro`) |
+| `configured-default` | alias unmapped, `discovery_engine_default_model_id` used |
+| `tenant-default` | **nothing was selected — the tenant decides (usually "Auto")** |
+| `alias` | consumer origin: the alias itself routes the model |
+
+Every chat response carries the same verdict in headers, so you never have to believe the answer text (`Gemini`'s self-description in the reply is generated prose, not a routing report):
+
+```
+X-Resolved-Model: gemini-4-hydrogen
+X-Upstream-Model: tenant-default          # or the real tenant model id
+X-Upstream-Model-Source: tenant-default   # mapping | passthrough | configured-default | alias
+X-Model-Selection: ignored-by-tenant      # live | ignored-by-tenant
+```
+
+**Fix for Enterprise tenants:** the alias must be mapped to a model id the tenant actually offers. Read it from the tab's own `widgetStreamAssist` request (`assistGenerationConfig.modelId`) and configure:
+
+```jsonc
+{ "discovery_engine_models": { "gemini-4-hydrogen": "<tenant model id>", "gemini-4-neon": "<tenant model id>" } }
+```
+
+If the tenant's picker does not list Hydrogen/Neon at all, no mapping can invent it — map the alias to the closest model the tenant does offer (e.g. its 4 Argon entry), or use a model id that exists there.
+
+**Bridge mode:** the extension clicks the entry in the tab's model dropdown and then reports the outcome. When the requested model is missing from the picker you now get, instead of a silent Auto answer:
+
+```
+MODEL SELECTION WARNING: the extension could not select "gemini-4-hydrogen" in the tab (picker currently shows "Auto") — this turn and later turns are answered by whatever the tab has open …
+```
+
+and `/bridge/status` grows a `model_selection: { requested, applied, ok }` block, so the last switch attempt is always inspectable.
+
 ## Available Models
 
 | Model                            | Description                                  | Output          |

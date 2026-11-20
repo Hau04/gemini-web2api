@@ -436,17 +436,47 @@ func (c *Client) applyEnterpriseWidgetHeaders(req *http.Request, bearer string) 
 //     tenant model directly
 //  3. discovery_engine_default_model_id
 func (c *Client) EnterpriseModelID(requested string) string {
+	id, _ := c.EnterpriseModelIDSource(requested)
+	return id
+}
+
+// Discovery Engine modelId resolution sources, reported in logs, response
+// headers and GET /v1/model-info so "why is it answering as auto?" is answerable.
+const (
+	ModelIDSourceMapping       = "mapping"            // discovery_engine_models hit
+	ModelIDSourcePassthrough   = "passthrough"        // caller already used a tenant id
+	ModelIDSourceConfigured    = "configured-default" // discovery_engine_default_model_id
+	ModelIDSourceTenantDefault = "tenant-default"     // nothing selected: tenant decides
+)
+
+// EnterpriseModelIDSource resolves the modelId AND reports where it came from.
+func (c *Client) EnterpriseModelIDSource(requested string) (string, string) {
 	name := strings.TrimSpace(requested)
 	lower := strings.ToLower(name)
-	for key, value := range c.Cfg.DiscoveryEngineModels {
-		if strings.ToLower(strings.TrimSpace(key)) == lower {
-			return strings.TrimSpace(value)
-		}
+	if key, value, ok := c.lookupDiscoveryModel(lower); ok {
+		_ = key
+		return value, ModelIDSourceMapping
 	}
 	if looksLikeDiscoveryEngineModel(lower) {
-		return name
+		return name, ModelIDSourcePassthrough
 	}
-	return strings.TrimSpace(c.Cfg.DiscoveryEngineDefaultModelID)
+	if def := strings.TrimSpace(c.Cfg.DiscoveryEngineDefaultModelID); def != "" {
+		return def, ModelIDSourceConfigured
+	}
+	return "", ModelIDSourceTenantDefault
+}
+
+// lookupDiscoveryModel finds a discovery_engine_models entry case-insensitively
+// and reports the configured key so diagnostics can name it.
+func (c *Client) lookupDiscoveryModel(lower string) (string, string, bool) {
+	for key, value := range c.Cfg.DiscoveryEngineModels {
+		if strings.ToLower(strings.TrimSpace(key)) == lower {
+			if v := strings.TrimSpace(value); v != "" {
+				return strings.TrimSpace(key), v, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // looksLikeDiscoveryEngineModel reports whether a name is a plain upstream

@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/bridge"
@@ -21,6 +22,10 @@ type App struct {
 	HTTPClient *http.Client
 	Logf       func(format string, args ...any)
 	Version    string
+
+	// modelState is the last model-selection outcome reported by the extension.
+	modelStateMu sync.Mutex
+	modelState   bridgeModelState
 }
 
 func createHTTPClient(cfg config.Config) *http.Client {
@@ -87,6 +92,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /{$}", a.handleHealth)
 	mux.HandleFunc("GET /v1/models", a.handleModels)
 	mux.HandleFunc("GET /v1/models/{id}", a.handleModelGet)
+	mux.HandleFunc("GET /v1/model-info", a.handleModelInfo)
 	mux.HandleFunc("POST /v1/chat/completions", a.handleChat)
 	mux.HandleFunc("POST /v1/responses", a.handleResponses)
 
@@ -96,6 +102,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /bridge/status", a.handleBridgeStatus)
 	mux.HandleFunc("POST /bridge/pause", a.handleBridgePause)
 	mux.HandleFunc("POST /bridge/heartbeat", a.handleBridgeHeartbeat)
+	mux.HandleFunc("POST /bridge/modelstate", a.handleBridgeModelState)
 	mux.HandleFunc("GET /bridge/poll", a.handleBridgePoll)
 	mux.HandleFunc("POST /bridge/chunk", a.handleBridgeChunk)
 	mux.HandleFunc("POST /bridge/frozen", a.handleBridgeFrozen)

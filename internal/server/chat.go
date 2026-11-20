@@ -116,6 +116,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setModelHeaders(w, resolved)
+	a.reportModelSelection(w, modelStr, resolved)
 	if redirected {
 		w.Header().Set("X-Tool-Model-Override", "true")
 	}

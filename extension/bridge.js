@@ -2891,10 +2891,17 @@
 
     // B. Switch model dropdown if the requested model specifies a known family
     currentTurnPhase = "model-select";
+    let modelSelected = false;
     try {
-      await ensureModelSelected(model);
+      modelSelected = await ensureModelSelected(model);
     } catch (e) {
       console.warn("[Web2API Bridge] Error selecting model:", e);
+    }
+    // Surface the real outcome: an unavailable model means the tab answers with
+    // whatever it has open (usually Auto), not with what the client asked for.
+    reportModelState(model, modelSelected);
+    if (!modelSelected) {
+      console.warn("[Web2API Bridge] Requested model not applied — the tab will answer with its current selection:", model);
     }
 
     // Re-verify inputArea in case model switching re-rendered the composer
@@ -3301,6 +3308,32 @@
   // ---------------------------------------------------------------------------
   // 4. Server Polling, Heartbeat & Chunk Delivery
   // ---------------------------------------------------------------------------
+
+  // Reports the outcome of the model-dropdown switch to the server. A bridge turn
+  // is answered by whatever the tab has selected, so a model missing from the
+  // picker otherwise silently answers as "Auto" with no signal anywhere.
+  async function reportModelState(requested, ok) {
+    let applied = "";
+    try {
+      const trigger = findModelTriggerElement();
+      applied = trigger
+        ? String(extractControlLabel(trigger) || trigger.innerText || trigger.textContent || "").trim().slice(0, 80)
+        : "";
+    } catch (e) {}
+    try {
+      await fetch(`${BRIDGE_URL}/bridge/modelstate`, {
+        method: "POST",
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({
+          requested: String(requested || ""),
+          applied,
+          ok: !!ok,
+          tab: location.hostname,
+          at: Date.now()
+        })
+      });
+    } catch (e) {}
+  }
 
   async function sendHeartbeat() {
     if (!activeReqId) return;

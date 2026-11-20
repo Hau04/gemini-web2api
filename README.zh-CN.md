@@ -235,6 +235,55 @@ Neon、Hydrogen、Carbon、Argon 被标记为 `research_prone`：Gemini 界面�
 
 若想让所有带工具的请求都走更稳定、更便宜的工具调用模型，`tool_model` 依然优先生效。
 
+## 「我选了 Hydrogen，为什么还是 Auto 回答」—— 模型选择诊断
+
+实际回答的模型由三处决定，每一处都可能静默回退。`GET /v1/model-info?model=gemini-4-hydrogen` 会直接告诉你当前是哪种情况：
+
+```jsonc
+{
+  "requested": "gemini-4-hydrogen",
+  "origin": "discovery_engine",
+  "upstream": { "model_id": "", "source": "tenant-default", "selection_live": false },
+  "discovery_engine_models": {},
+  "warnings": ["Gemini Enterprise model selection is INACTIVE: discovery_engine_models is empty …"]
+}
+```
+
+`upstream.source` 的含义：
+
+| `source` | 含义 |
+| --- | --- |
+| `mapping` | 命中 `discovery_engine_models`，租户会用映射后的模型回答 |
+| `passthrough` | 客户端直接指定了租户模型 id（`gemini-2.5-pro`） |
+| `configured-default` | 别名未映射，使用了 `discovery_engine_default_model_id` |
+| `tenant-default` | **什么都没选 —— 由租户决定，通常就是「Auto」** |
+| `alias` | 消费版：别名本身就决定路由 |
+
+每个聊天响应都会在响应头里给出同样的结论（模型自己说它是什么并不可靠，那只是生成文本）：
+
+```
+X-Resolved-Model: gemini-4-hydrogen
+X-Upstream-Model: tenant-default
+X-Upstream-Model-Source: tenant-default
+X-Model-Selection: ignored-by-tenant      # live | ignored-by-tenant
+```
+
+**企业版修复方式：** 把别名映射到租户真正提供的模型 id（可在标签页自身 `widgetStreamAssist` 请求的 `assistGenerationConfig.modelId` 里看到）：
+
+```jsonc
+{ "discovery_engine_models": { "gemini-4-hydrogen": "<tenant model id>", "gemini-4-neon": "<tenant model id>" } }
+```
+
+如果租户的模型列表里根本没有 Hydrogen/Neon，任何映射都变不出来 —— 请把它映射到租户提供的相近模型（例如它的 4 Argon 条目）。
+
+**Bridge 模式：** 扩展在标签页下拉框里选择后会把结果回传。模型不在下拉列表时，不再静默变成 Auto，而是：
+
+```
+MODEL SELECTION WARNING: the extension could not select "gemini-4-hydrogen" in the tab (picker currently shows "Auto") …
+```
+
+`/bridge/status` 也会多出 `model_selection: { requested, applied, ok }`，随时可查。
+
 ## 可用型号
 
 |型号|描述 |输出|
