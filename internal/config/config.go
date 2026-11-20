@@ -39,10 +39,10 @@ type Config struct {
 	NotifyWebhook              string   `json:"notify_webhook"`
 	NotifyFormat               string   `json:"notify_format"`
 	// DiscoveryEngineEndpoint is the Gemini Enterprise Discovery Engine
-	// streamAssist endpoint URL. When set, direct cookie mode can call it
-	// directly with session cookies on Enterprise origins, without needing a
-	// captured request template or a live browser tab.
+	// widgetStreamAssist endpoint URL.
 	DiscoveryEngineEndpoint string `json:"discovery_engine_endpoint"`
+	// DiscoveryEngineConfigID is the WidgetConfig ID for widgetStreamAssist.
+	DiscoveryEngineConfigID string `json:"discovery_engine_config_id"`
 }
 
 func Default() Config {
@@ -79,6 +79,7 @@ func Default() Config {
 		NotifyWebhook:              "",
 		NotifyFormat:               "ntfy",
 		DiscoveryEngineEndpoint:    "",
+		DiscoveryEngineConfigID:    "",
 	}
 }
 
@@ -129,6 +130,7 @@ func Load(path string) (Config, error) {
 		NotifyWebhook              *string   `json:"notify_webhook"`
 		NotifyFormat               *string   `json:"notify_format"`
 		DiscoveryEngineEndpoint    *string   `json:"discovery_engine_endpoint"`
+		DiscoveryEngineConfigID    *string   `json:"discovery_engine_config_id"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -230,6 +232,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineEndpoint != nil {
 		cfg.DiscoveryEngineEndpoint = *aux.DiscoveryEngineEndpoint
+	}
+	if aux.DiscoveryEngineConfigID != nil {
+		cfg.DiscoveryEngineConfigID = *aux.DiscoveryEngineConfigID
 	}
 
 	return cfg, nil
