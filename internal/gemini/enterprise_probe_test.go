@@ -184,7 +184,7 @@ func TestDirectStreamProbesUnmappedAliasOnce(t *testing.T) {
 	c.HTTP = srv.Client()
 	c.Logf = func(string, ...any) {}
 
-	if err := c.generateViaDiscoveryDirectStream("hello", nil, "", "gemini-4-hydrogen", func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("hello", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("direct stream failed: %v", err)
 	}
 	if len(models) != 2 {
@@ -196,7 +196,7 @@ func TestDirectStreamProbesUnmappedAliasOnce(t *testing.T) {
 
 	// Second request: the id is cached, so no further probe.
 	models = nil
-	if err := c.generateViaDiscoveryDirectStream("again", nil, "", "gemini-4-hydrogen", func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("again", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("second direct stream failed: %v", err)
 	}
 	if len(models) != 1 || models[0] != "gemini-4-hydrogen" {
@@ -238,7 +238,7 @@ func TestDirectStreamFallsBackWhenProbeRejected(t *testing.T) {
 	c.Logf = func(format string, args ...any) { logs = append(logs, format) }
 
 	for i := 0; i < 2; i++ {
-		if err := c.generateViaDiscoveryDirectStream("hi", nil, "", "gemini-4-neon", func(string) error { return nil }); err != nil {
+		if err := c.generateViaDiscoveryDirectStream("hi", nil, "", "gemini-4-neon", nil, func(string) error { return nil }); err != nil {
 			t.Fatalf("request %d should still succeed without a model id: %v", i, err)
 		}
 	}
@@ -262,7 +262,7 @@ func TestDirectStreamFallsBackWhenProbeRejected(t *testing.T) {
 	off.HTTP = srv.Client()
 	off.Logf = func(string, ...any) {}
 	probes = 0
-	if err := off.generateViaDiscoveryDirectStream("hi", nil, "", "gemini-4-carbon", func(string) error { return nil }); err != nil {
+	if err := off.generateViaDiscoveryDirectStream("hi", nil, "", "gemini-4-carbon", nil, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if probes != 0 {

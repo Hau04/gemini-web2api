@@ -911,7 +911,7 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	// fails and another transport is configured.
 	if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 		c.Logf("Enterprise: replaying captured Discovery Engine template (files=%d)", len(fileIDs))
-		tplErr := c.generateViaDiscoveryStream(prompt, fileIDs, session, opt.ModelName, emit)
+		tplErr := c.generateViaDiscoveryStream(prompt, fileIDs, session, opt.ModelName, opt.MediaSink, emit)
 		if tplErr == nil {
 			return nil
 		}
@@ -930,7 +930,7 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, requested=%q, modelId=%q, source=%s)",
 				len(fileIDs), hasBearer, opt.ModelName, modelID, modelSource)
 		}
-		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, opt.ModelName, emit)
+		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, opt.ModelName, opt.MediaSink, emit)
 	}
 
 	return &UpstreamError{

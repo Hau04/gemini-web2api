@@ -49,6 +49,11 @@ type ModelOptions struct {
 	// fileRefs); Gemini Enterprise uploads them into the assistant session
 	// instead, because content-push does not exist on that origin.
 	Files []RawFile
+	// MediaSink, when set, receives the raw upstream payload as it streams in so
+	// the caller can extract generated images/videos (see ExtractMedia). The
+	// text pipeline drops binary parts by design; this is the only way media
+	// survives it.
+	MediaSink func(chunk string)
 }
 
 type Client struct {
@@ -415,6 +420,9 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				if err != nil {
 					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 				} else {
+					if opt.MediaSink != nil {
+						opt.MediaSink(string(rawBytes))
+					}
 					text, err := ExtractResponseText(string(rawBytes))
 					if err != nil {
 						lastErr = &UpstreamError{Kind: "bard", Msg: err.Error()}

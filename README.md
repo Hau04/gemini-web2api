@@ -430,7 +430,35 @@ Unlike the Python version which ignores images, this Go port actively intercepts
 It initiates a background Scotty Resumable Upload session, converts the base64 image into Google internal WIZ blobs, and passes the WIZ image references directly to Gemini.
 Just send OpenAI standard multimodal payloads and it will work!
 
-### 3. TLS Impersonation (Bypass WAF)
+### 3. Image & Video Generation
+
+Gemini web can generate images (Nano Banana) and video (Veo), but it returns them as *media*, not as chat text — the text pipeline drops binary parts, so a plain `/v1/chat/completions` call to an image model gets you a description. These two endpoints drive the media path and hand the result back in an OpenAI-shaped envelope:
+
+```bash
+# image → URL (default) or inline base64
+curl http://localhost:8081/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","prompt":"a red cube on a wooden table, studio light","response_format":"b64_json"}'
+
+# video (Veo generation takes minutes — raise request_timeout_sec if needed)
+curl http://localhost:8081/v1/videos/generations \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"a wave crashing on rocks at sunset","aspect_ratio":"16:9","duration_seconds":8}'
+```
+
+```json
+{"created":1732147200,"model":"gemini-4-hydrogen","kind":"image",
+ "data":[{"kind":"image","mime_type":"image/png","url":"https://lh3.googleusercontent.com/gg/…","b64_json":"iVBORw0KGgo…"}]}
+```
+
+How it works:
+
+- The prompt is wrapped so Gemini uses its own media tool and replies with the rendered asset (or with an explicit `IMAGE GENERATION UNAVAILABLE` marker instead of a plausible essay).
+- Media is recognised **by content** — data URIs, file-header magic inside base64 JSON strings (PNG/JPEG/GIF/WebP/MP4/WebM), and asset URLs on Google hosts — so the same extractor works on consumer `StreamGenerate`, Discovery Engine `streamAssist`, and text-only transports alike. Nothing is fabricated: no asset means `502` with the model's own words in `error.text`.
+- `response_format: "b64_json"` inlines the bytes; that only fetches from Google asset hosts (a URL scraped out of model output never becomes an arbitrary server-side request).
+- Image/video model names (`nano-banana`, `veo-3`, …) are not chat models in the registry, so an unknown name is forwarded upstream with the default transport settings and resolved by the tenant's own model-id rules (`/v1/model-probe` still works for those).
+
+### 4. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:
 
@@ -749,7 +777,8 @@ gemini-web2api.exe
 ## Limitations
 
 - **Not real Pro/Ultra**: Without a paid subscription cookie, `gemini-3.1-pro` routes to the same Flash model. The "Pro" label is a UI preference, not a backend model switch.
-- **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt.
+- **Single-turn only**: Each request is an independent conversation. Multi-turn context is simulated by including previous messages in the prompt. The Gemini Enterprise session is one per process and is not persisted, so continuing a chat the next day relies on the client resending its history (and any attachment from yesterday must be re-attached).
+- **Media depends on the account**: `/v1/images/generations` and `/v1/videos/generations` can only return what the signed-in account's Gemini web is allowed to generate. A tenant without image/video access answers with text, and the endpoint reports exactly that instead of returning a placeholder.
 - **Rate limits**: Google may throttle high-frequency requests. The server retries automatically but sustained heavy use may be blocked.
 
 ## License

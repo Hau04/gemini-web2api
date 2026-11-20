@@ -26,6 +26,10 @@ type App struct {
 	// modelState is the last model-selection outcome reported by the extension.
 	modelStateMu sync.Mutex
 	modelState   bridgeModelState
+
+	// mediaGenerate is a test seam for the media endpoints; nil means "call the
+	// real Gemini client".
+	mediaGenerate func(prompt string, opt gemini.ModelOptions) (string, []gemini.MediaAsset, error)
 }
 
 func createHTTPClient(cfg config.Config) *http.Client {
@@ -96,6 +100,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/model-probe", a.handleModelProbe)
 	mux.HandleFunc("POST /v1/chat/completions", a.handleChat)
 	mux.HandleFunc("POST /v1/responses", a.handleResponses)
+	mux.HandleFunc("POST /v1/images/generations", a.handleImageGenerations)
+	mux.HandleFunc("POST /v1/videos/generations", a.handleVideoGenerations)
 
 	mux.HandleFunc("GET /v1beta/models", a.handleGoogleModels)
 	mux.HandleFunc("POST /v1beta/models/{target}", a.handleGoogleGenerate)

@@ -422,7 +422,35 @@ gemini-4-argon@think=4              # Low (default for standard models)
 它启动后台 Scotty 可恢复上传会话，将 base64 图像转换为 Google 内部 WIZ blob，并将 WIZ 图像引用直接传递给 Gemini。
 只需发送 OpenAI 标准多模式有效负载，它就会起作用！
 
-### 3. TLS 模拟（绕过 WAF）
+### 3. 图片与视频生成
+
+Gemini web 能生成图片（Nano Banana）和视频（Veo），但它返回的是**媒体本体**而不是聊天文本 —— 文本管线会丢弃二进制部分，所以对图片模型走 `/v1/chat/completions` 只会得到一段描述。下面两个接口走媒体通道，并以 OpenAI 风格返回：
+
+```bash
+# 图片：默认返回 URL，也可以要 base64
+curl http://localhost:8081/v1/images/generations \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","prompt":"木桌上的红色立方体，影棚光","response_format":"b64_json"}'
+
+# 视频（Veo 生成要几分钟，必要时调大 request_timeout_sec）
+curl http://localhost:8081/v1/videos/generations \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"prompt":"日落时海浪拍打礁石","aspect_ratio":"16:9","duration_seconds":8}'
+```
+
+```json
+{"created":1732147200,"model":"gemini-4-hydrogen","kind":"image",
+ "data":[{"kind":"image","mime_type":"image/png","url":"https://lh3.googleusercontent.com/gg/…","b64_json":"iVBORw0KGgo…"}]}
+```
+
+工作方式：
+
+- 提示词会被包装，让 Gemini 调用自己的媒体工具直接产出成品（若无法生成，则回一个明确的 `IMAGE GENERATION UNAVAILABLE` 标记，而不是一篇看起来合理的作文）。
+- 媒体**按内容识别**：data URI、base64 JSON 字符串里的文件头魔数（PNG/JPEG/GIF/WebP/MP4/WebM）、以及 Google 域名下的资源 URL —— 因此同一个提取器对消费版 `StreamGenerate`、Discovery Engine `streamAssist` 和纯文本通道都有效。绝不编造：没有媒体就返回 `502`，并把模型自己的原话放在 `error.text` 里。
+- `response_format: "b64_json"` 会把字节内联返回；只会从 Google 资源域名下载（模型输出里扒出来的 URL 不会被当成任意服务器端请求）。
+- 图片/视频模型名（`nano-banana`、`veo-3` …）不在聊天模型注册表里，未知名字会带着默认传输参数直接发给上游，由租户自己的模型 id 规则裁定（这些名字同样可用 `/v1/model-probe`）。
+
+### 4. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
 
@@ -727,7 +755,8 @@ gemini-web2api.exe
 ## 局限性
 
 * **不是真正的 Pro/Ultra**：没有付费订阅 cookie，`gemini-3.1-pro`路由到相同的 Flash 模型。 “Pro”标签是 UI 首选项，而不是后端模型开关。
-* **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。
+* **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。Gemini Enterprise 的会话是每个进程一个且不落盘，所以「第二天继续同一个聊天」依赖客户端重新发送历史（昨天的附件需要重新上传）。
+* **媒体取决于账号权限**：`/v1/images/generations` 与 `/v1/videos/generations` 只能返回登录账号的 Gemini web 有权生成的媒体；没有图片/视频权限的租户会用文字作答，接口会如实报告这一点，而不是返回占位图。
 * **速率限制**：Google 可能会限制高频请求。服务器会自动重试，但持续的大量使用可能会被阻止。
 
 ## 执照
