@@ -327,8 +327,12 @@ func (c *Client) discoveryHeaders(endpoint string) http.Header {
 			headers.Set("Authorization", auth)
 		}
 	}
-	if c.Cfg.DiscoveryEngineServerToken != "" {
-		headers.Set("X-Server-Token", c.Cfg.DiscoveryEngineServerToken)
+	serverToken := c.Cfg.DiscoveryEngineServerToken
+	if serverToken == "" {
+		serverToken = cookieInfo.ServerToken
+	}
+	if serverToken != "" {
+		headers.Set("X-Server-Token", serverToken)
 	}
 	return headers
 }
@@ -713,7 +717,14 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	// Captured template first (exact shape of the app's own request).
 	if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 		c.Logf("Enterprise: replaying captured Discovery Engine template (files=%d)", len(fileIDs))
-		return c.generateViaDiscoveryStream(prompt, fileIDs, session, emit)
+		tplErr := c.generateViaDiscoveryStream(prompt, fileIDs, session, emit)
+		if tplErr == nil {
+			return nil
+		}
+		if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) == "" {
+			return tplErr
+		}
+		c.Logf("Captured Discovery Engine template failed (%v), falling back to direct endpoint", tplErr)
 	}
 	// Then the configured streamAssist endpoint.
 	if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != "" {

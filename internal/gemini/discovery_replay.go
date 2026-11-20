@@ -466,6 +466,13 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
+		serverToken := c.Cfg.DiscoveryEngineServerToken
+		if serverToken == "" {
+			serverToken = cookieInfo.ServerToken
+		}
+		if serverToken != "" {
+			req.Header.Set("X-Server-Token", serverToken)
+		}
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

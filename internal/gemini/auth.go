@@ -22,7 +22,8 @@ type CookieInfo struct {
 	// (e.g. https://vertexaisearch.cloud.google.com). XSRF tokens are
 	// origin-specific, so direct-mode requests must target this origin, not
 	// necessarily the configured base_url.
-	BaseURL   string
+	BaseURL     string
+	ServerToken string
 }
 
 type CookieCache struct {
@@ -70,15 +71,17 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 	var xsrfToken string
 	var geminiBL string
 	var baseURL string
+	var serverToken string
 
 	if strings.HasPrefix(content, "{") {
 		var data struct {
-			Cookie    string          `json:"cookie"`
-			SAPISID   string          `json:"sapisid"`
-			AuthUser  json.RawMessage `json:"auth_user"`
-			XSRFToken *string         `json:"xsrf_token"`
-			GeminiBL  *string         `json:"gemini_bl"`
-			BaseURL   *string         `json:"base_url"`
+			Cookie      string          `json:"cookie"`
+			SAPISID     string          `json:"sapisid"`
+			AuthUser    json.RawMessage `json:"auth_user"`
+			XSRFToken   *string         `json:"xsrf_token"`
+			GeminiBL    *string         `json:"gemini_bl"`
+			BaseURL     *string         `json:"base_url"`
+			ServerToken *string         `json:"server_token"`
 		}
 		if err := json.Unmarshal([]byte(content), &data); err == nil {
 			cookieStr = data.Cookie
@@ -97,6 +100,9 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 			}
 			if data.BaseURL != nil {
 				baseURL = *data.BaseURL
+			}
+			if data.ServerToken != nil {
+				serverToken = *data.ServerToken
 			}
 		}
 	} else {
@@ -120,8 +126,9 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 		SAPISID:   sapisid,
 		AuthUser:  authUser,
 		XSRFToken: xsrfToken,
-		GeminiBL:  geminiBL,
-		BaseURL:   baseURL,
+		GeminiBL:    geminiBL,
+		BaseURL:     baseURL,
+		ServerToken: serverToken,
 	}
 
 	return c.info, nil
