@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 	"github.com/ikhsan3adi/gemini-web2api/internal/multimodal"
 )
@@ -165,4 +167,99 @@ func (a *App) uploadImages(images []format.Image) ([]string, error) {
 		return nil, nil
 	}
 	return fileRefs, nil
+}
+
+// rawFilesFromImages converts prompt attachments into in-memory files for the
+// Gemini Enterprise context-file upload path.
+func (a *App) rawFilesFromImages(images []format.Image) []gemini.RawFile {
+	if len(images) == 0 {
+		return nil
+	}
+
+	requester := a.Gem.HTTP
+	if requester == nil {
+		if a.HTTPClient != nil {
+			requester = a.HTTPClient
+		} else {
+			requester = createHTTPClient(a.Cfg)
+		}
+	}
+
+	files := make([]gemini.RawFile, 0, len(images))
+	for i, img := range images {
+		data := img.Data
+		if len(data) == 0 && img.URL != "" {
+			fetched, err := multimodal.FetchImageBytes(requester, img.URL)
+			if err != nil {
+				a.Logf("Attachment %d fetch failed for Enterprise upload: %v", i, err)
+				continue
+			}
+			data = fetched
+		}
+		if len(data) == 0 {
+			continue
+		}
+
+		name := strings.TrimSpace(img.Filename)
+		if name == "" {
+			name = fmt.Sprintf("attachment-%d%s", i+1, extensionForMIME(img.MIME))
+		}
+		mime := img.MIME
+		if mime == "" || (mime == "image/png" && !strings.HasPrefix(name, "attachment")) {
+			if detected := multimodal.DetectImageMime(data); detected != "" && strings.HasPrefix(detected, "image/") {
+				mime = detected
+			}
+		}
+		if mime == "" {
+			mime = http.DetectContentType(data)
+		}
+
+		files = append(files, gemini.RawFile{Name: name, MIME: mime, Data: data})
+	}
+	return files
+}
+
+func extensionForMIME(mime string) string {
+	switch strings.ToLower(strings.TrimSpace(strings.Split(mime, ";")[0])) {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "application/pdf":
+		return ".pdf"
+	case "text/plain":
+		return ".txt"
+	case "application/json":
+		return ".json"
+	default:
+		return ""
+	}
+}
+
+// prepareAttachments readies prompt attachments for the resolved route.
+//
+// Consumer origins upload through content-push and use the returned file refs.
+// Gemini Enterprise has no content-push pipeline: there the files are returned
+// as raw bytes so the Gemini client can attach them to the assistant session
+// (or inline text ones when the upload endpoint is unavailable).
+func (a *App) prepareAttachments(images []format.Image) ([]string, []gemini.RawFile, error) {
+	if len(images) == 0 {
+		return nil, nil, nil
+	}
+	if a.Gem.UsesDiscoveryEngine() {
+		return nil, a.rawFilesFromImages(images), nil
+	}
+
+	fileRefs, err := a.uploadImages(images)
+	if err != nil {
+		// The origin may only reveal itself as Enterprise after the first
+		// request — pass raw files through instead of failing the turn.
+		a.Logf("content-push upload failed (%v) — handing attachments to the Discovery Engine path", err)
+		return nil, a.rawFilesFromImages(images), nil
+	}
+	return fileRefs, nil, nil
 }

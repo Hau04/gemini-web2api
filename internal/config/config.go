@@ -16,6 +16,11 @@ type Config struct {
 	AuthUser                   string   `json:"auth_user"`
 	XSRFToken                  string   `json:"xsrf_token"`
 	DefaultModel               string   `json:"default_model"`
+	// ToolModel redirects tool-enabled requests to another upstream model so
+	// agent tool calls stay local (e.g. gemini-4-hydrogen, whose tool_call
+	// output WorkBuddy executes, instead of a model that prefers Gemini's
+	// built-in Deep Research / web tools). Empty disables the redirect.
+	ToolModel                  string   `json:"tool_model"`
 	LogRequests                bool     `json:"log_requests"`
 	CookieFile                 string   `json:"cookie_file"`
 	Proxy                      string   `json:"proxy"`
@@ -46,6 +51,20 @@ type Config struct {
 	// DiscoveryEngineServerToken is the x-server-token header value for
 	// widgetStreamAssist (required to pass reCAPTCHA check).
 	DiscoveryEngineServerToken string `json:"discovery_engine_server_token"`
+	// DiscoveryEngineUploadEndpoint is the widgetAddContextFile URL used to
+	// attach files to a Gemini Enterprise session in direct cookie mode. When
+	// empty it is derived from discovery_engine_endpoint, and a request captured
+	// by the extension is preferred over both.
+	DiscoveryEngineUploadEndpoint string `json:"discovery_engine_upload_endpoint"`
+	// DiscoveryEngineSession is the (sanitized) session resource used for
+	// context-file uploads, e.g.
+	// "collections/default_collection/engines/my-engine/sessions/-". Empty means
+	// derive it from a captured request template.
+	DiscoveryEngineSession string `json:"discovery_engine_session"`
+	// DiscoveryEngineUploadCacheSec caches uploaded context files by content
+	// hash for this many seconds so repeated turns that resend the same file
+	// skip the upload. 0 disables the cache.
+	DiscoveryEngineUploadCacheSec int `json:"discovery_engine_upload_cache_sec"`
 }
 
 func Default() Config {
@@ -59,6 +78,7 @@ func Default() Config {
 		AuthUser:                   "",
 		XSRFToken:                  "",
 		DefaultModel:               "gemini-3.6-flash",
+		ToolModel:                  "",
 		LogRequests:                true,
 		CookieFile:                 "",
 		Proxy:                      "",
@@ -84,6 +104,9 @@ func Default() Config {
 		DiscoveryEngineEndpoint:    "",
 		DiscoveryEngineConfigID:    "",
 		DiscoveryEngineServerToken: "",
+		DiscoveryEngineUploadEndpoint: "",
+		DiscoveryEngineSession:        "",
+		DiscoveryEngineUploadCacheSec: 1800,
 	}
 }
 
@@ -111,6 +134,7 @@ func Load(path string) (Config, error) {
 		AuthUser          *string   `json:"auth_user"`
 		XSRFToken         *string   `json:"xsrf_token"`
 		DefaultModel      *string   `json:"default_model"`
+		ToolModel         *string   `json:"tool_model"`
 		LogRequests       *bool     `json:"log_requests"`
 		CookieFile        *string   `json:"cookie_file"`
 		Proxy             *string   `json:"proxy"`
@@ -136,6 +160,9 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineEndpoint    *string   `json:"discovery_engine_endpoint"`
 		DiscoveryEngineConfigID    *string   `json:"discovery_engine_config_id"`
 		DiscoveryEngineServerToken *string   `json:"discovery_engine_server_token"`
+		DiscoveryEngineUploadEndpoint *string `json:"discovery_engine_upload_endpoint"`
+		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
+		DiscoveryEngineUploadCacheSec *int    `json:"discovery_engine_upload_cache_sec"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -168,6 +195,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DefaultModel != nil {
 		cfg.DefaultModel = *aux.DefaultModel
+	}
+	if aux.ToolModel != nil {
+		cfg.ToolModel = *aux.ToolModel
 	}
 	if aux.LogRequests != nil {
 		cfg.LogRequests = *aux.LogRequests
@@ -243,6 +273,15 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineServerToken != nil {
 		cfg.DiscoveryEngineServerToken = *aux.DiscoveryEngineServerToken
+	}
+	if aux.DiscoveryEngineUploadEndpoint != nil {
+		cfg.DiscoveryEngineUploadEndpoint = *aux.DiscoveryEngineUploadEndpoint
+	}
+	if aux.DiscoveryEngineSession != nil {
+		cfg.DiscoveryEngineSession = *aux.DiscoveryEngineSession
+	}
+	if aux.DiscoveryEngineUploadCacheSec != nil {
+		cfg.DiscoveryEngineUploadCacheSec = *aux.DiscoveryEngineUploadCacheSec
 	}
 
 	return cfg, nil

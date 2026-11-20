@@ -49,13 +49,6 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		modelName = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelName, a.Cfg.DefaultModel)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
-		return
-	}
-	setModelHeaders(w, resolved)
-
 	fcMode := "AUTO"
 	if req.ToolConfig != nil && req.ToolConfig.FunctionCallingConfig != nil && req.ToolConfig.FunctionCallingConfig.Mode != "" {
 		fcMode = req.ToolConfig.FunctionCallingConfig.Mode
@@ -63,19 +56,29 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	hasTools := len(req.Tools) > 0 && fcMode != "NONE"
 
+	resolved, redirected, err := a.resolveRequestModel(modelName, hasTools)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	setModelHeaders(w, resolved)
+	if redirected {
+		w.Header().Set("X-Tool-Model-Override", "true")
+	}
+
 	prompt, images, err := format.GoogleContentsToPrompt(req)
 	if err != nil || len(prompt) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty content"}})
 		return
 	}
 
-	fileRefs, err := a.uploadImages(images)
+	fileRefs, rawFiles, err := a.prepareAttachments(images)
 	if err != nil {
 		a.Logf("Google API image upload error: %v", err)
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
-	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs))
+	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d files=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs), len(rawFiles))
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -83,6 +86,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		ThinkMode:   resolved.Think,
 		ModelHeader: resolved.Header,
 		Extra:       resolved.Extra,
+		Files:       rawFiles,
 	}
 
 	if stream && !hasTools {

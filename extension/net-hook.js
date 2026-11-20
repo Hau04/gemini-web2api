@@ -537,6 +537,33 @@
     return "";
   }
 
+  // collectHeaders normalises fetch() headers (Headers | array | object) into a
+  // plain lower-cased map for template capture.
+  function collectHeaders(init, input) {
+    const hdrs = {};
+    try {
+      const rawHeaders = (init && init.headers) || (input && typeof input === "object" ? input.headers : null);
+      if (rawHeaders && typeof Headers !== "undefined" && rawHeaders instanceof Headers) {
+        rawHeaders.forEach((v, k) => { hdrs[k] = v; });
+      } else if (Array.isArray(rawHeaders)) {
+        for (const pair of rawHeaders) {
+          if (Array.isArray(pair) && pair[0]) hdrs[String(pair[0]).toLowerCase()] = String(pair[1] || "");
+        }
+      } else if (rawHeaders && typeof rawHeaders === "object") {
+        for (const k of Object.keys(rawHeaders)) hdrs[k.toLowerCase()] = String(rawHeaders[k] || "");
+      }
+    } catch (e) {}
+    return hdrs;
+  }
+
+  // looksLikeContextFileUpload reports whether a request body carries inline
+  // file content (Discovery Engine addContextFile shape).
+  function looksLikeContextFileUpload(body) {
+    if (typeof body !== "string" || body.length === 0 || body.length > 4 * 1024 * 1024) return false;
+    return /"(fileContents|file_contents|fileData|file_data)"\s*:/i.test(body) &&
+      /"(fileName|file_name|mimeType|mime_type)"\s*:/i.test(body);
+  }
+
   if (typeof origFetch === "function") {
     globalScope.fetch = function web2apiFetch(...args) {
       let url = "";
@@ -567,24 +594,22 @@
       // verbatim, so bridge.js can splice in a placeholder at capture time.
       if (kind && typeof body === "string" && body.length > 0 && body.length <= 2 * 1024 * 1024) {
         try {
-          const hdrs = {};
-          const rawHeaders = (init && init.headers) || (input && typeof input === "object" ? input.headers : null);
-          if (rawHeaders && typeof Headers !== "undefined" && rawHeaders instanceof Headers) {
-            rawHeaders.forEach((v, k) => { hdrs[k] = v; });
-          } else if (Array.isArray(rawHeaders)) {
-            for (const pair of rawHeaders) {
-              if (Array.isArray(pair) && pair[0]) hdrs[String(pair[0]).toLowerCase()] = String(pair[1] || "");
-            }
-          } else if (rawHeaders && typeof rawHeaders === "object") {
-            for (const k of Object.keys(rawHeaders)) hdrs[k.toLowerCase()] = String(rawHeaders[k] || "");
-          }
           postToBridge("reqmeta", `reqmeta_${Date.now()}_${++streamCounter}`, url, {
-            method, headers: hdrs, body
+            method, headers: collectHeaders(init, input), body
           });
         } catch (e) {}
       }
 
       if (isUpload) {
+        // Capture the upload request shape once so the server can attach files
+        // in direct cookie mode (browser closed) by replaying it.
+        if (looksLikeContextFileUpload(body)) {
+          try {
+            postToBridge("uploadmeta", `uploadmeta_${Date.now()}_${++streamCounter}`, url, {
+              method, headers: collectHeaders(init, input), body
+            });
+          } catch (e) {}
+        }
         const uploadId = `upl_${Date.now()}_${++streamCounter}`;
         postToBridge("upload_start", uploadId, url, {});
         promise.then((res) => {

@@ -388,6 +388,14 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
+**关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
+
+1. **一次性捕获（推荐，零配置）**：加载扩展后，在企业版标签页里手动上传一个文件。net-hook 会记录这次上传请求，扩展把文件名 / MIME / Base64 内容替换为 `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__` 占位符后推送到 `POST /bridge/uploadtemplate`，并保存在 Cookie 文件旁的 `discovery_upload_template.json`。此后服务器用最新 Cookie 重放该请求来上传**所有**附件，浏览器可以一直关闭。用 `GET /bridge/uploadtemplate` 查看状态。
+2. **直接配置端点**：没有捕获模板时，把 `discovery_engine_upload_endpoint` 设为标签页 DevTools 里的 `widgetAddContextFile` URL；若留空，服务器会把 `discovery_engine_endpoint` 中的 `widgetStreamAssist` 自动替换为 `widgetAddContextFile`。`discovery_engine_session`（如 `collections/default_collection/engines/my-engine/sessions/-`）和 `discovery_engine_config_id` 可固定会话与 Widget 配置，否则从捕获的请求体里读取。
+3. **文本内联兜底**：完全没有上传通道时，纯文本类附件（代码、JSON、CSV、Markdown、日志，单个 ≤200 KB、总计 ≤400 KB）会带 `--- Attached file: … ---` 标记内联进提示词，编码代理仍能读到文件内容；图片 / PDF / Office 等二进制附件会返回明确错误，而不是被静默丢弃。
+
+上传的文件与重放的 `streamAssist` 处于同一会话，后续对话会保留文件上下文。相同内容只会上传**一次**：同一请求内的重复文件共用一个 `fileId`，上传结果按内容哈希缓存 `discovery_engine_upload_cache_sec` 秒（默认 1800，设为 `0` 关闭），因此编码代理每轮重复发送同一批仓库文件时不再走上传；同时最多并行上传 4 个文件。
+
 ### WorkBuddy / AI 编码代理集成
 
 `gemini-web2api`作为编码代理的嵌入式 OpenAI 兼容提供程序，例如**工作伙伴**,**码友**、光标、克劳德·代码、艾德和克莱恩。因为`gemini-web2api`本机代理 OpenAI 函数调用（`tools`/`tool_calls`），代理可以自主检查和编辑本地文件。
@@ -410,6 +418,36 @@ https://gemini.google.com/u/1/app/...
 ]
 ```
 
+#### 让 Argon 在代理工具调用时表现得像 Hydrogen
+
+部分 Gemini 4 模型（尤其是 **Argon**）会优先使用 Gemini 内置的 **Deep Research / 网页工具**，忽略注入的 `# Tool Use` 提示，导致 WorkBuddy 收不到可本地执行的 `tool_call`。**Hydrogen** 则能稳定输出预期格式：
+
+````text
+```tool_call
+{"name": "Bash", "arguments": {"command": "gh repo clone ..."}}
+```
+````
+
+如果希望在 WorkBuddy 中保留 `gemini-4-argon` 模型 ID，但让带工具的回合实际走 Hydrogen，可在 `config.json` 中设置：
+
+```json
+{
+  "tool_model": "gemini-4-hydrogen"
+}
+```
+
+只有声明了工具（且未设置 `tool_choice: "none"`）的请求会被重定向，普通聊天请求仍使用原模型。请求后缀 `@new`、`@continue`、`@think=N` 会被保留。触发重定向时会返回 `X-Tool-Model-Override: true` 响应头并打印日志；`X-Resolved-Model` 显示实际使用的模型。
+
+也可以不修改配置文件，直接用启动参数或环境变量：
+
+```bash
+./gemini-web2api --tool-model gemini-4-hydrogen
+# 或
+GEMINI_TOOL_MODEL=gemini-4-hydrogen ./gemini-web2api
+```
+
+工具提示中也会明确要求：本地文件、shell 命令、GitHub 仓库和邮件必须通过输出 `tool_call` 块交给本地客户端执行，禁止用 Gemini 内置的网页搜索 / Deep Research 来回答。
+
 ## 配置
 
 创造`config.json`在同一目录中：
@@ -424,6 +462,8 @@ https://gemini.google.com/u/1/app/...
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
   "auth_user": null,
   "xsrf_token": null,
+  "default_model": "gemini-3.6-flash",
+  "tool_model": "",
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,

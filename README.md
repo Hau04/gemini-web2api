@@ -400,6 +400,14 @@ When `base_url` is customized, `gemini-web2api` automatically switches its `Orig
 
 **Discovery Engine replay (Enterprise direct mode):** the extension's net-hook captures the app's own `streamAssist` request (URL, headers, body) whenever the tab generates, splices the submitted prompt out for a `__W2A_PROMPT__` marker, and pushes the template to `POST /bridge/reqtemplate` (persisted next to the cookie file). On a latched Enterprise origin the server replays that template with fresh cookies and the new prompt — so `/v1/chat/completions` works **with the browser closed**. Templates carry the captured `Authorization` (usually SAPISIDHASH); if it has expired the server retries with freshly recomputed SAPISIDHASH values and, failing that, tells you to send one prompt through the open tab to refresh the template. Check status with `GET /bridge/reqtemplate`.
 
+**File attachments with the browser closed (Enterprise):** consumer Gemini Web uploads attachments through the `content-push.googleapis.com` pipeline and references them from the Bard RPC payload. Gemini Enterprise has no such pipeline — the app attaches files to the *assistant session* instead (`widgetAddContextFile` → `fileId`, then `streamAssist` with `fileIds` + `session`), so cookie mode used to answer `this Gemini Enterprise origin needs the browser bridge for image attachments`. That gap is closed:
+
+1. **Capture once (recommended, zero config).** With the extension loaded, attach one file in the Gemini Enterprise tab. The net-hook records the upload request and the bridge pushes a templated copy of it (file name, MIME type and Base64 content replaced by `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__`) to `POST /bridge/uploadtemplate`; it is persisted as `discovery_upload_template.json` next to the cookie file. From then on the server replays that request with fresh cookies for **every** attachment — the browser can stay closed. Check it with `GET /bridge/uploadtemplate` (`{"have_template":true,...}`).
+2. **Configure the endpoint.** Without a captured template, set `discovery_engine_upload_endpoint` to the `widgetAddContextFile` URL from the tab's DevTools Network tab. If it is omitted, the server derives it by swapping `widgetStreamAssist` → `widgetAddContextFile` in `discovery_engine_endpoint`. `discovery_engine_session` (e.g. `collections/default_collection/engines/my-engine/sessions/-`) and `discovery_engine_config_id` pin the session/widget config; otherwise both are read from the captured request bodies.
+3. **Text fallback.** If no upload path is available, text-like attachments (code, JSON, CSV, Markdown, logs — up to 200 KB each / 400 KB per request) are inlined into the prompt with explicit `--- Attached file: … ---` markers, so coding agents still see their files. Binary attachments (images, PDFs, Office documents) return an actionable error instead of being silently dropped.
+
+Uploaded files land in the same session the replay uses, so follow-up turns keep the file context. Identical bytes are uploaded **once**: duplicates inside a request share one `fileId`, and uploads are cached by content hash for `discovery_engine_upload_cache_sec` (default 1800, `0` disables) so an agent loop that resends the same repo files every turn skips the upload round-trip entirely. Up to 4 files upload in parallel.
+
 **Keep the tab alive:** the extension marks every Gemini tab `autoDiscardable: false` so Chrome's Memory Saver never discards it — a discarded tab silently kills the bridge poll/heartbeat loops. It also reports tabs it finds already discarded (during each cookie sync and via a 30s liveness watchdog that pings the tab's poll loop), and the content script reports its own death on page unload. On Enterprise deployments the tab is the server's only route to Gemini: keep it open in Chrome.
 
 **Real errors when the tab is gone:** streaming responses only commit to HTTP 200 once a tab actually claims the queued work. If nothing picks the request up within `bridge_pickup_timeout_sec` (default 45s), the API answers `503 bridge_offline` with a message telling you to open/reload the Gemini tab — instead of an empty 200 stream that clients render as a stuck or blank completion.
@@ -426,6 +434,36 @@ Configure WorkBuddy via `~/.workbuddy/models.json` (or `%USERPROFILE%\.workbuddy
 ]
 ```
 
+#### Making Argon behave like Hydrogen for agent tool calls
+
+Some Gemini 4 models (notably **Argon**) prefer Gemini's built-in **Deep Research / web tools** and ignore the injected `# Tool Use` prompt, so WorkBuddy never receives a `tool_call` to execute locally. **Hydrogen** reliably emits the expected blocks:
+
+````text
+```tool_call
+{"name": "Bash", "arguments": {"command": "gh repo clone ..."}}
+```
+````
+
+If you want to keep `gemini-4-argon` configured in WorkBuddy but have tool-enabled turns actually run on Hydrogen, set `tool_model` in `config.json`:
+
+```json
+{
+  "tool_model": "gemini-4-hydrogen"
+}
+```
+
+Only requests that declare tools (and do not use `tool_choice: "none"`) are redirected; normal chat requests still use the requested model. Per-request suffixes such as `@new`, `@continue` and `@think=N` are preserved. A response header `X-Tool-Model-Override: true` and a server log line show when the override fired; `X-Resolved-Model` reports the model actually used.
+
+The setting can also be applied without editing the file:
+
+```bash
+./gemini-web2api --tool-model gemini-4-hydrogen
+# or
+GEMINI_TOOL_MODEL=gemini-4-hydrogen ./gemini-web2api
+```
+
+The injected tool prompt additionally tells the model that local files, shell commands, GitHub repos and email must be handled by emitting `tool_call` blocks, and explicitly forbids answering them with Gemini's built-in web search or Deep Research.
+
 ## Configuration
 
 Create `config.json` in the same directory:
@@ -440,6 +478,8 @@ Create `config.json` in the same directory:
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
   "auth_user": null,
   "xsrf_token": null,
+  "default_model": "gemini-3.6-flash",
+  "tool_model": "",
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,

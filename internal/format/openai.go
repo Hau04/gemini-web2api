@@ -1037,6 +1037,7 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 				"# Tool Use\n\n"+
 					"An external local client bridge (WorkBuddy) is connected to this chat. Whenever you output a ```tool_call``` block, the client automatically runs that local tool or connected app connector (e.g. GitHub, Gmail, local files, shell) on the user's behalf and returns the output in the next turn as `[Tool result for <name>]`.\n"+
 					"- You DO have execution access to ALL tools & connectors listed below through this bridge. NEVER refuse by saying you are in a cloud environment or cannot access local files, shell, GitHub, email, or external apps — call the matching declared tools below instead.\n"+
+					"- Do NOT use Gemini's built-in web search, Deep Research, or any built-in tools for these tasks. Local files, shell commands, GitHub repos and email must be handled by emitting the declared tool_call blocks below — never research or guess their contents yourself.\n"+
 					"%s"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+

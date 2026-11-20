@@ -412,9 +412,9 @@ func replayAuthCandidates(tpl *DiscoveryTemplate, sapisid string) []string {
 
 // generateViaDiscovery replays the captured streamAssist request with the new
 // prompt and returns the assembled answer text.
-func (c *Client) generateViaDiscovery(prompt string) (string, error) {
+func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryStream(prompt, func(delta string) error {
+	err := c.generateViaDiscoveryStream(prompt, fileIDs, session, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -424,7 +424,7 @@ func (c *Client) generateViaDiscovery(prompt string) (string, error) {
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, emit func(string) error) error {
 	tpl := LoadDiscoveryTemplate(c.Cfg.CookieFile)
 	if tpl == nil {
 		return &UpstreamError{
@@ -436,6 +436,12 @@ func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) err
 	body, err := tpl.SubstitutePrompt(prompt)
 	if err != nil {
 		return &UpstreamError{Status: http.StatusBadRequest, Kind: "unsupported", Msg: err.Error()}
+	}
+	if len(fileIDs) > 0 {
+		body, err = InjectAttachmentContext(body, fileIDs, session)
+		if err != nil {
+			return &UpstreamError{Status: http.StatusBadGateway, Kind: "unsupported", Msg: fmt.Sprintf("could not attach files to the captured streamAssist template: %v", err)}
+		}
 	}
 
 	cookieInfo, _ := c.Cookies.Load()
@@ -534,9 +540,9 @@ func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) err
 // directly using session cookies, without needing a captured request template.
 // This works on Gemini Enterprise origins when the user has configured the
 // streamAssist endpoint URL in the server config.
-func (c *Client) generateViaDiscoveryDirect(prompt string) (string, error) {
+func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, session string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryDirectStream(prompt, func(delta string) error {
+	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -546,7 +552,7 @@ func (c *Client) generateViaDiscoveryDirect(prompt string) (string, error) {
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, emit func(string) error) error {
 	endpoint := c.Cfg.DiscoveryEngineEndpoint
 	if endpoint == "" {
 		return &UpstreamError{
@@ -556,64 +562,35 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 		}
 	}
 
-	cookieInfo, _ := c.Cookies.Load()
-
 	// Build widgetStreamAssist request body (widget API format):
 	// {"configId":"...","streamAssistRequest":{"query":{"parts":[{"text":"..."}]},...}}
-	configID := c.Cfg.DiscoveryEngineConfigID
+	configID := c.enterpriseConfigID(nil)
 	if configID == "" {
 		configID = "default"
 	}
+	fileIDsJSON := "[]"
+	if len(fileIDs) > 0 {
+		encoded := make([]string, 0, len(fileIDs))
+		for _, id := range fileIDs {
+			encoded = append(encoded, fmt.Sprintf("%q", id))
+		}
+		fileIDsJSON = "[" + strings.Join(encoded, ",") + "]"
+	}
+	sessionJSON := ""
+	if s := strings.TrimSpace(session); s != "" {
+		sessionJSON = fmt.Sprintf(`"session":%q,`, s)
+	}
 	body := fmt.Sprintf(
-		`{"configId":"%s","streamAssistRequest":{"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":[],"filter":"","toolsSpec":{"toolRegistry":"default_tool_registry"},"userMetadata":{}}}`,
+		`{"configId":"%s","streamAssistRequest":{%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":{"toolRegistry":"default_tool_registry"},"userMetadata":{}}}`,
 		configID,
+		sessionJSON,
 		jsonEscapeInner(prompt),
+		fileIDsJSON,
 	)
 
-	// Determine origin for SAPISIDHASH (prefer synced BaseURL — this must match
-// the origin the browser uses, which is the Gemini Enterprise origin, NOT
-// the Discovery Engine endpoint host).
-	origin := cookieInfo.BaseURL
-	if origin == "" {
-		origin = c.Cfg.BaseURL
-	}
-	if origin == "" {
-		origin = "https://gemini.google.com"
-	}
-
-	// Auth-user prefix for Referer
-	authUser := c.Cfg.AuthUser
-	if authUser == "" && cookieInfo.AuthUser != "" {
-		authUser = cookieInfo.AuthUser
-	}
-	prefix := AccountPrefix(authUser)
-
-	headers := make(http.Header)
-	headers.Set("Content-Type", "application/json")
-	headers.Set("Origin", origin)
-	headers.Set("Referer", origin+prefix+"/app")
-	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-	headers.Set("X-Goog-Api-Client", "gemini-enterprise-classic/1.0.0")
-	if authUser != "" {
-		headers.Set("X-Goog-AuthUser", authUser)
-	} else {
-		headers.Set("X-Goog-AuthUser", "0")
-	}
-	if cookieInfo.Cookie != "" {
-		headers.Set("Cookie", cookieInfo.Cookie)
-	}
-	if cookieInfo.SAPISID != "" {
-		if auth := SAPISIDHashWithOrigin(cookieInfo.SAPISID, origin); auth != "" {
-			headers.Set("Authorization", auth)
-		}
-	}
-	serverToken := c.Cfg.DiscoveryEngineServerToken
-	if serverToken == "" {
-		serverToken = cookieInfo.ServerToken
-	}
-	if serverToken != "" {
-		headers.Set("X-Server-Token", serverToken)
-	}
+	// Cookie-authenticated headers (Origin/Referer/SAPISIDHASH/X-Server-Token)
+	// are shared with the context-file upload path.
+	headers := c.discoveryHeaders(endpoint)
 
 	var lastErr error
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {

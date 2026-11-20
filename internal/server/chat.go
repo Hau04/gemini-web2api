@@ -102,15 +102,22 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		modelStr = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelStr, a.Cfg.DefaultModel)
+	if req.ToolChoice == nil {
+		req.ToolChoice = "auto"
+	}
+	hasTools := len(req.Tools) > 0
+	if choice, ok := req.ToolChoice.(string); ok && choice == "none" {
+		hasTools = false
+	}
+
+	resolved, redirected, err := a.resolveRequestModel(modelStr, hasTools)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
 	setModelHeaders(w, resolved)
-
-	if req.ToolChoice == nil {
-		req.ToolChoice = "auto"
+	if redirected {
+		w.Header().Set("X-Tool-Model-Override", "true")
 	}
 
 	prompt, images, err := format.MessagesToPrompt(req)
@@ -431,7 +438,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			var fileRefs []string
 			if len(images) > 0 {
 				var uErr error
-				fileRefs, uErr = a.uploadImages(images)
+				fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
 				if uErr != nil {
 					emitErr = uErr
 				}
@@ -628,7 +635,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 			var fileRefs []string
 			if len(images) > 0 {
 				var uErr error
-				fileRefs, uErr = a.uploadImages(images)
+				fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
 				if uErr != nil {
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
 					return
@@ -707,10 +714,11 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Direct Gemini API mode: upload images to Gemini storage via cookies.
+	// Direct Gemini API mode: consumer origins upload through content-push,
+	// Gemini Enterprise attaches the files to the assistant session instead.
 	var fileRefs []string
 	if len(images) > 0 {
-		fileRefs, err = a.uploadImages(images)
+		fileRefs, gemOpt.Files, err = a.prepareAttachments(images)
 		if err != nil {
 			a.Logf("Image upload error: %v", err)
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
