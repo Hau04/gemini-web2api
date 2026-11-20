@@ -633,17 +633,21 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			c.Logf("Enterprise: requested model %q -> Discovery Engine modelId %q", requestedModel, modelID)
 		}
 	}
-	body := fmt.Sprintf(
-		`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
-		configID,
-		sessionJSON,
-		modelJSON,
-		jsonEscapeInner(prompt),
-		fileIDsJSON,
-		toolsSpec,
-	)
+	buildBody := func() string {
+		return fmt.Sprintf(
+			`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
+			configID,
+			sessionJSON,
+			modelJSON,
+			jsonEscapeInner(prompt),
+			fileIDsJSON,
+			toolsSpec,
+		)
+	}
+	body := buildBody()
 
 	var lastErr error
+	sessionDropped := false
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
 		if err != nil {
@@ -680,6 +684,21 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		if resp.StatusCode != http.StatusOK {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			// A session the tenant has forgotten (expiry, engine rebuild, another
+			// backend pod) must not fail the turn: drop it, retry once without it,
+			// and let the next request create a fresh one.
+			if !sessionDropped && sessionJSON != "" && resp.StatusCode == http.StatusNotFound &&
+				sessionNotFound(bodyText) {
+				sessionDropped = true
+				c.Logf("Gemini Enterprise: the tenant no longer knows session %s (HTTP 404) — retrying without a session; a fresh one is created for the next turn",
+					shortSessionName(session))
+				c.clearEnterpriseSession()
+				session = ""
+				sessionJSON = ""
+				body = buildBody()
+				attempt-- // do not spend a retry on a stale session
+				continue
+			}
 			c.Logf("Direct Discovery Engine streamAssist returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyText)))
 			return &UpstreamError{
 				Status: resp.StatusCode,
@@ -736,4 +755,16 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		lastErr = &UpstreamError{Status: http.StatusInternalServerError, Kind: "http", Msg: "streamAssist direct call failed with no error"}
 	}
 	return lastErr
+}
+
+// sessionNotFound reports whether an upstream body says the session resource is
+// gone (rather than the request being wrong in some other way).
+func sessionNotFound(body []byte) bool {
+	lower := strings.ToLower(string(body))
+	if !strings.Contains(lower, "session") {
+		return false
+	}
+	return strings.Contains(lower, "does not exist") ||
+		strings.Contains(lower, "not_found") ||
+		strings.Contains(lower, "not found")
 }

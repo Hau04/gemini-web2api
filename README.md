@@ -427,6 +427,20 @@ One session is created per process (`widgetCreateSession`) and reused by every r
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
 ```
 
+A session can also disappear on the tenant's side — expiry, an engine rebuild, another backend pod:
+
+```
+HTTP 404 Session with name "projects/…/sessions/10740851950609687161" does not exist.
+```
+
+That used to fail the whole turn. Now the session is dropped, the request is retried once without it, and a fresh session is created for the next turn:
+
+```
+Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 404) — retrying without a session; a fresh one is created for the next turn
+```
+
+A 404 that is *not* about the session (wrong endpoint, bad configId) still fails normally — the recovery is narrow on purpose.
+
 Pin a specific conversation with `"discovery_engine_session": "collections/…/sessions/…"` in `config.json`.
 
 ### Model Inspection Headers

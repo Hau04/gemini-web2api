@@ -420,6 +420,20 @@ Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
 ```
 
+租户那边也可能把会话弄丢（过期、引擎重建、换到另一个后端实例）：
+
+```
+HTTP 404 Session with name "projects/…/sessions/10740851950609687161" does not exist.
+```
+
+以前这会让整轮请求失败。现在会丢掉该会话、不带会话重试一次，并给下一轮创建新会话：
+
+```
+Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 404) — retrying without a session; a fresh one is created for the next turn
+```
+
+如果 404 与会话无关（endpoint 写错、configId 不对），依然会正常报错 —— 这个兜底刻意做得很窄。
+
 想固定某个会话，在 `config.json` 里设 `"discovery_engine_session": "collections/…/sessions/…"`。
 
 ### 模型检查头
