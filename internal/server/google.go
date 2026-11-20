@@ -138,7 +138,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if emitErr == nil {
-			if suffix := chatMediaSuffix(mediaRaw.String()); suffix != "" {
+			if suffix := a.chatMediaSuffix(mediaRaw.String(), resolved.Name); suffix != "" {
 				mediaChunk := models.GoogleGenerateResponse{
 					Candidates: []models.GoogleCandidate{
 						{
@@ -181,7 +181,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
-	text += chatMediaSuffix(mediaRaw.String())
+	text += a.chatMediaSuffix(mediaRaw.String(), resolved.Name)
 
 	var responseParts []models.GooglePart
 	if hasTools && text != "" {

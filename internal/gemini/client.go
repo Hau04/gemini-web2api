@@ -83,8 +83,11 @@ type Client struct {
 	// uploadCache remembers the fileId returned for a context-file upload so a
 	// later turn that resends the same bytes can reference it directly instead
 	// of uploading again (Enterprise files stay in their session).
-	uploadMu    sync.Mutex
-	uploadCache map[string]cachedUpload
+	uploadMu sync.Mutex
+	// uploadDroppedFields remembers JSON fields the widget rejected as unknown in
+	// widgetAddContextFile, so later uploads start from the accepted shape.
+	uploadDroppedFields map[string]bool
+	uploadCache         map[string]cachedUpload
 
 	// Gemini Enterprise widget auth: an HS256 JWT minted from the portal XSRF
 	// token, plus the assistant session every widget call must reference.

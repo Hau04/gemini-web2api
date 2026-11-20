@@ -362,11 +362,25 @@ func interceptClientMediaTools(req models.OpenAIChatRequest) (models.OpenAIChatR
 
 // chatMediaSuffix turns media found in a captured upstream payload into markdown
 // the chat client can render. Empty when the payload carried no media.
-func chatMediaSuffix(raw string) string {
+//
+// It logs the outcome either way: "the model answered with text and no image" is
+// the difference between a tenant that cannot render media and a transport that
+// dropped it, and that must be visible without guessing.
+func (a *App) chatMediaSuffix(raw, model string) string {
 	if strings.TrimSpace(raw) == "" {
 		return ""
 	}
-	return mediaChatMarkdown(gemini.ExtractMedia(raw))
+	assets := gemini.ExtractMedia(raw)
+	if len(assets) == 0 {
+		if a.Logf != nil {
+			a.Logf("MEDIA: %q answered with text but no image/video in the payload — the tenant/model did not render it", model)
+		}
+		return ""
+	}
+	if a.Logf != nil {
+		a.Logf("MEDIA: %q answered with %d asset(s)", model, len(assets))
+	}
+	return mediaChatMarkdown(assets)
 }
 
 // mediaChatMarkdown renders assets as markdown images/links. Inline bytes become

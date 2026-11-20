@@ -420,6 +420,20 @@ Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
 ```
 
+租户那边也可能把会话弄丢（过期、引擎重建、换到另一个后端实例）：
+
+```
+HTTP 404 Session with name "projects/…/sessions/10740851950609687161" does not exist.
+```
+
+以前这会让整轮请求失败。现在会丢掉该会话、不带会话重试一次，并给下一轮创建新会话：
+
+```
+Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 404) — retrying without a session; a fresh one is created for the next turn
+```
+
+如果 404 与会话无关（endpoint 写错、configId 不对），依然会正常报错 —— 这个兜底刻意做得很窄。
+
 想固定某个会话，在 `config.json` 里设 `"discovery_engine_session": "collections/…/sessions/…"`。
 
 ### 模型检查头
@@ -478,13 +492,25 @@ WorkBuddy 自带 `generate_image` / `create_video` 这类工具。模型一旦�
 - 在**每个**入口都生效：`/v1/chat/completions`、`/v1/responses`（WorkBuddy 智能体实际使用的接口）以及 `/v1beta/models/{model}:generateContent` —— 只覆盖其中一个，工具在别的入口仍然会被使用
 - 匹配名单：`generate_image`、`image_generation`、`create_image`、`text_to_image`、`nano_banana`、`imagen`、`generate_video`、`create_video`、`text_to_video`、`veo`，以及 WorkBuddy 的 `ImageGen`，还有 camelCase / `-` / `_` 变体和 MCP 命名空间形式
 - 响应头 `X-Media-Tools-Intercepted: generate_image`，日志 `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
+- 每次媒体请求都会记录结果，不留歧义：`MEDIA: "gemini-4-hydrogen" answered with 1 asset(s)` 对比 `MEDIA: "gemini-4-hydrogen" answered with text but no image/video in the payload — the tenant/model did not render it`
 - 生成结果拼在回复末尾：内联字节为 `![generated image](data:image/png;base64,…)`（上限 8 MB），链接为 `![generated image](https://…)`，视频为 `[generated video](…)`
 
 其他行为不受影响：普通工具（文件、shell、连接器）保持可用；`tool_choice` 指向被摘掉的工具时回落到 `auto`；没有提供媒体工具的请求完全不做任何捕获。
 
 若日志里**没有**出现 `Client offered its own media tool(s)`，说明客户端根本没调用本 API 就自己出图了 —— 那个开关在 WorkBuddy 的设置里，不在这里。
 
-### 4. TLS 模拟（绕过 WAF）
+### 4. 附件上传被拒某个字段时
+
+有些租户会返回 `HTTP 400 Invalid JSON payload received. Unknown name "session" at 'add_context_file_request': Cannot find field.`。既然 widget 明确点名了它不认的字段，上传就丢掉该字段重发同一请求，并在进程内记住被接受的字段组合 —— 不会再因为一个可选字段被拒，就把 20 KB 的提示词每轮内联一次：
+
+```
+Gemini Enterprise: the widget does not accept "session" in addContextFileRequest — retrying without it
+Enterprise context file "code_context.txt" uploaded as text/plain (20 KB, fileId=… session=…)
+```
+
+若重试仍失败，附件照旧内联进提示词，并在日志里说明原因。
+
+### 5. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
 

@@ -427,6 +427,20 @@ One session is created per process (`widgetCreateSession`) and reused by every r
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
 ```
 
+A session can also disappear on the tenant's side — expiry, an engine rebuild, another backend pod:
+
+```
+HTTP 404 Session with name "projects/…/sessions/10740851950609687161" does not exist.
+```
+
+That used to fail the whole turn. Now the session is dropped, the request is retried once without it, and a fresh session is created for the next turn:
+
+```
+Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 404) — retrying without a session; a fresh one is created for the next turn
+```
+
+A 404 that is *not* about the session (wrong endpoint, bad configId) still fails normally — the recovery is narrow on purpose.
+
 Pin a specific conversation with `"discovery_engine_session": "collections/…/sessions/…"` in `config.json`.
 
 ### Model Inspection Headers
@@ -486,13 +500,25 @@ So the proxy removes those tools from the request before the model ever sees the
 - enforced on **every** entry point: `/v1/chat/completions`, `/v1/responses` (the surface WorkBuddy's agent uses) and `/v1beta/models/{model}:generateContent` — covering only one of them leaves the tool in play on the others
 - names matched (`generate_image`, `image_generation`, `create_image`, `text_to_image`, `nano_banana`, `imagen`, `generate_video`, `create_video`, `text_to_video`, `veo`, and WorkBuddy's `ImageGen`, plus camelCase/`-`/`_` variants and MCP-namespaced forms)
 - response header `X-Media-Tools-Intercepted: generate_image` and log line `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
+- every media request logs its outcome, so the answer is never ambiguous: `MEDIA: "gemini-4-hydrogen" answered with 1 asset(s)` versus `MEDIA: "gemini-4-hydrogen" answered with text but no image/video in the payload — the tenant/model did not render it`
 - the rendered asset comes back appended to the reply: `![generated image](data:image/png;base64,…)` for inline bytes (capped at 8 MB) or `![generated image](https://…)` for links, `[generated video](…)` for video
 
 Everything else keeps working: ordinary tools (files, shell, connectors) are untouched, a `tool_choice` that named a removed tool falls back to `auto`, and requests that offered no media tool capture nothing at all.
 
 If the log shows **no** `Client offered its own media tool(s)` line for an image prompt, the client is generating it without calling this API at all — that switch lives in WorkBuddy's settings, not here.
 
-### 4. TLS Impersonation (Bypass WAF)
+### 4. Attachment uploads that reject a field
+
+Some tenants answer `HTTP 400 Invalid JSON payload received. Unknown name "session" at 'add_context_file_request': Cannot find field.` The widget names the exact field it refuses, so the upload drops that field, retries the same request, and remembers the accepted shape for the process — no more inlining a 20 KB prompt on every turn because one optional field was rejected:
+
+```
+Gemini Enterprise: the widget does not accept "session" in addContextFileRequest — retrying without it
+Enterprise context file "code_context.txt" uploaded as text/plain (20 KB, fileId=… session=…)
+```
+
+If the retry still fails, the attachment is inlined as before and the log says why.
+
+### 5. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:
 

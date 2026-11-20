@@ -355,9 +355,15 @@ func (c *Client) buildEnterpriseUploadBody(file RawFile) string {
 	}
 	if session := c.enterpriseSessionName(); session != "" && !strings.HasSuffix(session, "/-") {
 		// The widget expects the session resource next to the file; "name" is kept
-		// for tenants that read the older shape.
-		req["session"] = session
-		req["name"] = session
+		// for tenants that read the older shape. Both are optional: some tenants
+		// answer 400 "Unknown name ... Cannot find field" and the fields are then
+		// dropped for good (see dropUploadField).
+		if !c.uploadFieldDropped("session") {
+			req["session"] = session
+		}
+		if !c.uploadFieldDropped("name") {
+			req["name"] = session
+		}
 	}
 	payload := map[string]any{
 		"additionalParams":      widgetAdditionalParams(),
@@ -451,22 +457,39 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 		}
 	}
 
-	req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
-	if err != nil {
-		return "", "", err
-	}
-	req.Header = headers
-	if usingBearer {
-		c.applyEnterpriseWidgetHeaders(req, bearer)
-	}
+	var resp *http.Response
+	var respBody []byte
+	for attempt := 0; attempt < 4; attempt++ {
+		req, reqErr := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+		if reqErr != nil {
+			return "", "", reqErr
+		}
+		req.Header = headers
+		if usingBearer {
+			c.applyEnterpriseWidgetHeaders(req, bearer)
+		}
 
-	resp, err := c.HTTP.Do(req)
-	if err != nil {
-		return "", "", &UpstreamError{Kind: "transport", Msg: fmt.Sprintf("context-file upload failed: %v", err)}
+		resp, err = c.HTTP.Do(req)
+		if err != nil {
+			return "", "", &UpstreamError{Kind: "transport", Msg: fmt.Sprintf("context-file upload failed: %v", err)}
+		}
+		respBody, _ = io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			break
+		}
+		// The widget names the exact field it does not know ("Unknown name
+		// \"session\" at 'add_context_file_request'"). Learn from that instead of
+		// guessing which field set this tenant accepts: drop it and retry once.
+		if field, ok := unknownJSONField(respBody); ok && c.dropUploadField(field) {
+			if rebuilt := c.buildEnterpriseUploadBody(file); rebuilt != "" {
+				body = rebuilt
+				c.Logf("Gemini Enterprise: the widget does not accept %q in addContextFileRequest — retrying without it", field)
+				continue
+			}
+		}
+		break
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		hint := ""
 		if resp.StatusCode == http.StatusBadRequest && resp.StatusCode != http.StatusUnauthorized {
@@ -1013,4 +1036,37 @@ func (c *Client) EnterpriseUploadReadiness() string {
 		return "unavailable — no upload endpoint could be derived; set discovery_engine_upload_endpoint"
 	}
 	return "derived widgetAddContextFile upload (configId " + c.enterpriseConfigID(nil) + ") — attach one file in the tab once if uploads are rejected"
+}
+
+// uploadFieldDropped reports whether the widget rejected a field for this client.
+func (c *Client) uploadFieldDropped(field string) bool {
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	return c.uploadDroppedFields[field]
+}
+
+// dropUploadField remembers a rejected field and reports whether it was new.
+func (c *Client) dropUploadField(field string) bool {
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	if c.uploadDroppedFields == nil {
+		c.uploadDroppedFields = make(map[string]bool)
+	}
+	if c.uploadDroppedFields[field] {
+		return false
+	}
+	c.uploadDroppedFields[field] = true
+	return true
+}
+
+var reUnknownJSONField = regexp.MustCompile(`Unknown name[\s\\"]*([A-Za-z0-9_]+)`)
+
+// unknownJSONField extracts the offending field name from a google.rpc
+// INVALID_ARGUMENT response, so the caller can resend without it.
+func unknownJSONField(body []byte) (string, bool) {
+	match := reUnknownJSONField.FindSubmatch(body)
+	if len(match) != 2 {
+		return "", false
+	}
+	return string(match[1]), true
 }

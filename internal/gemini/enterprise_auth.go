@@ -230,6 +230,15 @@ func (c *Client) reuseOrCreateEnterpriseSession(session string) string {
 	return created
 }
 
+// clearEnterpriseSession forgets the cached assistant session. The tenant can
+// drop a session at any time (expiry, engine rebuild, a different backend pod),
+// and a stale id must never fail an otherwise healthy request.
+func (c *Client) clearEnterpriseSession() {
+	c.enterpriseAuthMu.Lock()
+	c.enterpriseSession = ""
+	c.enterpriseAuthMu.Unlock()
+}
+
 // shortSessionName keeps session logs to one readable line.
 func shortSessionName(session string) string {
 	s := strings.TrimSpace(session)
