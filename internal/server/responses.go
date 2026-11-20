@@ -103,6 +103,22 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Same interception as /v1/chat/completions: a client that offers its own
+	// image/video generator has it removed here, otherwise the client renders the
+	// media (and pays for it) instead of the signed-in Gemini account.
+	var clientMediaTools []string
+	{
+		probe := models.OpenAIChatRequest{Tools: reqTools, ToolChoice: req["tool_choice"]}
+		intercepted, removed := interceptClientMediaTools(probe)
+		if len(removed) > 0 {
+			reqTools = intercepted.Tools
+			req["tool_choice"] = intercepted.ToolChoice
+			clientMediaTools = removed
+			w.Header().Set("X-Media-Tools-Intercepted", strings.Join(removed, ","))
+			a.Logf("Client offered its own media tool(s) %v — removed from this responses request so Gemini renders the media itself (no client credits spent)", removed)
+		}
+	}
+
 	toolChoice := req["tool_choice"]
 	if toolChoice == nil {
 		toolChoice = "auto"
@@ -143,6 +159,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
 	}
+	if len(clientMediaTools) > 0 {
+		prompt += format.MediaGenerationInstruction(clientMediaTools)
+	}
 
 	gemOpt := gemini.ModelOptions{
 		ModelName:   resolved.Name,
@@ -150,6 +169,14 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		ThinkMode:   resolved.Think,
 		ModelHeader: resolved.Header,
 		Extra:       resolved.Extra,
+	}
+	var mediaRaw strings.Builder
+	if len(clientMediaTools) > 0 {
+		gemOpt.MediaSink = func(chunk string) {
+			if mediaRaw.Len() < maxInlineChatMediaChars+1 {
+				mediaRaw.WriteString(chunk)
+			}
+		}
 	}
 
 	var text string
@@ -297,6 +324,8 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	strChoice, isStr := toolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
+
+	text += chatMediaSuffix(mediaRaw.String())
 
 	var toolCalls []models.OpenAIToolCall
 	if len(reqTools) > 0 && text != "" && !isToolNone {

@@ -475,7 +475,8 @@ WorkBuddy 自带 `generate_image` / `create_video` 这类工具。模型一旦�
 
 所以代理会在模型看到之前把这些工具摘掉，并告诉模型用自己的媒体工具出图：
 
-- 匹配名单：`generate_image`、`image_generation`、`create_image`、`text_to_image`、`nano_banana`、`imagen`、`generate_video`、`create_video`、`text_to_video`、`veo`，以及 camelCase / `-` / `_` 变体和 MCP 命名空间形式
+- 在**每个**入口都生效：`/v1/chat/completions`、`/v1/responses`（WorkBuddy 智能体实际使用的接口）以及 `/v1beta/models/{model}:generateContent` —— 只覆盖其中一个，工具在别的入口仍然会被使用
+- 匹配名单：`generate_image`、`image_generation`、`create_image`、`text_to_image`、`nano_banana`、`imagen`、`generate_video`、`create_video`、`text_to_video`、`veo`，以及 WorkBuddy 的 `ImageGen`，还有 camelCase / `-` / `_` 变体和 MCP 命名空间形式
 - 响应头 `X-Media-Tools-Intercepted: generate_image`，日志 `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
 - 生成结果拼在回复末尾：内联字节为 `![generated image](data:image/png;base64,…)`（上限 8 MB），链接为 `![generated image](https://…)`，视频为 `[generated video](…)`
 
