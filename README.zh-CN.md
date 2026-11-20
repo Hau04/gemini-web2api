@@ -394,7 +394,7 @@ https://gemini.google.com/u/1/app/...
 2. **直接配置端点**：没有捕获模板时，把 `discovery_engine_upload_endpoint` 设为标签页 DevTools 里的 `widgetAddContextFile` URL；若留空，服务器会把 `discovery_engine_endpoint` 中的 `widgetStreamAssist` 自动替换为 `widgetAddContextFile`。`discovery_engine_session`（如 `collections/default_collection/engines/my-engine/sessions/-`）和 `discovery_engine_config_id` 可固定会话与 Widget 配置，否则从捕获的请求体里读取。
 3. **文本内联兜底**：完全没有上传通道时，纯文本类附件（代码、JSON、CSV、Markdown、日志，单个 ≤200 KB、总计 ≤400 KB）会带 `--- Attached file: … ---` 标记内联进提示词，编码代理仍能读到文件内容；图片 / PDF / Office 等二进制附件会返回明确错误，而不是被静默丢弃。
 
-上传的文件与重放的 `streamAssist` 处于同一会话，后续对话会保留文件上下文；每次带附件的请求都会重新上传。
+上传的文件与重放的 `streamAssist` 处于同一会话，后续对话会保留文件上下文。相同内容只会上传**一次**：同一请求内的重复文件共用一个 `fileId`，上传结果按内容哈希缓存 `discovery_engine_upload_cache_sec` 秒（默认 1800，设为 `0` 关闭），因此编码代理每轮重复发送同一批仓库文件时不再走上传；同时最多并行上传 4 个文件。
 
 ### WorkBuddy / AI 编码代理集成
 

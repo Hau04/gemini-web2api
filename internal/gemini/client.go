@@ -74,6 +74,12 @@ type Client struct {
 	// speaks the Discovery Engine streamAssist API instead, so direct cookie mode
 	// can never work there and requests must use the browser bridge.
 	bardUnsupported atomic.Bool
+
+	// uploadCache remembers the fileId returned for a context-file upload so a
+	// later turn that resends the same bytes can reference it directly instead
+	// of uploading again (Enterprise files stay in their session).
+	uploadMu    sync.Mutex
+	uploadCache map[string]cachedUpload
 }
 
 func NewClient(cfg config.Config) *Client {

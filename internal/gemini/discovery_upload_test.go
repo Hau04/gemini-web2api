@@ -1,12 +1,14 @@
 package gemini
 
 import (
+	"bytes"
 	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -311,5 +313,121 @@ func TestLoadAndSaveDiscoveryUploadTemplate(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "discovery_upload_template.json")); err != nil {
 		t.Errorf("template file was not created next to the cookie file: %v", err)
+	}
+}
+
+func TestPrepareEnterpriseAttachmentsCachesAndDedupes(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	var uploads int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		uploads++
+		_, _ = w.Write([]byte(`{"addContextFileResponse":{"session":"collections/c/engines/e/sessions/9","fileId":"f-` + strconv.Itoa(uploads) + `"}}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineEndpoint:       srv.URL + "/v1alpha/locations/global/widgetStreamAssist",
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+		DiscoveryEngineUploadCacheSec: 60,
+	}
+	c := NewClient(cfg)
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+
+	same := []byte("identical payload")
+	prompt, ids, session, err := c.prepareEnterpriseAttachments("q", []RawFile{
+		{Name: "a.txt", MIME: "text/plain", Data: same},
+		{Name: "b.txt", MIME: "text/plain", Data: same},
+	})
+	if err != nil {
+		t.Fatalf("prepareEnterpriseAttachments() error = %v", err)
+	}
+	if uploads != 1 {
+		t.Errorf("identical files in one request uploaded %d times, want 1", uploads)
+	}
+	if len(ids) != 1 || ids[0] != "f-1" {
+		t.Errorf("ids = %v, want a single deduped [f-1]", ids)
+	}
+	if session != "collections/c/engines/e/sessions/9" {
+		t.Errorf("session = %q, want the upload session", session)
+	}
+	if prompt != "q" {
+		t.Errorf("prompt = %q, want it untouched", prompt)
+	}
+
+	// A later turn resending the same bytes must reuse the cached fileId and
+	// must not fall back to inlining.
+	_, ids, _, err = c.prepareEnterpriseAttachments("q2", []RawFile{
+		{Name: "a.txt", MIME: "text/plain", Data: same},
+	})
+	if err != nil {
+		t.Fatalf("second prepareEnterpriseAttachments() error = %v", err)
+	}
+	if uploads != 1 {
+		t.Errorf("cached upload was repeated (%d uploads), want 1", uploads)
+	}
+	if len(ids) != 1 || ids[0] != "f-1" {
+		t.Errorf("cached ids = %v, want [f-1]", ids)
+	}
+
+	// Disabling the cache (0) forces a fresh upload.
+	c2 := NewClient(config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineEndpoint:       srv.URL + "/v1alpha/locations/global/widgetStreamAssist",
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+		DiscoveryEngineUploadCacheSec: 0,
+	})
+	c2.HTTP = srv.Client()
+	c2.Logf = func(string, ...any) {}
+	if _, _, _, err := c2.prepareEnterpriseAttachments("q", []RawFile{{Name: "a.txt", MIME: "text/plain", Data: same}}); err != nil {
+		t.Fatalf("uncached prepareEnterpriseAttachments() error = %v", err)
+	}
+	if uploads != 2 {
+		t.Errorf("cache disabled but uploads = %d, want 2", uploads)
+	}
+}
+
+func TestPrepareEnterpriseAttachmentsNotesSkippedFiles(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	// The upload endpoint 500s, so text files fall back to inlining; the inline
+	// budget only fits one file, the rest must be reported to the model.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	cfg := config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+	}
+	c := NewClient(cfg)
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+
+	big := bytes.Repeat([]byte("x"), maxInlineFileBytes)
+	prompt, ids, _, err := c.prepareEnterpriseAttachments("q", []RawFile{
+		{Name: "keep.txt", MIME: "text/plain", Data: big},
+		{Name: "keep2.txt", MIME: "text/plain", Data: big},
+		{Name: "drop.txt", MIME: "text/plain", Data: []byte("y")},
+	})
+	if err != nil {
+		t.Fatalf("prepareEnterpriseAttachments() error = %v", err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("ids = %v, want none when every upload failed", ids)
+	}
+	if !strings.Contains(prompt, "--- Attached file: keep.txt") {
+		t.Errorf("expected the first text file to be inlined: %.120s", prompt)
+	}
+	if !strings.Contains(prompt, "could not be attached - inline budget exhausted: drop.txt") {
+		t.Errorf("expected a note naming the skipped attachment: %s", prompt[len(prompt)-200:])
 	}
 }

@@ -14,6 +14,7 @@
   "discovery_engine_server_token": "",
   "discovery_engine_upload_endpoint": "",
   "discovery_engine_session": "",
+  "discovery_engine_upload_cache_sec": 1800,
   "api_keys": [
     "sk-gemini"
   ],

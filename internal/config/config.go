@@ -61,6 +61,10 @@ type Config struct {
 	// "collections/default_collection/engines/my-engine/sessions/-". Empty means
 	// derive it from a captured request template.
 	DiscoveryEngineSession string `json:"discovery_engine_session"`
+	// DiscoveryEngineUploadCacheSec caches uploaded context files by content
+	// hash for this many seconds so repeated turns that resend the same file
+	// skip the upload. 0 disables the cache.
+	DiscoveryEngineUploadCacheSec int `json:"discovery_engine_upload_cache_sec"`
 }
 
 func Default() Config {
@@ -102,6 +106,7 @@ func Default() Config {
 		DiscoveryEngineServerToken: "",
 		DiscoveryEngineUploadEndpoint: "",
 		DiscoveryEngineSession:        "",
+		DiscoveryEngineUploadCacheSec: 1800,
 	}
 }
 
@@ -157,6 +162,7 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineServerToken *string   `json:"discovery_engine_server_token"`
 		DiscoveryEngineUploadEndpoint *string `json:"discovery_engine_upload_endpoint"`
 		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
+		DiscoveryEngineUploadCacheSec *int    `json:"discovery_engine_upload_cache_sec"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -273,6 +279,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineSession != nil {
 		cfg.DiscoveryEngineSession = *aux.DiscoveryEngineSession
+	}
+	if aux.DiscoveryEngineUploadCacheSec != nil {
+		cfg.DiscoveryEngineUploadCacheSec = *aux.DiscoveryEngineUploadCacheSec
 	}
 
 	return cfg, nil

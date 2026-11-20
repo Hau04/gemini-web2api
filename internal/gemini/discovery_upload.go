@@ -2,7 +2,9 @@ package gemini
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -612,29 +615,154 @@ func findAssistRequest(node any) map[string]any {
 	return nil
 }
 
+// cachedUpload is a previously uploaded context file, keyed by content hash and
+// target session so a later turn can reuse its fileId instead of re-uploading.
+type cachedUpload struct {
+	fileID  string
+	session string
+	expires time.Time
+}
+
+// how many context-file uploads run at once for a multi-file request.
+const maxParallelEnterpriseUploads = 4
+
+func (c *Client) uploadCacheTTL() time.Duration {
+	sec := c.Cfg.DiscoveryEngineUploadCacheSec
+	if sec <= 0 {
+		return 0
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func fileContentKey(file RawFile) string {
+	sum := sha256.Sum256(file.Data)
+	return hex.EncodeToString(sum[:])
+}
+
+// cachedEnterpriseFileID returns a still-valid fileId for the given content and
+// target session, if one was uploaded earlier.
+func (c *Client) cachedEnterpriseFileID(key, sessionName string) (string, string, bool) {
+	ttl := c.uploadCacheTTL()
+	if ttl <= 0 {
+		return "", "", false
+	}
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	entry, ok := c.uploadCache[key+"\x00"+sessionName]
+	if !ok {
+		return "", "", false
+	}
+	if time.Now().After(entry.expires) {
+		delete(c.uploadCache, key+"\x00"+sessionName)
+		return "", "", false
+	}
+	return entry.fileID, entry.session, true
+}
+
+func (c *Client) rememberEnterpriseFileID(key, sessionName, fileID, session string) {
+	ttl := c.uploadCacheTTL()
+	if ttl <= 0 || fileID == "" {
+		return
+	}
+	c.uploadMu.Lock()
+	defer c.uploadMu.Unlock()
+	if c.uploadCache == nil {
+		c.uploadCache = make(map[string]cachedUpload)
+	}
+	now := time.Now()
+	for k, entry := range c.uploadCache {
+		if now.After(entry.expires) {
+			delete(c.uploadCache, k)
+		}
+	}
+	c.uploadCache[key+"\x00"+sessionName] = cachedUpload{fileID: fileID, session: session, expires: now.Add(ttl)}
+}
+
+// uploadOrReuse returns the fileId for a file, reusing an identical upload from
+// an earlier turn when the cache still holds it.
+func (c *Client) uploadOrReuse(file RawFile, key string) (string, string, error) {
+	sessionName := c.enterpriseSessionName()
+	if fileID, session, ok := c.cachedEnterpriseFileID(key, sessionName); ok {
+		c.Logf("Enterprise attachment %q already uploaded — reusing fileId %s", file.Name, fileID)
+		return fileID, session, nil
+	}
+	fileID, session, err := c.UploadEnterpriseFile(file)
+	if err != nil {
+		return "", "", err
+	}
+	c.rememberEnterpriseFileID(key, sessionName, fileID, session)
+	return fileID, session, nil
+}
+
 // prepareEnterpriseAttachments uploads the request's files into the assistant
 // session. Files that cannot be uploaded but are text-like are inlined into the
 // prompt instead, so a browserless Enterprise setup still works for code and
-// documents even when the upload endpoint is not configured.
+// documents even when the upload endpoint is not configured. Identical bytes are
+// uploaded once per request, and uploads are cached across turns
+// (discovery_engine_upload_cache_sec, default 30 minutes).
 func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (string, []string, string, error) {
 	if len(files) == 0 {
 		return prompt, nil, "", nil
 	}
 
+	// One upload per distinct content, executed with bounded parallelism.
+	keys := make([]string, len(files))
+	unique := make(map[string]RawFile, len(files))
+	order := make([]string, 0, len(files))
+	for i, file := range files {
+		key := fileContentKey(file)
+		keys[i] = key
+		if _, seen := unique[key]; !seen {
+			unique[key] = file
+			order = append(order, key)
+		}
+	}
+
+	type uploadResult struct {
+		fileID  string
+		session string
+		err     error
+	}
+	results := make(map[string]uploadResult, len(order))
 	var (
-		ids      []string
-		session  string
-		inline   strings.Builder
-		uploaded int
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		sem = make(chan struct{}, maxParallelEnterpriseUploads)
+	)
+	for _, key := range order {
+		wg.Add(1)
+		go func(key string, file RawFile) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			fileID, session, err := c.uploadOrReuse(file, key)
+			mu.Lock()
+			results[key] = uploadResult{fileID: fileID, session: session, err: err}
+			mu.Unlock()
+		}(key, unique[key])
+	}
+	wg.Wait()
+
+	var (
+		ids         []string
+		session     string
+		inline      strings.Builder
+		uploaded    int
+		inlined     int
+		skipped     []string
+		seenFileIDs = make(map[string]bool, len(order))
 	)
 	inlineBudget := maxInlineTotalBytes
 
-	for _, file := range files {
-		fileID, sess, err := c.UploadEnterpriseFile(file)
-		if err == nil {
-			ids = append(ids, fileID)
-			if sess != "" {
-				session = sess
+	for i, file := range files {
+		res := results[keys[i]]
+		if res.err == nil {
+			if res.session != "" {
+				session = res.session
+			}
+			if !seenFileIDs[res.fileID] {
+				seenFileIDs[res.fileID] = true
+				ids = append(ids, res.fileID)
 			}
 			uploaded++
 			continue
@@ -645,11 +773,16 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 				Status: http.StatusBadGateway,
 				Kind:   "unsupported",
 				Msg: fmt.Sprintf("Gemini Enterprise could not accept attachment %q (%s) and it is not text that can be inlined: %v",
-					file.Name, file.MIME, err),
+					file.Name, file.MIME, res.err),
 			}
 		}
 		if inlineBudget <= 0 {
 			c.Logf("Skipping inline attachment %q: inline budget exhausted", file.Name)
+			name := file.Name
+			if name == "" {
+				name = "attachment"
+			}
+			skipped = append(skipped, name)
 			continue
 		}
 
@@ -664,7 +797,8 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 			truncated = true
 		}
 		inlineBudget -= len(body)
-		c.Logf("Enterprise upload unavailable for %q (%v) — inlining its text into the prompt", file.Name, err)
+		inlined++
+		c.Logf("Enterprise upload unavailable for %q (%v) — inlining its text into the prompt", file.Name, res.err)
 
 		name := file.Name
 		if name == "" {
@@ -682,13 +816,20 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 		inline.WriteString("\n--- end of ")
 		inline.WriteString(name)
 		inline.WriteString(" ---")
+		if res.err != nil {
+			c.Logf("Enterprise attachment %q inlined because upload failed: %v", file.Name, res.err)
+		}
 	}
 
 	if inline.Len() > 0 {
 		prompt += inline.String()
 	}
-	if uploaded > 0 {
-		c.Logf("Enterprise attachments: %d uploaded as context files, %d inlined", uploaded, len(files)-uploaded)
+	if len(skipped) > 0 {
+		prompt += fmt.Sprintf("\n\n[Note: %d attachment(s) were provided but could not be attached - inline budget exhausted: %s]",
+			len(skipped), strings.Join(skipped, ", "))
+	}
+	if uploaded > 0 || inlined > 0 {
+		c.Logf("Enterprise attachments: %d uploaded as context files, %d inlined", uploaded, inlined)
 	}
 	return prompt, ids, session, nil
 }
