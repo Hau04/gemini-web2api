@@ -3373,8 +3373,29 @@
     }
   }
 
+  let lastSyncedServerToken = "";
+
+  function extractServerToken(headers) {
+    if (!headers || typeof headers !== "object") return "";
+    for (const k of Object.keys(headers)) {
+      if (k.toLowerCase() === "x-server-token" && headers[k]) {
+        return String(headers[k]).trim();
+      }
+    }
+    return "";
+  }
+
   function handleReqMeta(data) {
     try {
+      const st = extractServerToken(data && data.headers);
+      if (st && st !== lastSyncedServerToken) {
+        lastSyncedServerToken = st;
+        try {
+          if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.sendMessage) {
+            chrome.runtime.sendMessage({ action: "web2api-server-token", serverToken: st });
+          }
+        } catch (e) {}
+      }
       const body = typeof data.body === "string" ? data.body : "";
       if (!body || body.length > 2 * 1024 * 1024) return;
       const templated = substitutePromptInBody(body, lastSubmittedPrompt);
