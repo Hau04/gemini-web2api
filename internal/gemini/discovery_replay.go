@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -535,7 +536,6 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 	return lastErr
 }
 
-
 // generateViaDiscoveryDirect calls the Discovery Engine streamAssist endpoint
 // directly using session cookies, without needing a captured request template.
 // This works on Gemini Enterprise origins when the user has configured the
@@ -553,8 +553,42 @@ func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, ses
 }
 
 func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, emit func(string) error) error {
-	endpoint := c.Cfg.DiscoveryEngineEndpoint
-	if endpoint == "" {
+	configID := strings.TrimSpace(c.enterpriseConfigID(nil))
+	if configID == "" {
+		return &UpstreamError{
+			Status: http.StatusBadRequest,
+			Kind:   "config",
+			Msg: "this Gemini Enterprise origin needs the widget config id: set \"discovery_engine_config_id\" " +
+				"(the configId the Gemini Enterprise app sends to widgetStreamAssist) or attach one file in the tab " +
+				"so the extension captures it",
+		}
+	}
+
+	// Preferred transport: mint a widget JWT from the portal XSRF token and talk
+	// to the regional content-* Discovery Engine host. That is what the Gemini
+	// Enterprise app itself does; the consumer SAPISIDHASH + ?key= form is only a
+	// legacy fallback when no csesidx has been captured yet.
+	bearer, bearerErr := c.enterpriseBearer()
+	usingBearer := bearerErr == nil
+	endpoint := ""
+	if usingBearer {
+		endpoint = contentWidgetEndpoint(c.enterpriseWidgetLocation(), "widgetStreamAssist")
+		if pinned := strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint); pinned != "" && strings.Contains(pinned, "content-") {
+			endpoint = pinned
+		}
+		if s := strings.TrimSpace(session); s != "" && !strings.HasSuffix(s, "/-") {
+			session = s
+		} else if created, err := c.ensureEnterpriseSession(configID); err == nil {
+			session = created
+		} else {
+			c.Logf("Gemini Enterprise: could not create a session (%v) — continuing without one", err)
+		}
+	} else if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != "" {
+		endpoint = c.Cfg.DiscoveryEngineEndpoint
+		if !errors.Is(bearerErr, errNoCsesidx) {
+			c.Logf("Gemini Enterprise: widget JWT unavailable (%v) — falling back to the cookie-authenticated endpoint", bearerErr)
+		}
+	} else {
 		return &UpstreamError{
 			Status: http.StatusNotFound,
 			Kind:   "unsupported",
@@ -562,12 +596,6 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		}
 	}
 
-	// Build widgetStreamAssist request body (widget API format):
-	// {"configId":"...","streamAssistRequest":{"query":{"parts":[{"text":"..."}]},...}}
-	configID := c.enterpriseConfigID(nil)
-	if configID == "" {
-		configID = "default"
-	}
 	fileIDsJSON := "[]"
 	if len(fileIDs) > 0 {
 		encoded := make([]string, 0, len(fileIDs))
@@ -580,17 +608,15 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	if s := strings.TrimSpace(session); s != "" {
 		sessionJSON = fmt.Sprintf(`"session":%q,`, s)
 	}
+	toolsSpec := `{"toolRegistry":"default_tool_registry"}`
 	body := fmt.Sprintf(
-		`{"configId":"%s","streamAssistRequest":{%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":{"toolRegistry":"default_tool_registry"},"userMetadata":{}}}`,
+		`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
 		configID,
 		sessionJSON,
 		jsonEscapeInner(prompt),
 		fileIDsJSON,
+		toolsSpec,
 	)
-
-	// Cookie-authenticated headers (Origin/Referer/SAPISIDHASH/X-Server-Token)
-	// are shared with the context-file upload path.
-	headers := c.discoveryHeaders(endpoint)
 
 	var lastErr error
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
@@ -598,7 +624,11 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		if err != nil {
 			return err
 		}
-		req.Header = headers.Clone()
+		if usingBearer {
+			c.applyEnterpriseWidgetHeaders(req, bearer)
+		} else {
+			req.Header = c.discoveryHeaders(endpoint)
+		}
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
@@ -609,10 +639,12 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			c.resetEnterpriseAuth()
 			lastErr = &UpstreamError{
 				Status: resp.StatusCode,
 				Kind:   "http",
-				Msg:    fmt.Sprintf("streamAssist direct call rejected (HTTP %d) — session cookies may be expired: %s", resp.StatusCode, strings.TrimSpace(string(bodyText))),
+				Msg: fmt.Sprintf("streamAssist direct call rejected (HTTP %d) — the session cookies or the minted widget JWT were refused: %s",
+					resp.StatusCode, strings.TrimSpace(string(bodyText))),
 			}
 			if attempt < c.Cfg.RetryAttempts-1 {
 				time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
@@ -634,9 +666,13 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		stream := &discoveryStream{emit: emit}
 		parser := &discoveryParser{objAt: -1, onObj: stream.processObject}
 		buf := make([]byte, 32*1024)
+		var rawSniff strings.Builder
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				if rawSniff.Len() < 4096 {
+					rawSniff.Write(buf[:n])
+				}
 				parser.feed(string(buf[:n]))
 			}
 			if rerr != nil {
@@ -654,11 +690,17 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			if msg == "" {
 				msg = "streamAssist answer state FAILED"
 			}
+			c.Logf("Direct Discovery Engine streamAssist failed: %s | upstream: %s", msg, summarizeBody([]byte(rawSniff.String())))
 			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: msg}
 		}
 		if !stream.hasText {
-			c.Logf("Direct Discovery Engine streamAssist returned no answer text")
-			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: "streamAssist direct call returned no answer text"}
+			snippet := summarizeBody([]byte(rawSniff.String()))
+			c.Logf("Direct Discovery Engine streamAssist returned no answer text | upstream: %s", snippet)
+			return &UpstreamError{
+				Status: http.StatusBadGateway,
+				Kind:   "http",
+				Msg:    "streamAssist direct call returned no answer text: " + snippet,
+			}
 		}
 		return stream.emitErr
 	}

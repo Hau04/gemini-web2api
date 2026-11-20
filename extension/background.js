@@ -127,6 +127,7 @@ async function syncCookiesNow(reason) {
     let xsrf = "";
     let authUser = "";
     let harvestOrigin = "";
+    let harvestCsesidx = "";
     try {
       const tabs = await chrome.tabs.query({ url: "*://gemini.google.com/*" });
       const entTabs = await chrome.tabs.query({ url: "*://vertexaisearch.cloud.google.com/*" });
@@ -158,6 +159,13 @@ async function syncCookiesNow(reason) {
         try {
           harvestOrigin = new URL(tab.url).origin;
         } catch (e) {}
+        // Gemini Enterprise widget calls need the conversation/config sequence
+        // id (?csesidx=...) to mint the XSRF-signed JWT, so harvest it from the
+        // tab URL whenever the app exposes it.
+        try {
+          const cm = (tab.url || "").match(/[?&]csesidx=(\d+)/);
+          if (cm) harvestCsesidx = cm[1];
+        } catch (e) {}
       }
     } catch (e) {}
 
@@ -165,6 +173,7 @@ async function syncCookiesNow(reason) {
     if (xsrf) payload.xsrf_token = xsrf;
     if (authUser) payload.auth_user = authUser;
     if (harvestOrigin) payload.origin = harvestOrigin;
+    if (harvestCsesidx) payload.csesidx = harvestCsesidx;
     try {
       const st = await chrome.storage.local.get(["serverToken"]);
       if (st && st.serverToken) payload.server_token = String(st.serverToken);

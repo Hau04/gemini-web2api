@@ -65,6 +65,14 @@ type Config struct {
 	// hash for this many seconds so repeated turns that resend the same file
 	// skip the upload. 0 disables the cache.
 	DiscoveryEngineUploadCacheSec int `json:"discovery_engine_upload_cache_sec"`
+	// DiscoveryEngineCsesidx is the Gemini Enterprise conversation/config
+	// sequence id ("csesidx") used to mint the widget XSRF/JWT. It is captured
+	// automatically by the extension from the tab URL when absent here.
+	DiscoveryEngineCsesidx string `json:"discovery_engine_csesidx"`
+	// DiscoveryEngineLocation is the Discovery Engine location for the widget
+	// host (us, eu, global). Defaults to the value in discovery_engine_endpoint
+	// or "us".
+	DiscoveryEngineLocation string `json:"discovery_engine_location"`
 }
 
 func Default() Config {
@@ -107,6 +115,8 @@ func Default() Config {
 		DiscoveryEngineUploadEndpoint: "",
 		DiscoveryEngineSession:        "",
 		DiscoveryEngineUploadCacheSec: 1800,
+		DiscoveryEngineCsesidx:        "",
+		DiscoveryEngineLocation:       "",
 	}
 }
 
@@ -163,6 +173,8 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineUploadEndpoint *string `json:"discovery_engine_upload_endpoint"`
 		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
 		DiscoveryEngineUploadCacheSec *int    `json:"discovery_engine_upload_cache_sec"`
+		DiscoveryEngineCsesidx        *string `json:"discovery_engine_csesidx"`
+		DiscoveryEngineLocation       *string `json:"discovery_engine_location"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -282,6 +294,12 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineUploadCacheSec != nil {
 		cfg.DiscoveryEngineUploadCacheSec = *aux.DiscoveryEngineUploadCacheSec
+	}
+	if aux.DiscoveryEngineCsesidx != nil {
+		cfg.DiscoveryEngineCsesidx = *aux.DiscoveryEngineCsesidx
+	}
+	if aux.DiscoveryEngineLocation != nil {
+		cfg.DiscoveryEngineLocation = *aux.DiscoveryEngineLocation
 	}
 
 	return cfg, nil
