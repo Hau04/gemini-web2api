@@ -49,11 +49,23 @@ type ModelOptions struct {
 	// fileRefs); Gemini Enterprise uploads them into the assistant session
 	// instead, because content-push does not exist on that origin.
 	Files []RawFile
+	// ConversationKey identifies the client chat this request belongs to (see
+	// format.ConversationID). Used to bind one Discovery Engine session per chat.
+	ConversationKey string
+	// ConversationHasHistory is true when the client sent assistant/tool turns,
+	// i.e. a conversation is already under way rather than a lone message.
+	ConversationHasHistory bool
 	// MediaSink, when set, receives the raw upstream payload as it streams in so
 	// the caller can extract generated images/videos (see ExtractMedia). The
 	// text pipeline drops binary parts by design; this is the only way media
 	// survives it.
 	MediaSink func(chunk string)
+}
+
+// ConversationInfo identifies the client chat a request belongs to.
+type ConversationInfo struct {
+	Key        string
+	HasHistory bool
 }
 
 type Client struct {
@@ -87,7 +99,14 @@ type Client struct {
 	// uploadDroppedFields remembers JSON fields the widget rejected as unknown in
 	// widgetAddContextFile, so later uploads start from the accepted shape.
 	uploadDroppedFields map[string]bool
-	uploadCache         map[string]cachedUpload
+	// enterpriseSessions maps a client conversation key to the assistant session
+	// it owns, so a new chat gets a new thread and resuming an old chat finds its
+	// own again.
+	enterpriseSessions       map[string]string
+	enterpriseSessionKey     string
+	enterprisePendingKey     string
+	enterpriseLastHadHistory bool
+	uploadCache              map[string]cachedUpload
 
 	// Gemini Enterprise widget auth: an HS256 JWT minted from the portal XSRF
 	// token, plus the assistant session every widget call must reference.

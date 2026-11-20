@@ -211,7 +211,7 @@ func (c *Client) resetEnterpriseAuth() {
 // Gemini" looks like. Session creation used to happen only when a widget JWT was
 // available, so cookie-authenticated setups (bearer=false) never got one and
 // every single message started a fresh thread.
-func (c *Client) reuseOrCreateEnterpriseSession(session string) string {
+func (c *Client) reuseOrCreateEnterpriseSession(session string, opt ModelOptions) string {
 	if s := strings.TrimSpace(session); s != "" && !strings.HasSuffix(s, "/-") {
 		return s
 	}
@@ -221,13 +221,101 @@ func (c *Client) reuseOrCreateEnterpriseSession(session string) string {
 		// caller reports that separately.
 		return strings.TrimSpace(session)
 	}
+
+	switch c.sessionAction(opt) {
+	case sessionActionNewChat:
+		c.clearEnterpriseSession()
+	}
 	created, err := c.ensureEnterpriseSession(configID)
 	if err != nil {
 		c.Logf("Gemini Enterprise: could not create an assistant session (%v) — the tenant will show every request as a new conversation", err)
 		return ""
 	}
-	c.Logf("Enterprise: continuing in assistant session %s (reused for every turn of this conversation)", shortSessionName(created))
 	return created
+}
+
+type sessionAction int
+
+const (
+	// sessionActionContinue reuses whatever session is cached: either the same
+	// client conversation, or a stateless client whose next message we cannot
+	// tell apart from a continuation.
+	sessionActionContinue sessionAction = iota
+	// sessionActionNewChat starts a fresh thread: the client opened a new chat.
+	sessionActionNewChat
+)
+
+// sessionAction decides whether the coming request belongs to the cached
+// conversation. The payload carries no conversation id, so the decision uses the
+// two signals it does carry: the first user message (stable while a chat is being
+// continued) and whether assistant/tool turns are present.
+func (c *Client) sessionAction(opt ModelOptions) sessionAction {
+	c.enterpriseAuthMu.Lock()
+	defer c.enterpriseAuthMu.Unlock()
+
+	key := strings.TrimSpace(opt.ConversationKey)
+	action := sessionActionContinue
+
+	switch {
+	case opt.ConversationHasHistory && key != "":
+		// A real conversation: it owns a session, and only that session is right.
+		if owned, ok := c.enterpriseSessions[key]; ok {
+			if owned != c.enterpriseSession {
+				c.Logf("Enterprise: switching back to the session owned by conversation %s", key)
+				c.enterpriseSession = owned
+			}
+			c.enterpriseSessionKey = key
+		} else if c.enterpriseSession == "" {
+			action = sessionActionNewChat
+		} else if c.enterprisePendingKey == key {
+			// First turn of this chat was the lone message that created the
+			// cached session — adopt it instead of opening another thread.
+			if c.enterpriseSessions == nil {
+				c.enterpriseSessions = make(map[string]string)
+			}
+			c.enterpriseSessions[key] = c.enterpriseSession
+			c.enterpriseSessionKey = key
+			c.enterprisePendingKey = ""
+		} else if c.enterpriseSessionKey != "" && c.enterpriseSessionKey != key {
+			action = sessionActionNewChat
+		}
+	case !opt.ConversationHasHistory:
+		// A lone message. Right after a multi-turn exchange it is the first
+		// message of a new chat ("open a new chat" in the client). Right after
+		// another lone message it is a stateless client continuing — keep it.
+		if c.enterpriseLastHadHistory {
+			action = sessionActionNewChat
+		}
+		if key != "" {
+			c.enterprisePendingKey = key
+		}
+	}
+
+	c.enterpriseLastHadHistory = opt.ConversationHasHistory
+	return action
+}
+
+// recordEnterpriseSession logs and remembers the session chosen for a request.
+func (c *Client) recordEnterpriseSession(session string, opt ModelOptions) {
+	key := strings.TrimSpace(opt.ConversationKey)
+	c.enterpriseAuthMu.Lock()
+	if c.enterpriseSessions == nil {
+		c.enterpriseSessions = make(map[string]string)
+	}
+	if key != "" {
+		c.enterpriseSessions[key] = session
+		c.enterpriseSessionKey = key
+		if c.enterprisePendingKey == key {
+			c.enterprisePendingKey = ""
+		}
+	}
+	c.enterpriseAuthMu.Unlock()
+
+	if key == "" {
+		c.Logf("Enterprise: continuing in assistant session %s (reused for every turn of this conversation)", shortSessionName(session))
+		return
+	}
+	c.Logf("Enterprise: continuing in assistant session %s for conversation %s", shortSessionName(session), key)
 }
 
 // clearEnterpriseSession forgets the cached assistant session. The tenant can

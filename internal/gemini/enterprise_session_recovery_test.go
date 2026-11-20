@@ -52,7 +52,7 @@ func TestStaleSessionIsDroppedAndRequestRetried(t *testing.T) {
 	c.enterpriseSession = "collections/c/engines/e/sessions/1"
 	creates = 1
 
-	if err := c.generateViaDiscoveryDirectStream("hello", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("hello", nil, "", ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("a stale session must not fail the request: %v", err)
 	}
 
@@ -90,7 +90,7 @@ func TestNonSession404StillFails(t *testing.T) {
 	rec := &sessionRecorder{}
 	c := sessionTestClient(t, srv, rec, nil)
 
-	err := c.generateViaDiscoveryDirectStream("hello", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil })
+	err := c.generateViaDiscoveryDirectStream("hello", nil, "", ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil })
 	if err == nil {
 		t.Fatal("a 404 unrelated to the session must surface as an error")
 	}

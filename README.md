@@ -421,7 +421,19 @@ Enterprise: continuing in assistant session 8f1c (reused for every turn of this 
 Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
 ```
 
-One session is created per process (`widgetCreateSession`) and reused by every request, so a whole day of messages lands in one Gemini conversation, and every client chat shares it. A restart, or a cookie/JWT reset, starts a new one — the transcript is not lost because your client re-sends its history, but the tenant's thread is new (and yesterday's uploaded file ids are gone). If the tenant refuses to create a session you get the opposite symptom, spelled out in the log:
+**One session per client chat.** The payload carries no conversation id, so the proxy derives one from the first user message (stable while a chat is continued, different when a new chat starts) and keeps a session per chat:
+
+- continuing a chat → the same session, so the thread keeps its memory;
+- **opening a new chat in the client → a fresh session**, so the new chat never inherits the previous thread's memory (a single message arriving right after a multi-turn exchange is exactly that signal);
+- resuming an earlier chat → its own session again, not the most recent one;
+- a client that only ever sends one message with no history keeps one session, since there is nothing to tell its messages apart from a continuation.
+
+```
+Enterprise: continuing in assistant session 8f1c for conversation 4c1a9ba2
+Enterprise: switching back to the session owned by conversation 4c1a9ba2
+```
+
+Sessions used to be one per process (`widgetCreateSession`) shared by every chat. A restart, or a cookie/JWT reset, starts a new one — the transcript is not lost because your client re-sends its history, but the tenant's thread is new (and yesterday's uploaded file ids are gone). If the tenant refuses to create a session you get the opposite symptom, spelled out in the log:
 
 ```
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
