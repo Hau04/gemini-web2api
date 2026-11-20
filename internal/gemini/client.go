@@ -332,7 +332,12 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
-			return c.generateViaDiscoveryDirect(prompt)
+			c.Logf("Enterprise BardUnsupported, calling direct Discovery Engine streamAssist endpoint")
+			resp, directErr := c.generateViaDiscoveryDirect(prompt)
+			if directErr != nil {
+				c.Logf("Direct Discovery Engine call failed: %v", directErr)
+			}
+			return resp, directErr
 		}
 		return "", &UpstreamError{
 			Status: http.StatusNotFound,
