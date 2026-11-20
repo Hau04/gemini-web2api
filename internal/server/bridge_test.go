@@ -684,8 +684,9 @@ func TestBridgeOversizedToolResultSpillover(t *testing.T) {
 		t.Fatal("expected bridge request")
 	}
 	// The inline prompt keeps the tool instructions but must never carry the
-	// ~4 KB code body; leave headroom for instruction wording growth.
-	if len(got.Prompt) > 1800 {
+	// ~4 KB code body; leave headroom for instruction wording growth (the
+	// premium execution-mode guard adds ~350 chars to the tool preamble).
+	if len(got.Prompt) > 2100 {
 		t.Errorf("expected compact prompt after spillover, got %d chars", len(got.Prompt))
 	}
 	if !strings.Contains(got.Prompt, "# Tool Use") {
@@ -1485,7 +1486,7 @@ func TestBridgeExtractLargeInlineBlocksToSingleTypedAttachment(t *testing.T) {
 
 	// Multiple large blocks must bundle into ONE single markdown attachment (1 upload call!)
 	blockA := strings.Repeat("SELECT * FROM users WHERE active = 1;\n", 130) // ~4.9 KB
-	blockB := strings.Repeat("package main // line\n", 250)                   // ~5.2 KB
+	blockB := strings.Repeat("package main // line\n", 250)                  // ~5.2 KB
 	multiPrompt := "[User]: Compare these two:\n```sql\n" + blockA + "\n```\n\n```go\n" + blockB + "\n```"
 	compactMulti, multiAtt := ExtractLargeInlineBlocksToAttachment(multiPrompt, 8192)
 	if multiAtt == nil || multiAtt.Filename != "inline_code_blocks.md" || multiAtt.MIME != "text/markdown" {
@@ -2165,9 +2166,3 @@ func TestExtractAttachedFilenamesFromWorkBuddyNotice(t *testing.T) {
 		t.Fatalf("expected [code_context.txt], got %v", names)
 	}
 }
-
-
-
-
-
-

@@ -86,6 +86,7 @@ func (a *App) Handler() http.Handler {
 
 	mux.HandleFunc("GET /{$}", a.handleHealth)
 	mux.HandleFunc("GET /v1/models", a.handleModels)
+	mux.HandleFunc("GET /v1/models/{id}", a.handleModelGet)
 	mux.HandleFunc("POST /v1/chat/completions", a.handleChat)
 	mux.HandleFunc("POST /v1/responses", a.handleResponses)
 

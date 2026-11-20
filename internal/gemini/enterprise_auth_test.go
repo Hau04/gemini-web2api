@@ -278,6 +278,7 @@ func TestEnterpriseModelIDResolution(t *testing.T) {
 	cfg.DiscoveryEngineModels = map[string]string{
 		"gemini-4-hydrogen": "gemini-2.5-flash",
 		"Argon":             "gemini-2.5-pro",
+		"gemini-4-neon":     "gemini-2.5-pro",
 	}
 	cfg.DiscoveryEngineDefaultModelID = "gemini-2.5-flash"
 	c := NewClient(cfg)
@@ -289,6 +290,8 @@ func TestEnterpriseModelIDResolution(t *testing.T) {
 		"gemini-2.5-pro":    "gemini-2.5-pro",   // already an upstream id, passed through
 		"gemini-3-pro":      "gemini-3-pro",     // upstream-looking id passes through
 		"hydrogen":          "gemini-2.5-flash", // local alias, not mapped -> default id
+		"gemini-4-neon":     "gemini-2.5-pro",   // neon is a first-class alias, mapped
+		"neon":              "gemini-2.5-flash", // short alias is never passed through as an upstream id
 		"":                  "gemini-2.5-flash", // no model requested -> default id
 	}
 	for requested, want := range cases {

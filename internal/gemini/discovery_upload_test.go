@@ -2,8 +2,8 @@ package gemini
 
 import (
 	"bytes"
-	"fmt"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"

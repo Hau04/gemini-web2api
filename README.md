@@ -207,10 +207,39 @@ Supports Google native API endpoints:
 - `POST /v1beta/models/{model}:generateContent` — non-streaming
 - `POST /v1beta/models/{model}:streamGenerateContent` — streaming (SSE)
 
+## WorkBuddy / MCP compatibility
+
+Built for agent runtimes that drive tools, connectors, skills and MCP servers (WorkBuddy, Claude-style agents, the OpenAI SDKs):
+
+| Feature | Behaviour |
+| --- | --- |
+| `GET /v1/models` | Every alias with `capabilities` (`tools`, `connectors`, `mcp`, `vision`, `attachments`, `json_mode`, `streaming`), `context_window`, `premium` and `research_prone` flags, so a client can filter before enabling a feature |
+| `GET /v1/models/{id}` | Single-model probe (200/404) used by agent runtimes to validate a configured id |
+| `parallel_tool_calls: false` | Enforced in the prompt: exactly one `tool_call` block per turn |
+| Duplicate / nameless tools | Merged MCP + connector sets are deduped by name; built-in declarations such as `{"type":"web_search"}` (no function name) are skipped instead of leaking a nameless entry |
+| MCP tool names | Namespaced names (`mcp__server__tool`, `server.tool`) are passed through untouched — they are executed by your client, never by Gemini |
+| Skills | Long `system`-only prompts are supported (skills are just instruction bundles); `/v1/responses` is fully supported alongside `/v1/chat/completions` |
+
+### Premium models never fall into Deep Research
+
+Neon, Hydrogen, Carbon and Argon are flagged `research_prone`, because the Gemini UI happily pushes them into Deep Research — a mode that reads the public web only and **cannot run your tools, connectors or MCP servers**. With `prevent_deep_research` (default `true`) a tool-enabled request to one of those models:
+
+- drops upstream research/browsing tools (`google_search`, `web_search`, `web_search_preview`, `deep_research`, `url_context`, `browse`, …) while keeping your real tools;
+- folds an `EXECUTION MODE` line into the `# Tool Use` preamble: Deep Research / built-in search are disabled, facts about the machine, repo, files or apps must come from a `tool_call`, and missing data must be fetched with a tool instead of researched;
+- answers with `X-Deep-Research: disabled` and logs `Execution-mode guard applied for premium model "gemini-4-neon" …`.
+
+```jsonc
+{ "prevent_deep_research": true, "tool_model": "gemini-3.8-flash" }
+```
+
+`tool_model` still wins when you want tool-enabled requests to run on a cheaper, reliable tool-caller regardless of the model the client asked for.
+
 ## Available Models
 
 | Model                            | Description                                  | Output          |
 | -------------------------------- | -------------------------------------------- | --------------- |
+| `gemini-4-neon`                  | Newest frontier model for complex work (needs Enterprise/Pro) | **~20k+ chars** |
+| `neon`, `gemini-4-neon-thinking` | Aliases for gemini-4-neon                    | **~20k+ chars** |
 | `gemini-4-argon`                 | Frontier model for complex tasks (needs Pro) | **~20k+ chars** |
 | `argon`, `gemini-4`              | Aliases for gemini-4-argon                   | **~20k+ chars** |
 | `gemini-4-hydrogen`              | High-speed frontier execution model          | **~20k+ chars** |

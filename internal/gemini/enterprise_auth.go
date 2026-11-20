@@ -450,14 +450,14 @@ func (c *Client) EnterpriseModelID(requested string) string {
 }
 
 // looksLikeDiscoveryEngineModel reports whether a name is a plain upstream
-// model id rather than one of this server's aliases (argon/hydrogen/carbon).
+// model id rather than one of this server's aliases (neon/hydrogen/argon/carbon).
 func looksLikeDiscoveryEngineModel(name string) bool {
 	if name == "" {
 		return false
 	}
-	switch name {
-	case "auto", "gemini-auto", "argon", "hydrogen", "carbon", "gemini-4",
-		"gemini-4-argon", "gemini-4-hydrogen", "gemini-4-carbon":
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "auto", "gemini-auto", "neon", "hydrogen", "argon", "carbon", "gemini-4",
+		"gemini-4-neon", "gemini-4-neon-thinking", "gemini-4-argon", "gemini-4-hydrogen", "gemini-4-carbon":
 		return false
 	}
 	return strings.HasPrefix(name, "gemini-") && !strings.Contains(name, "-4-")

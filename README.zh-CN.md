@@ -208,12 +208,41 @@ gemini
 * `POST /v1beta/models/{model}:generateContent`— 非流媒体
 * `POST /v1beta/models/{model}:streamGenerateContent`— 流媒体（上交所）
 
+## WorkBuddy / MCP 兼容性
+
+面向会驱动工具、连接器、技能与 MCP 服务器的代理运行时（WorkBuddy、Claude 风格 agent、OpenAI SDK）：
+
+| 能力 | 行为 |
+| --- | --- |
+| `GET /v1/models` | 每个别名都带 `capabilities`（`tools`、`connectors`、`mcp`、`vision`、`attachments`、`json_mode`、`streaming`）、`context_window`、`premium`、`research_prone`，客户端可在启用功能前先做能力判断 |
+| `GET /v1/models/{id}` | 单模型查询（200/404），代理运行时用来校验配置的模型 id |
+| `parallel_tool_calls: false` | 在提示词中强制：每轮只能输出**一个** `tool_call` 块 |
+| 重复/无名工具 | MCP 与连接器合并后按名称去重；`{"type":"web_search"}` 这类没有函数名的内置声明会被跳过，不会污染提示词 |
+| MCP 工具名 | `mcp__server__tool`、`server.tool` 等带命名空间的名称原样透传 —— 它们由你的客户端执行，不会被 Gemini 接管 |
+| 技能 | 支持纯 `system` 长指令（技能本质就是指令包）；`/v1/responses` 与 `/v1/chat/completions` 同样完整支持 |
+
+### 高级模型不会掉进 Deep Research
+
+Neon、Hydrogen、Carbon、Argon 被标记为 `research_prone`：Gemini 界面很容易把它们切到 Deep Research，而那个模式只读公开网页、**无法调用你的工具、连接器或 MCP**。开启 `prevent_deep_research`（默认 `true`）后，带工具的请求：
+
+- 丢弃上游研究/浏览类工具（`google_search`、`web_search`、`web_search_preview`、`deep_research`、`url_context`、`browse` 等），保留你真正的工具；
+- 在 `# Tool Use` 段里注入 `EXECUTION MODE`：Deep Research 与内置搜索被禁用，关于本机、仓库、文件、应用的事实必须来自 `tool_call`，缺数据就先发工具调用而不是去研究；
+- 响应头返回 `X-Deep-Research: disabled`，日志输出 `Execution-mode guard applied for premium model "gemini-4-neon" …`。
+
+```jsonc
+{ "prevent_deep_research": true, "tool_model": "gemini-3.8-flash" }
+```
+
+若想让所有带工具的请求都走更稳定、更便宜的工具调用模型，`tool_model` 依然优先生效。
+
 ## 可用型号
 
 |型号|描述 |输出|
 | -------------------------------- | ------------------------------------------------------------------ | ---------------- |
 |`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
 |`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
+|`gemini-4-neon`|最新前沿模型（需企业版/Pro）|**~20k+ 字符**|
+|`neon`、`gemini-4-neon-thinking`| gemini-4-neon 的别名 |**~20k+ 字符**|
 |`gemini-4-hydrogen`|高速前沿执行模型|**~20k+ 字符**|
 |`hydrogen`| Gemini-4-氢的别名 |**~20k+ 字符**|
 |`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |

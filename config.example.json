@@ -39,6 +39,7 @@
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 8192,
   "bridge_spillover_chars": 20000,
+  "prevent_deep_research": true,
   "bridge_delta_context": true,
   "bridge_auto_new_chat": true,
   "bridge_token": "",

@@ -127,6 +127,12 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Tools:      reqTools,
 		ToolChoice: toolChoice,
 	}
+	if parallel, ok := req["parallel_tool_calls"].(bool); ok {
+		chatReq.ParallelToolCalls = &parallel
+	}
+	if a.applyToolPolicy(&chatReq, resolved) {
+		w.Header().Set("X-Deep-Research", "disabled")
+	}
 
 	prompt, images, err := format.MessagesToPrompt(chatReq)
 	if err == nil {
@@ -200,25 +206,25 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 					writeBridgeRateLimitError(w, rlErr.RetryAfter, rlErr.Error())
 					return
 				}
-			// Transparent direct-mode fallback when bridge produced nothing
-			if a.directModeUsable() && r.Context().Err() == nil {
-				a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
-				a.Bridge.MarkDegraded(10 * time.Minute)
-				bridgeErr := err
-				var fileRefs []string
-				if len(images) > 0 {
-					var uErr error
-					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
-					if uErr != nil {
-						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
+				// Transparent direct-mode fallback when bridge produced nothing
+				if a.directModeUsable() && r.Context().Err() == nil {
+					a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
+					a.Bridge.MarkDegraded(10 * time.Minute)
+					bridgeErr := err
+					var fileRefs []string
+					if len(images) > 0 {
+						var uErr error
+						fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
+						if uErr != nil {
+							writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
+							return
+						}
+					}
+					text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+					if err != nil {
+						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
 						return
 					}
-				}
-				text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
-				if err != nil {
-					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
-					return
-				}
 					a.Bridge.ClearDegraded()
 				} else {
 					var pkErr *bridge.PickupError

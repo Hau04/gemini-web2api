@@ -286,7 +286,7 @@ var modelVersionRe = regexp.MustCompile(`\d+\.\d+`)
 // version-less "gemini-flash-lite" — too ambiguous for safe name matching).
 func modelNameTokens(name string) []string {
 	n := strings.ToLower(strings.TrimSpace(name))
-	for _, fam := range []string{"hydrogen", "argon", "carbon"} {
+	for _, fam := range []string{"neon", "hydrogen", "argon", "carbon"} {
 		if strings.Contains(n, fam) {
 			return []string{fam}
 		}
