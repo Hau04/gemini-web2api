@@ -126,5 +126,7 @@ func MediaGenerationInstruction(removed []string) string {
 		"If the user asks for an image or a video, create it yourself with your built-in image/video generation tool " +
 		"and return it inline. The proxy forwards the file to the client, so a description, an alternative prompt " +
 		"or an apology is not an acceptable substitute.\n" +
+		"If an earlier turn listed or ran one of those tools, ignore that: they are unavailable now, and offering them " +
+		"back to the user is wrong. Never answer that no image tool exists before trying your own generation.\n" +
 		"Everything else in this conversation (code, shell, files, connectors) still runs through the client's tools as usual."
 }

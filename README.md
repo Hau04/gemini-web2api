@@ -483,7 +483,8 @@ WorkBuddy ships `generate_image` / `create_video`-style tools. When the model em
 
 So the proxy removes those tools from the request before the model ever sees them, and tells the model to render with its own media tool instead:
 
-- names matched (`generate_image`, `image_generation`, `create_image`, `text_to_image`, `nano_banana`, `imagen`, `generate_video`, `create_video`, `text_to_video`, `veo`, plus camelCase/`-`/`_` variants and MCP-namespaced forms)
+- enforced on **every** entry point: `/v1/chat/completions`, `/v1/responses` (the surface WorkBuddy's agent uses) and `/v1beta/models/{model}:generateContent` — covering only one of them leaves the tool in play on the others
+- names matched (`generate_image`, `image_generation`, `create_image`, `text_to_image`, `nano_banana`, `imagen`, `generate_video`, `create_video`, `text_to_video`, `veo`, and WorkBuddy's `ImageGen`, plus camelCase/`-`/`_` variants and MCP-namespaced forms)
 - response header `X-Media-Tools-Intercepted: generate_image` and log line `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
 - the rendered asset comes back appended to the reply: `![generated image](data:image/png;base64,…)` for inline bytes (capped at 8 MB) or `![generated image](https://…)` for links, `[generated video](…)` for video
 

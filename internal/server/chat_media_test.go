@@ -196,3 +196,89 @@ func truncateForTest(s string) string {
 	}
 	return s
 }
+
+// WorkBuddy's agent surface speaks the Responses API, and its image tool is
+// named ImageGen. If only /v1/chat/completions were covered, that endpoint would
+// keep handing the tool to the model — exactly the reported behaviour.
+func TestResponsesStripsClientMediaTools(t *testing.T) {
+	app, prompts := mediaChatApp(t, "Here you go")
+
+	body := `{"model":"gemini-4-hydrogen","input":[{"role":"user","content":"draw a red cube"}],` +
+		`"tools":[{"type":"function","name":"ImageGen","description":"CLIENT_IMAGE_TOOL_MARKER","parameters":{}},` +
+		`{"type":"function","name":"read_file","description":"READ_TOOL_MARKER","parameters":{}}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	app.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Media-Tools-Intercepted"); got != "ImageGen" {
+		t.Errorf("X-Media-Tools-Intercepted = %q, want ImageGen", got)
+	}
+	upstream := (*prompts)[len(*prompts)-1]
+	if strings.Contains(upstream, "CLIENT_IMAGE_TOOL_MARKER") {
+		t.Errorf("ImageGen definition reached the model: %s", truncateForTest(upstream))
+	}
+	if !strings.Contains(upstream, "READ_TOOL_MARKER") {
+		t.Error("read_file must survive the interception")
+	}
+	if !strings.Contains(upstream, "handled by you, not by the client") {
+		t.Error("the media instruction is missing from the Responses prompt")
+	}
+	if !strings.Contains(rec.Body.String(), "![generated image](data:image/png;base64,") {
+		t.Errorf("the generated image was not returned: %s", truncateForTest(rec.Body.String()))
+	}
+}
+
+func TestGoogleGenerateStripsClientMediaTools(t *testing.T) {
+	app, prompts := mediaChatApp(t, "Here you go")
+
+	body := `{"contents":[{"role":"user","parts":[{"text":"draw a red cube"}]}],` +
+		`"tools":[{"functionDeclarations":[{"name":"ImageGen","description":"CLIENT_IMAGE_TOOL_MARKER"},` +
+		`{"name":"read_file","description":"READ_TOOL_MARKER"}]}]}`
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-4-hydrogen:generateContent", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	app.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("X-Media-Tools-Intercepted"); got != "ImageGen" {
+		t.Errorf("X-Media-Tools-Intercepted = %q, want ImageGen", got)
+	}
+	upstream := (*prompts)[len(*prompts)-1]
+	if strings.Contains(upstream, "CLIENT_IMAGE_TOOL_MARKER") {
+		t.Errorf("ImageGen declaration reached the model: %s", truncateForTest(upstream))
+	}
+	if !strings.Contains(upstream, "READ_TOOL_MARKER") {
+		t.Error("read_file must survive the interception")
+	}
+}
+
+func TestStripGoogleMediaToolsDropsEmptyToolEntry(t *testing.T) {
+	req := models.GoogleGenerateRequest{Tools: []models.GoogleTool{
+		{FunctionDeclarations: []models.GoogleFunctionDeclaration{{Name: "ImageGen"}}},
+		{FunctionDeclarations: []models.GoogleFunctionDeclaration{{Name: "read_file"}}},
+	}}
+	removed := stripGoogleMediaTools(&req)
+	if len(removed) != 1 || removed[0] != "ImageGen" {
+		t.Fatalf("removed = %v", removed)
+	}
+	if len(req.Tools) != 1 || len(req.Tools[0].FunctionDeclarations) != 1 {
+		t.Fatalf("a tool entry holding only media declarations must be dropped: %+v", req.Tools)
+	}
+	if req.Tools[0].FunctionDeclarations[0].Name != "read_file" {
+		t.Errorf("wrong declaration survived: %+v", req.Tools[0].FunctionDeclarations)
+	}
+
+	// No media tools: nothing is touched.
+	plain := models.GoogleGenerateRequest{Tools: []models.GoogleTool{
+		{FunctionDeclarations: []models.GoogleFunctionDeclaration{{Name: "read_file"}}},
+	}}
+	if removed := stripGoogleMediaTools(&plain); len(removed) != 0 || len(plain.Tools) != 1 {
+		t.Fatalf("plain tools were modified: %v %+v", removed, plain.Tools)
+	}
+}

@@ -54,6 +54,15 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		fcMode = req.ToolConfig.FunctionCallingConfig.Mode
 	}
 
+	// Google-shaped tools get the same treatment as OpenAI ones: a client-side
+	// image/video generator must not reach the model, or the client renders the
+	// media and bills its own credits.
+	clientMediaTools := stripGoogleMediaTools(&req)
+	if len(clientMediaTools) > 0 {
+		w.Header().Set("X-Media-Tools-Intercepted", strings.Join(clientMediaTools, ","))
+		a.Logf("Client offered its own media tool(s) %v — removed from this Google request so Gemini renders the media itself (no client credits spent)", clientMediaTools)
+	}
+
 	hasTools := len(req.Tools) > 0 && fcMode != "NONE"
 
 	resolved, redirected, err := a.resolveRequestModel(modelName, hasTools)
@@ -71,6 +80,9 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty content"}})
 		return
 	}
+	if len(clientMediaTools) > 0 {
+		prompt += format.MediaGenerationInstruction(clientMediaTools)
+	}
 
 	fileRefs, rawFiles, err := a.prepareAttachments(images)
 	if err != nil {
@@ -87,6 +99,14 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		ModelHeader: resolved.Header,
 		Extra:       resolved.Extra,
 		Files:       rawFiles,
+	}
+	var mediaRaw strings.Builder
+	if len(clientMediaTools) > 0 {
+		gemOpt.MediaSink = func(chunk string) {
+			if mediaRaw.Len() < maxInlineChatMediaChars+1 {
+				mediaRaw.WriteString(chunk)
+			}
+		}
 	}
 
 	if stream && !hasTools {
@@ -118,6 +138,21 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		})
 
 		if emitErr == nil {
+			if suffix := chatMediaSuffix(mediaRaw.String()); suffix != "" {
+				mediaChunk := models.GoogleGenerateResponse{
+					Candidates: []models.GoogleCandidate{
+						{
+							Index: 0,
+							Content: &models.GoogleContent{
+								Role:  "model",
+								Parts: []models.GooglePart{{Text: suffix}},
+							},
+						},
+					},
+					ModelVersion: resolved.Name,
+				}
+				_ = writeSSEData(w, mediaChunk)
+			}
 			promptTokens := len(prompt) / 4
 			candidatesTokens := len(fullText) / 4
 			finalChunk := models.GoogleGenerateResponse{
@@ -146,6 +181,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
+	text += chatMediaSuffix(mediaRaw.String())
 
 	var responseParts []models.GooglePart
 	if hasTools && text != "" {

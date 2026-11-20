@@ -392,3 +392,39 @@ func mediaChatMarkdown(assets []gemini.MediaAsset) string {
 	}
 	return b.String()
 }
+
+// stripGoogleMediaTools removes client-side media generators from a
+// Google-shaped request and returns their names. The declaration list is rebuilt
+// in place; a tool entry that only held media declarations is dropped entirely.
+func stripGoogleMediaTools(req *models.GoogleGenerateRequest) []string {
+	if req == nil || len(req.Tools) == 0 {
+		return nil
+	}
+	var removed []string
+	keptTools := make([]models.GoogleTool, 0, len(req.Tools))
+	for _, tool := range req.Tools {
+		decls := tool.FunctionDeclarations
+		if len(decls) == 0 {
+			keptTools = append(keptTools, tool)
+			continue
+		}
+		keptDecls := make([]models.GoogleFunctionDeclaration, 0, len(decls))
+		for _, decl := range decls {
+			if format.IsMediaGenerationTool(decl.Name) {
+				removed = append(removed, decl.Name)
+				continue
+			}
+			keptDecls = append(keptDecls, decl)
+		}
+		if len(keptDecls) == 0 {
+			continue
+		}
+		tool.FunctionDeclarations = keptDecls
+		keptTools = append(keptTools, tool)
+	}
+	if len(removed) == 0 {
+		return nil
+	}
+	req.Tools = keptTools
+	return removed
+}

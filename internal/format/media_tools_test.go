@@ -14,7 +14,7 @@ func toolNamed(name string) models.OpenAITool {
 func TestIsMediaGenerationTool(t *testing.T) {
 	media := []string{
 		"generate_image", "generateImage", "image_generation", "image-gen",
-		"create_image", "text_to_image", "nano_banana", "imagen_3",
+		"create_image", "text_to_image", "nano_banana", "imagen_3", "ImageGen", "image_gen",
 		"generate_video", "createVideo", "video_generation", "text_to_video", "veo_3",
 	}
 	for _, name := range media {
