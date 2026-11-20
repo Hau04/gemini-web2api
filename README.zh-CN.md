@@ -411,6 +411,10 @@ https://gemini.google.com/u/1/app/...
 
 未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
 
+**图片是怎么被读到的：** `widgetAddContextFile` 就是 Gemini Enterprise 应用在输入框粘贴图片时自己发出的调用 —— 字节进入助手会话，`streamAssist` 通过 `fileId` 引用，多模态助手直接读图（视觉 token），而不是只拿到一个文件名。服务器按真实 MIME 原样上传图片（`image/png`、`image/jpeg` 等），绝不会把图片转成文本：`IsTextLike()` 对图片类型返回 false，所以图片不会被悄悄内联成乱码。日志可直接验证：`Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`。
+
+图片来源有三种：OpenAI `image_url` 片段（data URL 或远程 URL，先抓取再上传）、Google `inlineData` 片段、以及提示词里引用的本地路径（`.png/.jpg/.jpeg/.webp/.gif/.bmp` 会被自动附加）。若租户拒绝上传，请求会给出可操作的报错，而不是丢弃图片。
+
 **防封号的附件策略（大文件、图片、PDF/Office）：** 企业版把提示词内联在 `streamAssist` 请求体里，所以编码代理每轮重复发送文件内容正是触发限流/封号的原因。只要上传通道可用，服务器现在会把这些内容移出提示词、改成上下文文件附件：
 
 - 最新一条用户消息里按路径引用的文件（PDF、Word、PowerPoint、图片、较长的源码）会从磁盘读取并作为附件上传，模型可直接读取，图片也能识别；

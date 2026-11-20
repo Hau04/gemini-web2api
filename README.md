@@ -423,6 +423,10 @@ Values must be model ids your tenant accepts (look at `assistGenerationConfig.mo
 
 Without a `csesidx` the server falls back to the old cookie-authenticated `?key=` endpoint, which is exactly the path that answers `502` / `no answer text` on most tenants — the startup banner reports which transport is in use (`Widget auth: widget JWT (csesidx=…)` vs `cookie fallback`).
 
+**How images are actually read:** `widgetAddContextFile` is the same call the Gemini Enterprise app makes when you paste a picture into its composer — the bytes land in the assistant session and `streamAssist` references them by `fileId`, so the multimodal assistant reads the image itself (vision tokens), not a filename. `gemini-web2api` uploads images byte-for-byte with their real MIME type (`image/png`, `image/jpeg`, …) and never converts them to text: `IsTextLike()` returns false for image types, so an image can never be silently inlined as garbage. The upload log proves the shape: `Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`.
+
+Images arrive by any of the three routes: OpenAI `image_url` parts (data URL or remote URL, fetched then uploaded), Google `inlineData` parts, and local paths referenced in a prompt (`.png/.jpg/.jpeg/.webp/.gif/.bmp` are auto-attached). If the tenant rejects the upload, the request fails with an actionable error instead of dropping the image.
+
 **Anti-ban attachment strategy (big files, images, PDF/Office):** on Enterprise the prompt is inlined into the `streamAssist` body, so an agent that re-sends file content every turn is exactly what trips rate limits. With an upload transport available the server now moves that content into context-file attachments instead:
 
 - files the latest user message references by path (PDF, Word, PowerPoint, images, long source files) are read from disk and attached — the model reads them natively, including images;

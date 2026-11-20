@@ -403,9 +403,10 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 		return "", "", &UpstreamError{
 			Status: http.StatusNotFound,
 			Kind:   "unsupported",
-			Msg: "this Gemini Enterprise origin needs an attachment upload endpoint: set \"discovery_engine_upload_endpoint\" " +
-				"(the widgetAddContextFile URL from the Gemini Enterprise tab's DevTools Network tab), or attach one file " +
-				"through the tab once with the extension enabled so it is captured for replay",
+			Msg: "this Gemini Enterprise origin cannot accept file attachments yet: set \"discovery_engine_csesidx\" " +
+				"(the widget JWT flow then calls widgetAddContextFile directly), set \"discovery_engine_upload_endpoint\" " +
+				"(the widgetAddContextFile URL from the tab's DevTools Network tab), or attach one file through the tab once " +
+				"with the extension enabled so the request is captured for replay",
 		}
 	}
 
@@ -473,7 +474,8 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 	if parsed.session == "" {
 		parsed.session = c.enterpriseSessionName()
 	}
-	c.Logf("Enterprise context file %q uploaded (fileId=%s session=%s)", file.Name, parsed.fileID, parsed.session)
+	c.Logf("Enterprise context file %q uploaded as %s (%d KB, fileId=%s session=%s)",
+		file.Name, file.MIME, (len(file.Data)+1023)/1024, parsed.fileID, parsed.session)
 	return parsed.fileID, parsed.session, nil
 }
 
@@ -792,8 +794,9 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 			return prompt, nil, "", &UpstreamError{
 				Status: http.StatusBadGateway,
 				Kind:   "unsupported",
-				Msg: fmt.Sprintf("Gemini Enterprise could not accept attachment %q (%s) and it is not text that can be inlined: %v",
-					file.Name, file.MIME, res.err),
+				Msg: fmt.Sprintf("Gemini Enterprise could not accept attachment %q (%s), and images/PDF/Office files cannot be "+
+					"inlined as prompt text — enable the attachment transport (discovery_engine_csesidx or "+
+					"discovery_engine_upload_endpoint) and retry: %v", file.Name, file.MIME, res.err),
 			}
 		}
 		if inlineBudget <= 0 {
