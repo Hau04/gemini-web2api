@@ -19,6 +19,9 @@
   "discovery_engine_location": "",
   "discovery_engine_models": {},
   "discovery_engine_default_model_id": "",
+  "enterprise_auto_attach_local_files": true,
+  "enterprise_auto_attach_min_bytes": 0,
+  "enterprise_attach_large_prompt": true,
   "api_keys": [
     "sk-gemini"
   ],

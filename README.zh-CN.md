@@ -411,6 +411,22 @@ https://gemini.google.com/u/1/app/...
 
 未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
 
+**防封号的附件策略（大文件、图片、PDF/Office）：** 企业版把提示词内联在 `streamAssist` 请求体里，所以编码代理每轮重复发送文件内容正是触发限流/封号的原因。只要上传通道可用，服务器现在会把这些内容移出提示词、改成上下文文件附件：
+
+- 最新一条用户消息里按路径引用的文件（PDF、Word、PowerPoint、图片、较长的源码）会从磁盘读取并作为附件上传，模型可直接读取，图片也能识别；
+- 超长提示词或其中的大段代码会被拆进一个 `.txt` 附件，提示词只留简短说明；
+- 上传结果按内容哈希缓存（`discovery_engine_upload_cache_sec`），同一文件只上传一次，之后复用 `fileId`。
+
+```jsonc
+{
+  "enterprise_auto_attach_local_files": true,
+  "enterprise_auto_attach_min_bytes": 0,
+  "enterprise_attach_large_prompt": true
+}
+```
+
+没有上传通道（没有捕获模板、没有 `discovery_engine_upload_endpoint`、没有 widget `csesidx`）时这两个开关自动失效，内容仍内联，不会被静默丢弃。可用日志 `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")` 验证，`files=0` 表示没有附件。
+
 **关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
 
 1. **一次性捕获（推荐，零配置）**：加载扩展后，在企业版标签页里手动上传一个文件。net-hook 会记录这次上传请求，扩展把文件名 / MIME / Base64 内容替换为 `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__` 占位符后推送到 `POST /bridge/uploadtemplate`，并保存在 Cookie 文件旁的 `discovery_upload_template.json`。此后服务器用最新 Cookie 重放该请求来上传**所有**附件，浏览器可以一直关闭。用 `GET /bridge/uploadtemplate` 查看状态。

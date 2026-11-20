@@ -121,6 +121,12 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt, images, err := format.MessagesToPrompt(req)
+	if err == nil {
+		// Gemini Enterprise: attach referenced files / spill oversized prompt text
+		// so the replayed request stays small instead of re-sending file content
+		// every turn.
+		prompt, images = a.attachEnterpriseContext(req.Messages, prompt, images)
+	}
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return

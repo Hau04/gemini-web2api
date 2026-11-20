@@ -81,6 +81,18 @@ type Config struct {
 	// DiscoveryEngineDefaultModelID is used for requests whose model has no
 	// mapping entry. Empty leaves the tenant default (its own "auto").
 	DiscoveryEngineDefaultModelID string `json:"discovery_engine_default_model_id"`
+	// EnterpriseAutoAttachLocalFiles reads files the latest user message
+	// references by path and attaches them as context files instead of letting
+	// their content be re-inlined on every turn (the usual rate-limit cause for
+	// coding agents on Enterprise).
+	EnterpriseAutoAttachLocalFiles bool `json:"enterprise_auto_attach_local_files"`
+	// EnterpriseAutoAttachMinBytes is the minimum size for a plain-text/source
+	// file to be attached rather than left inline. 0 reuses
+	// bridge_large_code_upload_bytes.
+	EnterpriseAutoAttachMinBytes int `json:"enterprise_auto_attach_min_bytes"`
+	// EnterpriseAttachLargePrompt spills an oversized prompt (or its large code
+	// blocks) into one .txt context file so the replayed prompt stays small.
+	EnterpriseAttachLargePrompt bool `json:"enterprise_attach_large_prompt"`
 }
 
 func Default() Config {
@@ -127,6 +139,9 @@ func Default() Config {
 		DiscoveryEngineLocation:       "",
 		DiscoveryEngineModels:         map[string]string{},
 		DiscoveryEngineDefaultModelID: "",
+		EnterpriseAutoAttachLocalFiles: true,
+		EnterpriseAutoAttachMinBytes:   0,
+		EnterpriseAttachLargePrompt:    true,
 	}
 }
 
@@ -187,6 +202,9 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineLocation       *string            `json:"discovery_engine_location"`
 		DiscoveryEngineModels         map[string]string  `json:"discovery_engine_models"`
 		DiscoveryEngineDefaultModelID *string            `json:"discovery_engine_default_model_id"`
+		EnterpriseAutoAttachLocalFiles *bool             `json:"enterprise_auto_attach_local_files"`
+		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
+		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -318,6 +336,15 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineDefaultModelID != nil {
 		cfg.DiscoveryEngineDefaultModelID = *aux.DiscoveryEngineDefaultModelID
+	}
+	if aux.EnterpriseAutoAttachLocalFiles != nil {
+		cfg.EnterpriseAutoAttachLocalFiles = *aux.EnterpriseAutoAttachLocalFiles
+	}
+	if aux.EnterpriseAutoAttachMinBytes != nil {
+		cfg.EnterpriseAutoAttachMinBytes = *aux.EnterpriseAutoAttachMinBytes
+	}
+	if aux.EnterpriseAttachLargePrompt != nil {
+		cfg.EnterpriseAttachLargePrompt = *aux.EnterpriseAttachLargePrompt
 	}
 
 	return cfg, nil

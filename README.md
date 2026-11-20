@@ -423,6 +423,22 @@ Values must be model ids your tenant accepts (look at `assistGenerationConfig.mo
 
 Without a `csesidx` the server falls back to the old cookie-authenticated `?key=` endpoint, which is exactly the path that answers `502` / `no answer text` on most tenants — the startup banner reports which transport is in use (`Widget auth: widget JWT (csesidx=…)` vs `cookie fallback`).
 
+**Anti-ban attachment strategy (big files, images, PDF/Office):** on Enterprise the prompt is inlined into the `streamAssist` body, so an agent that re-sends file content every turn is exactly what trips rate limits. With an upload transport available the server now moves that content into context-file attachments instead:
+
+- files the latest user message references by path (PDF, Word, PowerPoint, images, long source files) are read from disk and attached — the model reads them natively, including images;
+- an oversized prompt, or large fenced code blocks inside it, is spilled into one `.txt` attachment and replaced by a short notice;
+- uploads are cached by content hash (`discovery_engine_upload_cache_sec`), so the same file is uploaded once and then referenced by `fileId` on later turns.
+
+```jsonc
+{
+  "enterprise_auto_attach_local_files": true,   // attach referenced local files
+  "enterprise_auto_attach_min_bytes": 0,        // 0 = reuse bridge_large_code_upload_bytes
+  "enterprise_attach_large_prompt": true        // spill oversized prompts into a .txt
+}
+```
+
+Both switches are no-ops without an upload transport (no captured template, no `discovery_engine_upload_endpoint`, no widget `csesidx`): in that case content stays inline so nothing is silently dropped. Verify with the log line `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")` — `files=0` means nothing was attached.
+
 **File attachments with the browser closed (Enterprise):** consumer Gemini Web uploads attachments through the `content-push.googleapis.com` pipeline and references them from the Bard RPC payload. Gemini Enterprise has no such pipeline — the app attaches files to the *assistant session* instead (`widgetAddContextFile` → `fileId`, then `streamAssist` with `fileIds` + `session`), so cookie mode used to answer `this Gemini Enterprise origin needs the browser bridge for image attachments`. That gap is closed:
 
 1. **Capture once (recommended, zero config).** With the extension loaded, attach one file in the Gemini Enterprise tab. The net-hook records the upload request and the bridge pushes a templated copy of it (file name, MIME type and Base64 content replaced by `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__`) to `POST /bridge/uploadtemplate`; it is persisted as `discovery_upload_template.json` next to the cookie file. From then on the server replays that request with fresh cookies for **every** attachment — the browser can stay closed. Check it with `GET /bridge/uploadtemplate` (`{"have_template":true,...}`).

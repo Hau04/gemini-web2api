@@ -129,6 +129,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt, images, err := format.MessagesToPrompt(chatReq)
+	if err == nil {
+		prompt, images = a.attachEnterpriseContext(chatReq.Messages, prompt, images)
+	}
 	if err != nil || strings.TrimSpace(prompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return

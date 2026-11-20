@@ -314,6 +314,23 @@ func widgetAdditionalParams() map[string]string {
 
 var errNoCsesidx = fmt.Errorf("no csesidx configured")
 
+// CanUploadEnterpriseFiles reports whether a context-file upload transport is
+// resolvable: a captured upload template, a configured upload endpoint, an
+// endpoint to derive one from, or the widget JWT flow (which can call
+// widgetAddContextFile directly once a csesidx is known).
+func (c *Client) CanUploadEnterpriseFiles() bool {
+	if tpl := LoadDiscoveryUploadTemplate(c.Cfg.CookieFile); tpl != nil && strings.TrimSpace(tpl.URL) != "" {
+		return true
+	}
+	if strings.TrimSpace(c.Cfg.DiscoveryEngineUploadEndpoint) != "" {
+		return true
+	}
+	if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != "" {
+		return true
+	}
+	return c.HasEnterpriseWidgetAuth()
+}
+
 // HasEnterpriseWidgetAuth reports whether the widget JWT transport is available
 // (a csesidx has been configured or captured).
 func (c *Client) HasEnterpriseWidgetAuth() bool {
