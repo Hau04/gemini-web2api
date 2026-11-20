@@ -79,7 +79,9 @@ func (a *App) describeModelSelection(requested string, resolved models.Resolved)
 		info.Upstream = upstreamModel{
 			ModelID:       id,
 			Source:        source,
-			SelectionLive: source == gemini.ModelIDSourceMapping || source == gemini.ModelIDSourcePassthrough,
+			SelectionLive: source == gemini.ModelIDSourceMapping ||
+				source == gemini.ModelIDSourcePassthrough ||
+				source == gemini.ModelIDSourceCaptured,
 		}
 		if len(a.Cfg.DiscoveryEngineModels) > 0 {
 			info.Mappings = make(map[string]string, len(a.Cfg.DiscoveryEngineModels))
@@ -105,13 +107,19 @@ func (a *App) modelSelectionWarnings(resolved models.Resolved, modelID, source s
 		if len(a.Cfg.DiscoveryEngineModels) == 0 {
 			return []string{fmt.Sprintf(
 				"Gemini Enterprise model selection is INACTIVE: discovery_engine_models is empty, so every request is answered by the tenant's auto/default model and %q is ignored. "+
-					"Copy the tenant's real model id (DevTools → the tab's own widgetStreamAssist request → assistGenerationConfig.modelId) and map it, "+
-					"e.g. {\"gemini-4-hydrogen\": \"<tenant model id>\"}. Until then the reply's own \"Auto Mode\" description is accurate.",
+					"Send one message in the Gemini Enterprise tab with the extension enabled (its widgetStreamAssist request is captured and its modelId is reused automatically), "+
+					"or copy the id from DevTools → assistGenerationConfig.modelId and map it, e.g. {\"gemini-4-hydrogen\": \"<tenant model id>\"}. "+
+					"Until then the reply's own \"Auto Mode\" description is accurate.",
 				resolved.Name)}
 		}
 		return []string{fmt.Sprintf(
 			"%q is not in discovery_engine_models (configured keys: %s) and discovery_engine_default_model_id is empty, so the tenant answers with its auto/default model.",
 			resolved.Name, strings.Join(a.mappingKeys(), ", "))}
+	case gemini.ModelIDSourceCaptured:
+		return []string{fmt.Sprintf(
+			"%q has no mapping, so this request uses modelId %q learned from the tab's captured streamAssist request — a model id the tenant accepts, "+
+				"but not necessarily the one you asked for. For exact control add {\"%s\": \"<tenant model id>\"} to discovery_engine_models.",
+			resolved.Name, modelID, resolved.Name)}
 	case gemini.ModelIDSourceConfigured:
 		return []string{fmt.Sprintf(
 			"%q is not in discovery_engine_models, so the request falls back to discovery_engine_default_model_id %q.",

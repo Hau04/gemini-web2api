@@ -517,3 +517,133 @@ func TestPrepareEnterpriseAttachmentsBinaryFailureIsActionable(t *testing.T) {
 		t.Errorf("image must not be reported as inlined text: %s", msg)
 	}
 }
+
+// With nothing configured, the tenant modelId from the tab's captured request is
+// reused instead of sending no model at all — a real id beats "auto".
+func TestEnterpriseModelIDLearnsFromCapturedTemplate(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+	tpl := &DiscoveryTemplate{
+		URL:  "https://discoveryengine.clients6.google.com/v1alpha/locations/global/widgetStreamAssist?key=k",
+		Body: `{"configId":"cfg-9","streamAssistRequest":{"query":{"parts":[{"text":"hi"}]},"assistGenerationConfig":{"modelId":"gemini-2.5-pro"}}}`,
+	}
+	if err := SaveDiscoveryTemplate(cookieFile, tpl); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient(config.Config{CookieFile: cookieFile})
+	c.Logf = func(string, ...any) {}
+
+	id, source := c.EnterpriseModelIDSource("gemini-4-hydrogen")
+	if id != "gemini-2.5-pro" || source != ModelIDSourceCaptured {
+		t.Errorf("EnterpriseModelIDSource() = (%q, %q), want (gemini-2.5-pro, captured)", id, source)
+	}
+	// An explicit default still wins over the learned id.
+	c2 := NewClient(config.Config{CookieFile: cookieFile, DiscoveryEngineDefaultModelID: "gemini-2.5-flash"})
+	c2.Logf = func(string, ...any) {}
+	if id, source := c2.EnterpriseModelIDSource("gemini-4-hydrogen"); id != "gemini-2.5-flash" || source != ModelIDSourceConfigured {
+		t.Errorf("configured default must win, got (%q, %q)", id, source)
+	}
+}
+
+// A derived upload endpoint without a configId is guaranteed to 400, so fail with
+// the fix instead of spending the round trip.
+func TestUploadWithoutConfigIDFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(config.Config{
+		CookieFile:              cookieFile,
+		BaseURL:                 srv.URL,
+		DiscoveryEngineEndpoint: srv.URL + "/v1alpha/locations/global/widgetStreamAssist?key=k",
+	})
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+
+	_, _, err := c.UploadEnterpriseFile(RawFile{Name: "code_context.txt", MIME: "text/plain", Data: []byte("hello")})
+	if err == nil {
+		t.Fatal("expected an error without a configId")
+	}
+	if !strings.Contains(err.Error(), "configId") || !strings.Contains(err.Error(), "discovery_engine_config_id") {
+		t.Errorf("error should name the missing configId and the fix: %v", err)
+	}
+	if hits != 0 {
+		t.Errorf("no upload request should be attempted, got %d", hits)
+	}
+}
+
+// A 400 from the widget must say which fields we actually sent.
+func TestUploadBadRequestListsSentFields(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":{"code":400,"message":"One or more required fields are missing.","status":"INVALID_ARGUMENT"}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(config.Config{
+		CookieFile:                    cookieFile,
+		BaseURL:                       srv.URL,
+		DiscoveryEngineConfigID:       "cfg-1",
+		DiscoveryEngineUploadEndpoint: srv.URL + "/v1alpha/locations/global/widgetAddContextFile",
+	})
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+
+	_, _, err := c.UploadEnterpriseFile(RawFile{Name: "a.txt", MIME: "text/plain", Data: []byte("x")})
+	if err == nil {
+		t.Fatal("expected the upstream 400 to surface")
+	}
+	msg := err.Error()
+	for _, want := range []string{"sent fields:", "configId", "addContextFileRequest", "fileContents"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("400 diagnostics should mention %q: %s", want, msg)
+		}
+	}
+}
+
+// The request log must name the modelId that is actually sent, not the alias.
+func TestWidgetStreamAssistLogReportsEffectiveModel(t *testing.T) {
+	dir := t.TempDir()
+	cookieFile := filepath.Join(dir, "cookie.json")
+	if err := SaveDiscoveryTemplate(cookieFile, &DiscoveryTemplate{
+		URL:  "https://discoveryengine.clients6.google.com/v1alpha/locations/global/widgetStreamAssist?key=k",
+		Body: `{"configId":"cfg-9","streamAssistRequest":{"assistGenerationConfig":{"modelId":"gemini-2.5-pro"}}}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"streamAssistResponse":{"answer":{"replies":[{"groundedContent":{"text":"ok"}}]}}}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(config.Config{
+		CookieFile:              cookieFile,
+		BaseURL:                 srv.URL,
+		DiscoveryEngineEndpoint: srv.URL + "/v1alpha/locations/global/widgetStreamAssist?key=k",
+	})
+	c.HTTP = srv.Client()
+	c.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+	_ = c.enterpriseGenerateStream("hi", ModelOptions{ModelName: "gemini-4-hydrogen"}, func(string) error { return nil })
+
+	joined := strings.Join(logs, "\n")
+	if !strings.Contains(joined, `modelId="gemini-2.5-pro"`) || !strings.Contains(joined, "source=captured") {
+		t.Fatalf("log should report the effective modelId and source, got:\n%s", joined)
+	}
+	if strings.Contains(joined, `model="gemini-4-hydrogen"`) {
+		t.Errorf("log still implies the alias was sent:\n%s", joined)
+	}
+}

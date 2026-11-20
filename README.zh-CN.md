@@ -235,6 +235,26 @@ Neon、Hydrogen、Carbon、Argon 被标记为 `research_prone`：Gemini 界面�
 
 若想让所有带工具的请求都走更稳定、更便宜的工具调用模型，`tool_model` 依然优先生效。
 
+## 真实企业版日志中的两种失败如何排查
+
+**`context-file upload rejected (HTTP 400): One or more required fields are missing.`** —— widget 的 `widgetAddContextFile` 需要 `configId`；既没有捕获的上传模板、也没有 `discovery_engine_config_id` 时，服务器只能推导出 URL，推不出字段。现在不再浪费这次请求，而是直接报出修复方式：
+
+```
+cannot attach "code_context.txt": the Discovery Engine widget configId is unknown and the widget rejects uploads without it —
+send one message in the Gemini Enterprise tab with the extension enabled …, or set "discovery_engine_config_id"
+```
+
+启动横幅也会如实显示，而不是给出一个看起来可用的回退。真的收到 400 时，错误里会列出实际发送的字段（`sent fields: …`），缺哪个一目了然。
+
+**`modelId=<none>` /「还是 Auto」** —— `discovery_engine_models` 为空，什么都没发送。两条路：
+
+1. **自动：** 在开启扩展的情况下，到 Gemini Enterprise 标签页里随便发一条消息。它自己的 `widgetStreamAssist` 请求会被捕获，租户真实的 `assistGenerationConfig.modelId`（以及 `configId`、`session`）会被复用，日志变成
+   `Enterprise: calling the Discovery Engine widgetStreamAssist API (…, requested="gemini-4-hydrogen", modelId="gemini-2.5-pro", source=captured)`，
+   `/v1/model-info` 显示 `"source": "captured"`。
+2. **显式：** 直接做别名映射，精确可控。
+
+`source=captured` 的含义是「已经在发送租户认可的模型，但那是标签页当时选中的那个」；想要固定某个模型就配置映射。之前日志打印 `model="gemini-4-hydrogen"` 会让人以为别名被发送了 —— 实际上从来没有。
+
 ## 「我选了 Hydrogen，为什么还是 Auto 回答」—— 模型选择诊断
 
 实际回答的模型由三处决定，每一处都可能静默回退。`GET /v1/model-info?model=gemini-4-hydrogen` 会直接告诉你当前是哪种情况：

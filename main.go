@@ -153,10 +153,13 @@ func main() {
 	}
 	if app.Gem.UsesDiscoveryEngine() {
 		attachments := "text-inline fallback only — attach one file in the Gemini Enterprise tab once, or set discovery_engine_upload_endpoint"
-		if app.Gem.HasDiscoveryUploadTemplate() {
+		switch {
+		case app.Gem.HasDiscoveryUploadTemplate():
 			attachments = "captured upload template (discovery_upload_template.json)"
-		} else if cfg.DiscoveryEngineUploadEndpoint != "" {
+		case cfg.DiscoveryEngineUploadEndpoint != "":
 			attachments = cfg.DiscoveryEngineUploadEndpoint
+		case app.Gem.EnterpriseUploadReadiness() != "":
+			attachments = app.Gem.EnterpriseUploadReadiness()
 		}
 		fmt.Printf("  Attachments: %s\n", attachments)
 		if widgetAuth := app.Gem.EnterpriseWidgetAuthStatus(); widgetAuth != "" {

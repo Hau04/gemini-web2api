@@ -234,6 +234,26 @@ Neon, Hydrogen, Carbon and Argon are flagged `research_prone`, because the Gemin
 
 `tool_model` still wins when you want tool-enabled requests to run on a cheaper, reliable tool-caller regardless of the model the client asked for.
 
+## Troubleshooting the exact failures in a real Enterprise log
+
+**`context-file upload rejected (HTTP 400): One or more required fields are missing.`** — the widget's `widgetAddContextFile` needs a `configId`, and without a captured upload template or `discovery_engine_config_id` the server can only derive the URL, not the field. `gemini-web2api` no longer burns the round trip: it refuses up front with
+
+```
+cannot attach "code_context.txt": the Discovery Engine widget configId is unknown and the widget rejects uploads without it —
+send one message in the Gemini Enterprise tab with the extension enabled (the request is captured automatically), or set "discovery_engine_config_id"
+```
+
+and the startup banner states the same thing instead of promising a fallback. When a 400 does come back, the error now lists the fields that were actually sent (`sent fields: addContextFileRequest{fileContents, fileName, mimeType}, additionalParams, configId`), so a missing field is visible rather than guessed.
+
+**`modelId=<none>` / "still answers as Auto"** — `discovery_engine_models` is empty, so nothing was sent. Two ways out:
+
+1. **Automatic:** send one message in the Gemini Enterprise tab with the extension enabled. Its own `widgetStreamAssist` request is captured, and the tenant's real `assistGenerationConfig.modelId` (plus `configId` and `session`) is then reused — the log becomes
+   `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, requested="gemini-4-hydrogen", modelId="gemini-2.5-pro", source=captured)`
+   and `/v1/model-info` reports `"source": "captured"`.
+2. **Explicit:** map the alias (see the section above) for exact control.
+
+`source=captured` means "a tenant-valid model is now being sent, but it is whatever the tab had selected" — set a mapping if you want a specific one. Previously the log printed `model="gemini-4-hydrogen"`, which implied the alias was sent upstream; it never was.
+
 ## "I selected Hydrogen, but it answers as Auto" — diagnosing model selection
 
 The model that answers is decided in three different places depending on the route, and every one of them can silently fall back. `GET /v1/model-info?model=gemini-4-hydrogen` reports which one applies right now:

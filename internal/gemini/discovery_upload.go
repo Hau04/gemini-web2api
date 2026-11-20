@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -385,6 +386,15 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 	}
 
 	tpl := LoadDiscoveryUploadTemplate(c.Cfg.CookieFile)
+	explicitEndpoint := strings.TrimSpace(c.Cfg.DiscoveryEngineUploadEndpoint) != ""
+	if tpl == nil && !explicitEndpoint && strings.TrimSpace(c.enterpriseConfigID(nil)) == "" {
+		// Without a captured upload template or a known widget configId the
+		// widget API answers HTTP 400 "One or more required fields are missing",
+		// so fail with the fix instead of burning a round trip.
+		return "", "", fmt.Errorf("cannot attach %q: the Discovery Engine widget configId is unknown and the widget rejects uploads without it — "+
+			"send one message in the Gemini Enterprise tab with the extension enabled (the request is captured automatically), "+
+			"or set \"discovery_engine_config_id\"", file.Name)
+	}
 	endpoint := c.enterpriseUploadEndpoint(tpl)
 	bearer, bearerErr := c.enterpriseBearer()
 	usingBearer := bearerErr == nil
@@ -453,6 +463,9 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
 		hint := ""
+		if resp.StatusCode == http.StatusBadRequest && resp.StatusCode != http.StatusUnauthorized {
+			hint = fmt.Sprintf(" (sent fields: %s)", describeUploadFields(body))
+		}
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			hint = " — the synced cookies or the captured upload request may be stale; refresh them from the Gemini Enterprise tab"
 		}
@@ -898,8 +911,14 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	}
 
 	if hasBearer || hasEndpoint {
-		c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, model=%q)",
-			len(fileIDs), hasBearer, opt.ModelName)
+		modelID, modelSource := c.EnterpriseModelIDSource(opt.ModelName)
+		if modelID == "" {
+			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, requested=%q, modelId=<none: %s>)",
+				len(fileIDs), hasBearer, opt.ModelName, modelSource)
+		} else {
+			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, requested=%q, modelId=%q, source=%s)",
+				len(fileIDs), hasBearer, opt.ModelName, modelID, modelSource)
+		}
 		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, opt.ModelName, emit)
 	}
 
@@ -941,4 +960,42 @@ func (c *Client) UsesDiscoveryEngine() bool {
 		}
 	}
 	return false
+}
+
+// describeUploadFields lists the JSON keys (never the values) of an upload body,
+// so a 400 "required fields are missing" can be matched against what we sent.
+func describeUploadFields(body string) string {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(body), &payload); err != nil {
+		return "unparseable body"
+	}
+	keys := make([]string, 0, len(payload))
+	for k := range payload {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := strings.Join(keys, ", ")
+	if req, ok := payload["addContextFileRequest"].(map[string]any); ok {
+		inner := make([]string, 0, len(req))
+		for k := range req {
+			inner = append(inner, k)
+		}
+		sort.Strings(inner)
+		out += "; addContextFileRequest{" + strings.Join(inner, ", ") + "}"
+	}
+	return out
+}
+
+// EnterpriseUploadReadiness describes whether a derived (non-captured) upload can
+// possibly succeed, so the startup banner stops promising a fallback that the
+// widget will reject.
+func (c *Client) EnterpriseUploadReadiness() string {
+	if strings.TrimSpace(c.enterpriseConfigID(nil)) == "" {
+		return "unavailable — the widget configId is unknown (the widget rejects uploads without it): " +
+			"send one message or attach one file in the Gemini Enterprise tab with the extension enabled, or set discovery_engine_config_id"
+	}
+	if c.enterpriseUploadEndpoint(nil) == "" {
+		return "unavailable — no upload endpoint could be derived; set discovery_engine_upload_endpoint"
+	}
+	return "derived widgetAddContextFile upload (configId " + c.enterpriseConfigID(nil) + ") — attach one file in the tab once if uploads are rejected"
 }

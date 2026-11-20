@@ -446,6 +446,7 @@ const (
 	ModelIDSourceMapping       = "mapping"            // discovery_engine_models hit
 	ModelIDSourcePassthrough   = "passthrough"        // caller already used a tenant id
 	ModelIDSourceConfigured    = "configured-default" // discovery_engine_default_model_id
+	ModelIDSourceCaptured      = "captured"           // learned from the tab's captured request
 	ModelIDSourceTenantDefault = "tenant-default"     // nothing selected: tenant decides
 )
 
@@ -463,7 +464,26 @@ func (c *Client) EnterpriseModelIDSource(requested string) (string, string) {
 	if def := strings.TrimSpace(c.Cfg.DiscoveryEngineDefaultModelID); def != "" {
 		return def, ModelIDSourceConfigured
 	}
+	// The tab's own captured streamAssist request carries a modelId the tenant
+	// accepts. Using it is strictly better than sending nothing: it is a real
+	// tenant model, and if the tab was showing the model the user wants, it is
+	// exactly that model.
+	if tpl := LoadDiscoveryTemplate(c.Cfg.CookieFile); tpl != nil {
+		if id := modelIDFromBody(tpl.Body); id != "" {
+			return id, ModelIDSourceCaptured
+		}
+	}
 	return "", ModelIDSourceTenantDefault
+}
+
+// modelIDFromBody extracts assistGenerationConfig.modelId from a captured
+// streamAssist body.
+func modelIDFromBody(body string) string {
+	re := regexp.MustCompile(`"assistGenerationConfig"\s*:\s*\{[^{}]*"modelId"\s*:\s*"([^"]*)"`)
+	if m := re.FindStringSubmatch(body); len(m) == 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
 }
 
 // lookupDiscoveryModel finds a discovery_engine_models entry case-insensitively
