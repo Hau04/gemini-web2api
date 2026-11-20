@@ -113,9 +113,15 @@ func (a *App) withAuthAndLogging(next http.Handler) http.Handler {
 		lrw := newLoggingResponseWriter(w)
 
 		if strings.HasPrefix(r.URL.Path, "/v1") && !authorize(r, a.Cfg.APIKeys) {
+			// Say how to authenticate: "invalid api key" alone sends people to
+			// curl without a key and then to the docs to guess the header name.
 			writeJSON(lrw, http.StatusUnauthorized, map[string]any{
 				"error": map[string]any{
-					"message": "invalid api key",
+					"message": "invalid api key — this server requires one of the keys in \"api_keys\": send " +
+						"\"Authorization: Bearer <key>\", \"x-api-key: <key>\" or \"?key=<key>\"",
+					"type": "invalid_request_error",
+					"code": "invalid_api_key",
+					"hint": "e.g. curl -H \"Authorization: Bearer $GEMINI_KEY\" http://localhost:8081/v1/models",
 				},
 			})
 			a.logRequest(r, lrw.statusCode, time.Since(start))
