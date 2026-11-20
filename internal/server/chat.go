@@ -690,7 +690,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
 					return
 				}
-				text += chatMediaSuffix(mediaRaw.String())
+				text += a.chatMediaSuffix(mediaRaw.String(), resolved.Name)
 				a.Bridge.ClearDegraded()
 			} else {
 				var pkErr *bridge.PickupError
@@ -816,7 +816,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		if emitErr == nil {
 			// Media cannot be streamed as text deltas, so it arrives as one final
 			// content chunk right before the stop chunk.
-			if suffix := chatMediaSuffix(mediaRaw.String()); suffix != "" {
+			if suffix := a.chatMediaSuffix(mediaRaw.String(), resolved.Name); suffix != "" {
 				mediaChunk := models.OpenAIChatResponse{
 					ID:      cid,
 					Object:  "chat.completion.chunk",
@@ -861,7 +861,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
 		return
 	}
-	text += chatMediaSuffix(mediaRaw.String())
+	text += a.chatMediaSuffix(mediaRaw.String(), resolved.Name)
 
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {

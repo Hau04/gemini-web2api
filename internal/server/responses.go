@@ -325,7 +325,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	strChoice, isStr := toolChoice.(string)
 	isToolNone := isStr && strChoice == "none"
 
-	text += chatMediaSuffix(mediaRaw.String())
+	text += a.chatMediaSuffix(mediaRaw.String(), resolved.Name)
 
 	var toolCalls []models.OpenAIToolCall
 	if len(reqTools) > 0 && text != "" && !isToolNone {
