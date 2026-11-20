@@ -554,7 +554,9 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 	// Build minimal streamAssist request body
 	body := fmt.Sprintf(`{"query":{"text":"%s"}}`, jsonEscapeInner(prompt))
 
-	// Determine origin for SAPISIDHASH (prefer synced BaseURL)
+	// Determine origin for SAPISIDHASH (prefer synced BaseURL — this must match
+// the origin the browser uses, which is the Gemini Enterprise origin, NOT
+// the Discovery Engine endpoint host).
 	origin := cookieInfo.BaseURL
 	if origin == "" {
 		origin = c.Cfg.BaseURL
@@ -570,22 +572,22 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 	}
 	prefix := AccountPrefix(authUser)
 
-	// Determine the endpoint's host origin for SAPISIDHASH scope
-	epOrigin := origin
-	if u, err := url.Parse(endpoint); err == nil && u.Scheme != "" && u.Host != "" {
-		epOrigin = u.Scheme + "://" + u.Host
-	}
-
 	headers := make(http.Header)
 	headers.Set("Content-Type", "application/json")
 	headers.Set("Origin", origin)
 	headers.Set("Referer", origin+prefix+"/app")
 	headers.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+	headers.Set("X-Goog-Api-Client", "gemini-enterprise-classic/1.0.0")
+	if authUser != "" {
+		headers.Set("X-Goog-AuthUser", authUser)
+	} else {
+		headers.Set("X-Goog-AuthUser", "0")
+	}
 	if cookieInfo.Cookie != "" {
 		headers.Set("Cookie", cookieInfo.Cookie)
 	}
 	if cookieInfo.SAPISID != "" {
-		if auth := SAPISIDHashWithOrigin(cookieInfo.SAPISID, epOrigin); auth != "" {
+		if auth := SAPISIDHashWithOrigin(cookieInfo.SAPISID, origin); auth != "" {
 			headers.Set("Authorization", auth)
 		}
 	}
