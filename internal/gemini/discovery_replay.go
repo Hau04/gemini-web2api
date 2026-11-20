@@ -551,8 +551,9 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 
 	cookieInfo, _ := c.Cookies.Load()
 
-	// Build minimal streamAssist request body
-	body := fmt.Sprintf(`{"query":{"text":"%s"}}`, jsonEscapeInner(prompt))
+	// Build minimal streamAssist request body for widgetStreamAssist endpoint
+	// (widget API uses flat text field, not nested query object)
+	body := fmt.Sprintf(`{"text":"%s"}`, jsonEscapeInner(prompt))
 
 	// Determine origin for SAPISIDHASH (prefer synced BaseURL — this must match
 // the origin the browser uses, which is the Gemini Enterprise origin, NOT
