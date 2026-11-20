@@ -276,11 +276,16 @@ func TestEnterpriseUnmappedModelRoutesThroughBridge(t *testing.T) {
 
 	body := `{"model":"gemini-4-hydrogen","messages":[{"role":"user","content":"hello there"}]}`
 	rec = httptest.NewRecorder()
-	go handler.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(body)))
+		close(done)
+	}()
 
 	if !<-got {
 		t.Fatal("request must go through the bridge so the tab's picker can select the model")
 	}
+	<-done // the handler must finish before the recorder is read (-race)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 via bridge, got %d: %s", rec.Code, rec.Body.String())
 	}
