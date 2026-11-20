@@ -323,6 +323,11 @@ func TestPrepareEnterpriseAttachmentsCachesAndDedupes(t *testing.T) {
 
 	var uploads int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Session bootstrap is not an upload; only count addContextFile calls.
+		if strings.Contains(r.URL.Path, "widgetCreateSession") {
+			_, _ = w.Write([]byte(`{"createSessionResponse":{"session":{"name":"collections/c/engines/e/sessions/9"}}}`))
+			return
+		}
 		uploads++
 		_, _ = w.Write([]byte(`{"addContextFileResponse":{"session":"collections/c/engines/e/sessions/9","fileId":"f-` + strconv.Itoa(uploads) + `"}}`))
 	}))

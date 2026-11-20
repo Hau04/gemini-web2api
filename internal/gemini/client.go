@@ -88,6 +88,10 @@ type Client struct {
 	enterpriseJWTExp  time.Time
 	enterpriseJWTKey  string
 	enterpriseSession string
+
+	// probedModels remembers aliases whose tenant model id was already probed
+	// (successfully or not) so one request never pays for the same probe twice.
+	probedModels map[string]bool
 }
 
 func NewClient(cfg config.Config) *Client {

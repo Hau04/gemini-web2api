@@ -254,6 +254,31 @@ and the startup banner states the same thing instead of promising a fallback. Wh
 
 `source=captured` means "a tenant-valid model is now being sent, but it is whatever the tab had selected" — set a mapping if you want a specific one. Previously the log printed `model="gemini-4-hydrogen"`, which implied the alias was sent upstream; it never was.
 
+### Discovering the tenant model id (no DevTools required)
+
+If direct mode should name the model but no tenant id is known, `gemini-web2api` now **asks the tenant instead of guessing**: one minimal `widgetStreamAssist` call carries the requested alias as `assistGenerationConfig.modelId`. If the tenant accepts it, the id is verified, cached per alias in `enterprise_models.json`, and used from then on:
+
+```
+Gemini Enterprise: tenant accepted model id "gemini-4-hydrogen" for "gemini-4-hydrogen" — cached in enterprise_models.json, direct mode will now select it
+```
+
+If the tenant rejects it, the alias is not probed again in this process and the request continues without a model id (tenant default) instead of failing:
+
+```
+Gemini Enterprise: tenant does not accept "gemini-4-neon" as a model id (the tenant rejected model id "gemini-4-neon" (HTTP 400) …) — falling back to the tenant's auto/default model
+```
+
+Control it with `discovery_engine_probe_models` (default `true`), or run the probe explicitly and see the exact upstream answer:
+
+```bash
+curl -X POST localhost:8081/v1/model-probe \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","candidate":"gemini-4-hydrogen"}'
+# {"ok":true,"model":"gemini-4-hydrogen","model_id":"gemini-4-hydrogen","source":"learned",…}
+```
+
+Try candidates one at a time (`"candidate":"gemini-2.5-flash"`) until one is accepted; each success is remembered. Resolution order is: `discovery_engine_models` → tenant-id passthrough → `discovery_engine_default_model_id` → **learned (probe-verified)** → captured from the tab → tenant default.
+
 ### Routing rule that makes the picker authoritative
 
 On a Gemini Enterprise origin there are exactly two ways to get the model you asked for:

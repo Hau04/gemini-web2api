@@ -619,6 +619,12 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	toolsSpec := `{"toolRegistry":"default_tool_registry"}`
 	// Without this Gemini Enterprise always answers with the tenant's own
 	// default model, regardless of the model the client asked for.
+	// With nothing mapped, probe the tenant once per alias: if it accepts the
+	// requested name as a model id, cache it and use it from now on. Without this
+	// the request carries no model and the tenant answers with its auto model.
+	if c.Cfg.DiscoveryEngineProbeModels {
+		c.maybeProbeEnterpriseModel(requestedModel)
+	}
 	modelJSON := ""
 	if modelID := c.EnterpriseModelID(requestedModel); modelID != "" {
 		modelJSON = fmt.Sprintf(`"assistGenerationConfig":{"modelId":%q},`, modelID)
