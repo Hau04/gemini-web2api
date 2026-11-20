@@ -623,6 +623,7 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 		if resp.StatusCode != http.StatusOK {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			c.Logf("Direct Discovery Engine streamAssist returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyText)))
 			return &UpstreamError{
 				Status: resp.StatusCode,
 				Kind:   "http",
@@ -656,6 +657,7 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: msg}
 		}
 		if !stream.hasText {
+			c.Logf("Direct Discovery Engine streamAssist returned no answer text")
 			return &UpstreamError{Status: http.StatusBadGateway, Kind: "http", Msg: "streamAssist direct call returned no answer text"}
 		}
 		return stream.emitErr
