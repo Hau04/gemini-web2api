@@ -818,6 +818,7 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 		inline      strings.Builder
 		uploaded    int
 		inlined     int
+		mirrored    int
 		skipped     []string
 		seenFileIDs = make(map[string]bool, len(order))
 	)
@@ -834,6 +835,19 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 				ids = append(ids, res.fileID)
 			}
 			uploaded++
+			// An upload only becomes readable if the tenant's file reader hands
+			// the body to the model, and on this origin it does not: the model
+			// answers "the context file can no longer be read". So the text also
+			// travels in the prompt, where it is certainly seen.
+			if c.Cfg.EnterpriseMirrorTextInline && file.IsTextLike() && inlineBudget > 0 {
+				body, truncated := clampInline(file.Data, inlineBudget)
+				if len(body) > 0 {
+					inlineBudget -= len(body)
+					inlined++
+					mirrored++
+					writeInlineBlock(&inline, file, body, truncated, true)
+				}
+			}
 			continue
 		}
 
@@ -856,39 +870,13 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 			continue
 		}
 
-		body := file.Data
-		truncated := false
-		limit := maxInlineFileBytes
-		if limit > inlineBudget {
-			limit = inlineBudget
-		}
-		if len(body) > limit {
-			body = body[:limit]
-			truncated = true
-		}
+		body, truncated := clampInline(file.Data, inlineBudget)
 		inlineBudget -= len(body)
 		inlined++
 		c.Logf("Enterprise upload unavailable for %q (%v) — inlining its text into the prompt", file.Name, res.err)
 
-		name := file.Name
-		if name == "" {
-			name = "attachment"
-		}
-		inline.WriteString("\n\n--- Attached file: ")
-		inline.WriteString(name)
-		inline.WriteString(" (")
-		inline.WriteString(file.MIME)
-		inline.WriteString(") ---\n")
-		inline.Write(body)
-		if truncated {
-			inline.WriteString("\n...[truncated]")
-		}
-		inline.WriteString("\n--- end of ")
-		inline.WriteString(name)
-		inline.WriteString(" ---")
-		if res.err != nil {
-			c.Logf("Enterprise attachment %q inlined because upload failed: %v", file.Name, res.err)
-		}
+		writeInlineBlock(&inline, file, body, truncated, false)
+		c.Logf("Enterprise attachment %q inlined because upload failed: %v", file.Name, res.err)
 	}
 
 	if inline.Len() > 0 {
@@ -899,9 +887,53 @@ func (c *Client) prepareEnterpriseAttachments(prompt string, files []RawFile) (s
 			len(skipped), strings.Join(skipped, ", "))
 	}
 	if uploaded > 0 || inlined > 0 {
-		c.Logf("Enterprise attachments: %d uploaded as context files, %d inlined", uploaded, inlined)
+		if mirrored > 0 {
+			c.Logf("Enterprise attachments: %d uploaded as context files, %d inlined (%d of them also written into the prompt so the model can read them)", uploaded, inlined, mirrored)
+		} else {
+			c.Logf("Enterprise attachments: %d uploaded as context files, %d inlined", uploaded, inlined)
+		}
 	}
 	return prompt, ids, session, nil
+}
+
+// clampInline cuts a file body down to the remaining inline budget.
+func clampInline(data []byte, budget int) ([]byte, bool) {
+	limit := maxInlineFileBytes
+	if limit > budget {
+		limit = budget
+	}
+	if len(data) <= limit {
+		return data, false
+	}
+	if limit < 0 {
+		limit = 0
+	}
+	return data[:limit], true
+}
+
+// writeInlineBlock renders one attachment as a delimited prompt section.
+func writeInlineBlock(dst *strings.Builder, file RawFile, body []byte, truncated, uploaded bool) {
+	name := file.Name
+	if name == "" {
+		name = "attachment"
+	}
+	dst.WriteString("\n\n--- Attached file: ")
+	dst.WriteString(name)
+	dst.WriteString(" (")
+	dst.WriteString(file.MIME)
+	if uploaded {
+		dst.WriteString(", also uploaded as a context file but its content is reproduced here because that copy is not reliable)")
+	} else {
+		dst.WriteString(")")
+	}
+	dst.WriteString(" ---\n")
+	dst.Write(body)
+	if truncated {
+		dst.WriteString("\n...[truncated]")
+	}
+	dst.WriteString("\n--- end of ")
+	dst.WriteString(name)
+	dst.WriteString(" ---")
 }
 
 // enterpriseGenerate runs the Gemini Enterprise (Discovery Engine) path with

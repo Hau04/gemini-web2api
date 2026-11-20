@@ -522,7 +522,23 @@ Enterprise context file "code_context.txt" uploaded as text/plain (20 KB, fileId
 
 若重试仍失败，附件照旧内联进提示词，并在日志里说明原因。
 
-### 5. TLS 模拟（绕过 WAF）
+### 5. 让模型真正读到你的指令
+
+上下文文件只有在该租户的解析器把内容交给模型时才可读 —— 目前观察到的租户并不会，模型会反过来抱怨你的指令文件：
+
+> *"我无法查看你最新的一条回复，因为本会话的上下文文件（`code_context.txt`）超出了内联显示上限……请新开一个对话。"*
+
+这句回复的含义是：指令只在那个文件里，别处没有。所以 `enterprise_mirror_text_inline`（默认 **true**）让每个文本附件**两条路都走**：既作为上下文文件上传给租户，也写进模型必然会读到的 prompt 里。
+
+```
+Enterprise attachments: 1 uploaded as context files, 1 inlined (1 of them also written into the prompt so the model can read them)
+```
+
+同理，开启镜像时超长 prompt 不再被切出去塞进 `code_context.txt`：一个只指向不可读文件的 prompt 等于没有指令。如果你的租户确实会把文件内容交给模型，可以设 `"enterprise_mirror_text_inline": false` 恢复旧行为（prompt 小、内容都在附件里）。
+
+二进制附件（图片、PDF）永远不会被镜像 —— 它们的字节无法作为文本内联，仍依赖上传通道。
+
+### 6. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
 
