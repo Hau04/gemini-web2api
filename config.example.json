@@ -17,6 +17,8 @@
   "discovery_engine_upload_cache_sec": 1800,
   "discovery_engine_csesidx": "",
   "discovery_engine_location": "",
+  "discovery_engine_models": {},
+  "discovery_engine_default_model_id": "",
   "api_keys": [
     "sk-gemini"
   ],

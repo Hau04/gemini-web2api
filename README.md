@@ -400,6 +400,19 @@ When `base_url` is customized, `gemini-web2api` automatically switches its `Orig
 
 **Discovery Engine replay (Enterprise direct mode):** the extension's net-hook captures the app's own `streamAssist` request (URL, headers, body) whenever the tab generates, splices the submitted prompt out for a `__W2A_PROMPT__` marker, and pushes the template to `POST /bridge/reqtemplate` (persisted next to the cookie file). On a latched Enterprise origin the server replays that template with fresh cookies and the new prompt — so `/v1/chat/completions` works **with the browser closed**. Templates carry the captured `Authorization` (usually SAPISIDHASH); if it has expired the server retries with freshly recomputed SAPISIDHASH values and, failing that, tells you to send one prompt through the open tab to refresh the template. Check status with `GET /bridge/reqtemplate`.
 
+**Model selection on Enterprise:** Gemini Enterprise answers with the model its assistant is configured with unless the request carries `assistGenerationConfig.modelId`. `gemini-web2api` now sends it, so a client asking for `gemini-4-hydrogen` is no longer silently downgraded to the tenant's "auto":
+
+```jsonc
+{
+  "discovery_engine_models": { "gemini-4-hydrogen": "gemini-2.5-flash", "argon": "gemini-2.5-pro" },
+  "discovery_engine_default_model_id": ""   // optional fallback for unmapped names
+}
+```
+
+Values must be model ids your tenant accepts (look at `assistGenerationConfig.modelId` in the tab's own `widgetStreamAssist` request). Names that already look like upstream ids (`gemini-2.5-pro`, `gemini-3-pro`) are passed through untouched; local aliases (`argon`/`hydrogen`/`carbon`) are never passed through, because the tenant does not know them. Captured-template replays get the same treatment: the modelId baked into the template is rewritten.
+
+**Oversized prompts on Enterprise skip the browser spillover:** the `.txt` spillover exists to dodge consumer Gemini Web composer limits. On a Discovery Engine origin the prompt is inlined into the `streamAssist` JSON body, so oversized requests now go straight to direct mode instead of waiting on a live tab (which is what produced `Bridge request failed before stream start: context canceled` + 502). The bridge is still used when direct mode has no transport at all.
+
 **Widget JWT auth (this is what fixes Enterprise 502s):** the Discovery Engine widget endpoints (`widgetStreamAssist`, `widgetCreateSession`, `widgetAddContextFile`) on `vertexaisearch.cloud.google.com` deployments do **not** accept the consumer `SAPISIDHASH` header. The app mints a short-lived HS256 JWT instead:
 
 1. `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` with your cookies → `{"xsrfToken":"<base64url HMAC key>","keyId":"<kid>"}`

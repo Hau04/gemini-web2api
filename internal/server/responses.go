@@ -154,7 +154,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		// browser's file composer (prepareBridgeRequest →
 		// SpilloverOversizedPrompt), avoiding Enterprise batchexecute body
 		// size limits for fully inlined prompts.
-		if a.cookiesReady() && !(a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars && bridgeAlive) {
+		if a.cookiesReady() && !a.keepBridgeForSpillover(prompt, bridgeAlive) {
 			bridgeAlive = false
 		}
 		if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() {

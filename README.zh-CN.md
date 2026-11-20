@@ -388,6 +388,19 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
+**企业版模型选择：** Gemini Enterprise 默认使用助手自身配置的模型，除非请求里带 `assistGenerationConfig.modelId`。现在服务器会发送它，客户端指定 `gemini-4-hydrogen` 就不会再被静默降级为租户的「auto」：
+
+```jsonc
+{
+  "discovery_engine_models": { "gemini-4-hydrogen": "gemini-2.5-flash", "argon": "gemini-2.5-pro" },
+  "discovery_engine_default_model_id": ""
+}
+```
+
+值必须是租户接受的模型 id（可在标签页自身 `widgetStreamAssist` 请求的 `assistGenerationConfig.modelId` 里看到）。本身就像上游 id 的名字（`gemini-2.5-pro`、`gemini-3-pro`）会原样传递；`argon`/`hydrogen`/`carbon` 这类本地别名不会透传（租户不认识）。重放捕获模板时同样会改写模板里写死的 modelId。
+
+**企业版超长提示词不再走浏览器 `.txt` 溢出：** 该机制是为了绕过消费版输入框限制；Discovery Engine 的提示词直接内联在 `streamAssist` 的 JSON 里，因此超长请求现在直接走直连模式，不必等标签页（之前会出现 `context canceled` + 502）。只有直连完全不可用时才会退回桥接。
+
 **Widget JWT 鉴权（解决企业版 502 的关键）：** `vertexaisearch.cloud.google.com` 上的 Discovery Engine widget 接口（`widgetStreamAssist` / `widgetCreateSession` / `widgetAddContextFile`）**不接受**消费版的 `SAPISIDHASH` 头，而是使用短期 HS256 JWT：
 
 1. 带 Cookie 请求 `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` → `{"xsrfToken":"<base64url HMAC 密钥>","keyId":"<kid>"}`

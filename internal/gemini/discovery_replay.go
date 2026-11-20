@@ -413,9 +413,9 @@ func replayAuthCandidates(tpl *DiscoveryTemplate, sapisid string) []string {
 
 // generateViaDiscovery replays the captured streamAssist request with the new
 // prompt and returns the assembled answer text.
-func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session string) (string, error) {
+func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session string, requestedModel string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryStream(prompt, fileIDs, session, func(delta string) error {
+	err := c.generateViaDiscoveryStream(prompt, fileIDs, session, requestedModel, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -425,7 +425,7 @@ func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session s
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, requestedModel string, emit func(string) error) error {
 	tpl := LoadDiscoveryTemplate(c.Cfg.CookieFile)
 	if tpl == nil {
 		return &UpstreamError{
@@ -442,6 +442,14 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 		body, err = InjectAttachmentContext(body, fileIDs, session)
 		if err != nil {
 			return &UpstreamError{Status: http.StatusBadGateway, Kind: "unsupported", Msg: fmt.Sprintf("could not attach files to the captured streamAssist template: %v", err)}
+		}
+	}
+	// The captured template carries whatever model the browser app had selected;
+	// override it so the client's model choice actually reaches the tenant.
+	if modelID := c.EnterpriseModelID(requestedModel); modelID != "" {
+		if patched := injectTemplateModelID(body, modelID); patched != body {
+			c.Logf("Enterprise: template replay using Discovery Engine modelId %q (requested %q)", modelID, requestedModel)
+			body = patched
 		}
 	}
 
@@ -540,9 +548,9 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 // directly using session cookies, without needing a captured request template.
 // This works on Gemini Enterprise origins when the user has configured the
 // streamAssist endpoint URL in the server config.
-func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, session string) (string, error) {
+func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, session string, requestedModel string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, func(delta string) error {
+	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, requestedModel, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -552,7 +560,7 @@ func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, ses
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, requestedModel string, emit func(string) error) error {
 	configID := strings.TrimSpace(c.enterpriseConfigID(nil))
 	if configID == "" {
 		return &UpstreamError{
@@ -609,10 +617,20 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		sessionJSON = fmt.Sprintf(`"session":%q,`, s)
 	}
 	toolsSpec := `{"toolRegistry":"default_tool_registry"}`
+	// Without this Gemini Enterprise always answers with the tenant's own
+	// default model, regardless of the model the client asked for.
+	modelJSON := ""
+	if modelID := c.EnterpriseModelID(requestedModel); modelID != "" {
+		modelJSON = fmt.Sprintf(`"assistGenerationConfig":{"modelId":%q},`, modelID)
+		if requestedModel != "" && !strings.EqualFold(requestedModel, modelID) {
+			c.Logf("Enterprise: requested model %q -> Discovery Engine modelId %q", requestedModel, modelID)
+		}
+	}
 	body := fmt.Sprintf(
-		`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
+		`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
 		configID,
 		sessionJSON,
+		modelJSON,
 		jsonEscapeInner(prompt),
 		fileIDsJSON,
 		toolsSpec,

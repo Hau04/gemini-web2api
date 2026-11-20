@@ -272,3 +272,101 @@ func writeCookieFile(path, cookie string) error {
 	}
 	return os.WriteFile(path, data, 0o600)
 }
+
+func TestEnterpriseModelIDResolution(t *testing.T) {
+	cfg := config.Default()
+	cfg.DiscoveryEngineModels = map[string]string{
+		"gemini-4-hydrogen": "gemini-2.5-flash",
+		"Argon":             "gemini-2.5-pro",
+	}
+	cfg.DiscoveryEngineDefaultModelID = "gemini-2.5-flash"
+	c := NewClient(cfg)
+	c.Logf = func(string, ...any) {}
+
+	cases := map[string]string{
+		"gemini-4-hydrogen": "gemini-2.5-flash", // mapped
+		"ARGON":             "gemini-2.5-pro",   // mapped, case-insensitive
+		"gemini-2.5-pro":    "gemini-2.5-pro",   // already an upstream id, passed through
+		"gemini-3-pro":      "gemini-3-pro",     // upstream-looking id passes through
+		"hydrogen":          "gemini-2.5-flash", // local alias, not mapped -> default id
+		"":                  "gemini-2.5-flash", // no model requested -> default id
+	}
+	for requested, want := range cases {
+		if got := c.EnterpriseModelID(requested); got != want {
+			t.Errorf("EnterpriseModelID(%q) = %q, want %q", requested, got, want)
+		}
+	}
+
+	plain := NewClient(config.Default())
+	if got := plain.EnterpriseModelID("gemini-4-hydrogen"); got != "" {
+		t.Errorf("without mapping EnterpriseModelID() = %q, want empty (tenant default)", got)
+	}
+}
+
+func TestEnterpriseStreamAssistSendsModelID(t *testing.T) {
+	var assistBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/auth/getoxsrf":
+			_, _ = w.Write([]byte(`{"xsrfToken":"` + hs256Key + `","keyId":"kid-1"}`))
+		case strings.HasSuffix(r.URL.Path, "/widgetCreateSession"):
+			_, _ = w.Write([]byte(`{"session":{"name":"collections/c/engines/e/sessions/1"}}`))
+		case strings.HasSuffix(r.URL.Path, "/widgetStreamAssist"):
+			raw, _ := io.ReadAll(r.Body)
+			assistBody = string(raw)
+			_, _ = w.Write([]byte(`{"streamAssistResponse":{"answer":{"state":"SUCCEEDED","replies":[{"groundedContent":{"content":{"text":"ok"}}}]}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.CookieFile = filepath.Join(dir, "cookie.json")
+	cfg.BaseURL = srv.URL
+	cfg.DiscoveryEngineCsesidx = "42"
+	cfg.DiscoveryEngineConfigID = "cfg-1"
+	cfg.DiscoveryEngineModels = map[string]string{"gemini-4-hydrogen": "gemini-2.5-flash"}
+	cfg.RetryAttempts = 1
+	if err := writeCookieFile(cfg.CookieFile, "__Secure-1PSID=abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := NewClient(cfg)
+	c.HTTP = srv.Client()
+	c.Logf = func(string, ...any) {}
+	c.MarkBardUnsupported()
+
+	origHost := contentWidgetHostFunc
+	contentWidgetHostFunc = func(string) string { return srv.URL }
+	defer func() { contentWidgetHostFunc = origHost }()
+
+	if err := c.enterpriseGenerateStream("hi", ModelOptions{ModelName: "gemini-4-hydrogen"}, func(string) error { return nil }); err != nil {
+		t.Fatalf("enterpriseGenerateStream() error = %v", err)
+	}
+	if !strings.Contains(assistBody, `"assistGenerationConfig":{"modelId":"gemini-2.5-flash"}`) {
+		t.Errorf("streamAssist body must carry the mapped model id: %s", assistBody)
+	}
+}
+
+func TestInjectTemplateModelID(t *testing.T) {
+	withModel := `{"configId":"c","streamAssistRequest":{"assistGenerationConfig":{"modelId":"old"},"query":{"parts":[{"text":"q"}]}}}`
+	got := injectTemplateModelID(withModel, "gemini-2.5-pro")
+	if !strings.Contains(got, `"modelId":"gemini-2.5-pro"`) || strings.Contains(got, `"old"`) {
+		t.Errorf("existing modelId not replaced: %s", got)
+	}
+
+	withoutModel := `{"configId":"c","streamAssistRequest":{"query":{"parts":[{"text":"q"}]}}}`
+	got = injectTemplateModelID(withoutModel, "gemini-2.5-flash")
+	if !strings.Contains(got, `"assistGenerationConfig":{"modelId":"gemini-2.5-flash"}`) {
+		t.Errorf("modelId not inserted: %s", got)
+	}
+	if !strings.Contains(got, `"query":{"parts":[{"text":"q"}]}`) {
+		t.Errorf("query lost while inserting modelId: %s", got)
+	}
+
+	if got := injectTemplateModelID(withoutModel, ""); got != withoutModel {
+		t.Errorf("empty model id must leave the body untouched")
+	}
+}

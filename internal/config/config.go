@@ -73,6 +73,14 @@ type Config struct {
 	// host (us, eu, global). Defaults to the value in discovery_engine_endpoint
 	// or "us".
 	DiscoveryEngineLocation string `json:"discovery_engine_location"`
+	// DiscoveryEngineModels maps a requested model name (e.g.
+	// "gemini-4-hydrogen") to the Discovery Engine modelId the tenant knows.
+	// Gemini Enterprise ignores model choice unless assistGenerationConfig is
+	// sent, so this is what makes the client's model selection take effect.
+	DiscoveryEngineModels map[string]string `json:"discovery_engine_models"`
+	// DiscoveryEngineDefaultModelID is used for requests whose model has no
+	// mapping entry. Empty leaves the tenant default (its own "auto").
+	DiscoveryEngineDefaultModelID string `json:"discovery_engine_default_model_id"`
 }
 
 func Default() Config {
@@ -117,6 +125,8 @@ func Default() Config {
 		DiscoveryEngineUploadCacheSec: 1800,
 		DiscoveryEngineCsesidx:        "",
 		DiscoveryEngineLocation:       "",
+		DiscoveryEngineModels:         map[string]string{},
+		DiscoveryEngineDefaultModelID: "",
 	}
 }
 
@@ -174,7 +184,9 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
 		DiscoveryEngineUploadCacheSec *int    `json:"discovery_engine_upload_cache_sec"`
 		DiscoveryEngineCsesidx        *string `json:"discovery_engine_csesidx"`
-		DiscoveryEngineLocation       *string `json:"discovery_engine_location"`
+		DiscoveryEngineLocation       *string            `json:"discovery_engine_location"`
+		DiscoveryEngineModels         map[string]string  `json:"discovery_engine_models"`
+		DiscoveryEngineDefaultModelID *string            `json:"discovery_engine_default_model_id"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -300,6 +312,12 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineLocation != nil {
 		cfg.DiscoveryEngineLocation = *aux.DiscoveryEngineLocation
+	}
+	if len(aux.DiscoveryEngineModels) > 0 {
+		cfg.DiscoveryEngineModels = aux.DiscoveryEngineModels
+	}
+	if aux.DiscoveryEngineDefaultModelID != nil {
+		cfg.DiscoveryEngineDefaultModelID = *aux.DiscoveryEngineDefaultModelID
 	}
 
 	return cfg, nil

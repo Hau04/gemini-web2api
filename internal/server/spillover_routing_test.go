@@ -231,7 +231,69 @@ func TestOversizedPromptWithLocalFileRefStaysOnBridge(t *testing.T) {
 
 // On Gemini Enterprise origins the Bard web RPC does not exist (404) — direct
 // cookie mode must be skipped entirely and oversized prompts stay on the bridge.
-func TestOversizedPromptStaysOnBridgeWhenBardUnsupported(t *testing.T) {
+func TestOversizedPromptOnEnterpriseRoutesDirectWhenDirectModeUsable(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookie.json")
+	if err := os.WriteFile(cookieFile, []byte(`{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.CookieFile = cookieFile
+	cfg.RetryAttempts = 1
+	cfg.RequestTimeoutSec = 2
+	// A configured widget endpoint makes direct mode usable even though the
+	// origin has no Bard RPC.
+	cfg.DiscoveryEngineEndpoint = "https://discoveryengine.clients6.google.com/v1alpha/locations/global/widgetStreamAssist?key=k"
+	cfg.DiscoveryEngineConfigID = "cfg-1"
+
+	app := New(cfg, "test")
+	app.Gem.HTTP = failingRequester{}
+	app.Gem.MarkBardUnsupported() // simulated prior 404 from this origin
+	handler := app.Handler()
+
+	hbReq := httptest.NewRequest("POST", "/bridge/heartbeat", strings.NewReader(`{"tab":"vertexaisearch.cloud.google.com","client_id":"tab_1"}`))
+	hbRec := httptest.NewRecorder()
+	handler.ServeHTTP(hbRec, hbReq)
+	if hbRec.Code != http.StatusOK {
+		t.Fatalf("heartbeat failed: %d", hbRec.Code)
+	}
+
+	bridgeGotRequest := make(chan bool, 1)
+	go func() {
+		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 2*time.Second)
+		if err == nil && req != nil {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "ok", Done: true})
+			bridgeGotRequest <- true
+			return
+		}
+		bridgeGotRequest <- false
+	}()
+
+	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
+	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"` + big + `"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	rec := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		handler.ServeHTTP(rec, req)
+		close(done)
+	}()
+
+	if <-bridgeGotRequest {
+		t.Fatal("oversized prompt must not wait on the browser tab when Discovery Engine direct mode can serve it")
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not finish")
+	}
+}
+
+// Without any direct transport (no template, no endpoint, no widget csesidx), a
+// Discovery Engine origin has nothing but the bridge — the spillover must stay.
+func TestOversizedPromptOnEnterpriseStaysOnBridgeWithoutDirectMode(t *testing.T) {
 	tmpDir := t.TempDir()
 	cookieFile := filepath.Join(tmpDir, "cookie.json")
 	if err := os.WriteFile(cookieFile, []byte(`{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`), 0o600); err != nil {
@@ -246,7 +308,7 @@ func TestOversizedPromptStaysOnBridgeWhenBardUnsupported(t *testing.T) {
 
 	app := New(cfg, "test")
 	app.Gem.HTTP = failingRequester{}
-	app.Gem.MarkBardUnsupported() // simulated prior 404 from this origin
+	app.Gem.MarkBardUnsupported()
 	handler := app.Handler()
 
 	hbReq := httptest.NewRequest("POST", "/bridge/heartbeat", strings.NewReader(`{"tab":"vertexaisearch.cloud.google.com","client_id":"tab_1"}`))
@@ -274,7 +336,7 @@ func TestOversizedPromptStaysOnBridgeWhenBardUnsupported(t *testing.T) {
 	go handler.ServeHTTP(rec, req)
 
 	if !<-bridgeGotRequest {
-		t.Fatal("request must stay on the bridge when the origin lacks the Bard RPC (direct mode would 404)")
+		t.Fatal("request must stay on the bridge when there is no direct transport at all")
 	}
 }
 

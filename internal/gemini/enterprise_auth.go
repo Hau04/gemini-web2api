@@ -406,3 +406,82 @@ func (c *Client) applyEnterpriseWidgetHeaders(req *http.Request, bearer string) 
 	req.Header.Set("X-Goog-Api-Client", "gemini-enterprise-classic/1.0.0")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36")
 }
+
+// EnterpriseModelID resolves the Discovery Engine modelId for a requested model.
+// Gemini Enterprise runs whatever model the assistant is configured with unless
+// the request carries assistGenerationConfig.modelId, so a client asking for
+// "gemini-4-hydrogen" would otherwise silently get the tenant default.
+//
+// Resolution order:
+//  1. discovery_engine_models[<requested>] (case-insensitive)
+//  2. the requested name itself when it already looks like a Discovery Engine
+//     id ("gemini-2.5-pro", "gemini-2.5-flash", ...), so clients can target a
+//     tenant model directly
+//  3. discovery_engine_default_model_id
+func (c *Client) EnterpriseModelID(requested string) string {
+	name := strings.TrimSpace(requested)
+	lower := strings.ToLower(name)
+	for key, value := range c.Cfg.DiscoveryEngineModels {
+		if strings.ToLower(strings.TrimSpace(key)) == lower {
+			return strings.TrimSpace(value)
+		}
+	}
+	if looksLikeDiscoveryEngineModel(lower) {
+		return name
+	}
+	return strings.TrimSpace(c.Cfg.DiscoveryEngineDefaultModelID)
+}
+
+// looksLikeDiscoveryEngineModel reports whether a name is a plain upstream
+// model id rather than one of this server's aliases (argon/hydrogen/carbon).
+func looksLikeDiscoveryEngineModel(name string) bool {
+	if name == "" {
+		return false
+	}
+	switch name {
+	case "auto", "gemini-auto", "argon", "hydrogen", "carbon", "gemini-4",
+		"gemini-4-argon", "gemini-4-hydrogen", "gemini-4-carbon":
+		return false
+	}
+	return strings.HasPrefix(name, "gemini-") && !strings.Contains(name, "-4-")
+}
+
+// enterpriseAssistGenerationConfig renders the optional assistGenerationConfig
+// fragment for the widget request body.
+func (c *Client) enterpriseAssistGenerationConfig(requested string) string {
+	modelID := c.EnterpriseModelID(requested)
+	if modelID == "" {
+		return ""
+	}
+	return fmt.Sprintf(`"assistGenerationConfig":{"modelId":%q},`, modelID)
+}
+
+// injectTemplateModelID rewrites (or adds) assistGenerationConfig.modelId in a
+// captured streamAssist body so replayed templates honour the model the client
+// asked for instead of whatever the browser app had selected.
+func injectTemplateModelID(body, modelID string) string {
+	if strings.TrimSpace(modelID) == "" {
+		return body
+	}
+	idJSON, err := json.Marshal(modelID)
+	if err != nil {
+		return body
+	}
+	if re := regexp.MustCompile(`"assistGenerationConfig"\s*:\s*\{[^{}]*\}`); re.MatchString(body) {
+		return re.ReplaceAllStringFunc(body, func(match string) string {
+			if inner := regexp.MustCompile(`"modelId"\s*:\s*"[^"]*"`); inner.MatchString(match) {
+				return inner.ReplaceAllString(match, `"modelId":`+string(idJSON))
+			}
+			return strings.TrimSuffix(match, "}") + `,"modelId":` + string(idJSON) + "}"
+		})
+	}
+	// Insert next to the streamAssistRequest object so the field lands where the
+	// widget expects it.
+	needle := `"streamAssistRequest":{`
+	idx := strings.Index(body, needle)
+	if idx < 0 {
+		return body
+	}
+	insertAt := idx + len(needle)
+	return body[:insertAt] + `"assistGenerationConfig":{"modelId":` + string(idJSON) + "}," + body[insertAt:]
+}

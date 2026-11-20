@@ -236,7 +236,8 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	// prompts. Normal-sized prompts go through direct cookie mode (prompt inlined).
 	bridgeAlive := a.Bridge != nil && a.Bridge.IsConnected()
 
-	if a.cookiesReady() && !(a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars && bridgeAlive) {
+	spilloverBridge := a.keepBridgeForSpillover(prompt, bridgeAlive)
+	if a.cookiesReady() && !spilloverBridge {
 		bridgeAlive = false
 	}
 
@@ -885,3 +886,21 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, resp)
 	}
 }
+
+// keepBridgeForSpillover decides whether an oversized prompt should stay on the
+// browser bridge so its text can be uploaded as a .txt attachment. That trick
+// exists to dodge consumer Gemini Web composer/body limits; on a Discovery Engine
+// (Gemini Enterprise) origin the prompt is inlined into the widgetStreamAssist
+// JSON body, so a live tab is only worth waiting for when direct mode cannot
+// serve the request at all (no template, no endpoint, no widget csesidx).
+func (a *App) keepBridgeForSpillover(prompt string, bridgeAlive bool) bool {
+	if !bridgeAlive || a.Cfg.BridgeSpilloverChars <= 0 || len(prompt) <= a.Cfg.BridgeSpilloverChars {
+		return false
+	}
+	if a.Gem != nil && a.Gem.UsesDiscoveryEngine() && a.directModeUsable() {
+		a.Logf("Oversized prompt on a Gemini Enterprise origin — routing direct (inlined in the widget request) instead of the browser .txt spillover")
+		return false
+	}
+	return true
+}
+
