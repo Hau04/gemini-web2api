@@ -431,6 +431,7 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 	// Fall back to Discovery Engine streamAssist: captured template first,
 	// then direct endpoint call with session cookies.
 	if IsUnsupported(lastErr) {
+		c.Logf("Enterprise batchexecute returned 404, falling back to Discovery Engine streamAssist")
 		if len(fileRefs) > 0 {
 			return "", &UpstreamError{
 				Status: http.StatusNotFound,
@@ -446,7 +447,11 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
 			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin")
-			return c.generateViaDiscoveryDirect(prompt)
+			directErr := c.generateViaDiscoveryDirect(prompt)
+			if directErr != nil {
+				c.Logf("Direct Discovery Engine call failed: %v", directErr)
+			}
+			return directErr
 		}
 		return "", &UpstreamError{
 			Status: http.StatusNotFound,
@@ -478,7 +483,11 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
 			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin (stream)")
-			return c.generateViaDiscoveryDirectStream(prompt, emit)
+			directErr := c.generateViaDiscoveryDirectStream(prompt, emit)
+			if directErr != nil {
+				c.Logf("Direct Discovery Engine stream call failed: %v", directErr)
+			}
+			return directErr
 		}
 		return &UpstreamError{
 			Status: http.StatusNotFound,
