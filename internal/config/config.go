@@ -43,6 +43,9 @@ type Config struct {
 	DiscoveryEngineEndpoint string `json:"discovery_engine_endpoint"`
 	// DiscoveryEngineConfigID is the WidgetConfig ID for widgetStreamAssist.
 	DiscoveryEngineConfigID string `json:"discovery_engine_config_id"`
+	// DiscoveryEngineServerToken is the x-server-token header value for
+	// widgetStreamAssist (required to pass reCAPTCHA check).
+	DiscoveryEngineServerToken string `json:"discovery_engine_server_token"`
 }
 
 func Default() Config {
@@ -80,6 +83,7 @@ func Default() Config {
 		NotifyFormat:               "ntfy",
 		DiscoveryEngineEndpoint:    "",
 		DiscoveryEngineConfigID:    "",
+		DiscoveryEngineServerToken: "",
 	}
 }
 
@@ -131,6 +135,7 @@ func Load(path string) (Config, error) {
 		NotifyFormat               *string   `json:"notify_format"`
 		DiscoveryEngineEndpoint    *string   `json:"discovery_engine_endpoint"`
 		DiscoveryEngineConfigID    *string   `json:"discovery_engine_config_id"`
+		DiscoveryEngineServerToken *string   `json:"discovery_engine_server_token"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -235,6 +240,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineConfigID != nil {
 		cfg.DiscoveryEngineConfigID = *aux.DiscoveryEngineConfigID
+	}
+	if aux.DiscoveryEngineServerToken != nil {
+		cfg.DiscoveryEngineServerToken = *aux.DiscoveryEngineServerToken
 	}
 
 	return cfg, nil

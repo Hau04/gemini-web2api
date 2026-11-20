@@ -30,5 +30,7 @@
   "bridge_token": "",
   "notify_webhook": "",
   "notify_format": "ntfy",
-  "discovery_engine_endpoint": ""
+  "discovery_engine_endpoint": "",
+  "discovery_engine_config_id": "",
+  "discovery_engine_server_token": ""
 }

@@ -600,6 +600,9 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, emit func(strin
 			headers.Set("Authorization", auth)
 		}
 	}
+	if c.Cfg.DiscoveryEngineServerToken != "" {
+		headers.Set("X-Server-Token", c.Cfg.DiscoveryEngineServerToken)
+	}
 
 	var lastErr error
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
