@@ -401,6 +401,8 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 				}
 				lastErr = err
 				if IsUnsupported(err) {
+					// Enterprise origin detected — fall back to Discovery Engine
+					// streamAssist (captured template or direct endpoint call)
 					break
 				}
 			} else {
@@ -425,6 +427,34 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 	}
 
+	// Batchexecute failed with unsupported (404) — Enterprise origin.
+	// Fall back to Discovery Engine streamAssist: captured template first,
+	// then direct endpoint call with session cookies.
+	if IsUnsupported(lastErr) {
+		if len(fileRefs) > 0 {
+			return "", &UpstreamError{
+				Status: http.StatusNotFound,
+				Kind:   "unsupported",
+				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
+			}
+		}
+		// Try captured template first (from extension net-hook capture)
+		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
+			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin")
+			return c.generateViaDiscovery(prompt)
+		}
+		// Try direct streamAssist endpoint call with session cookies
+		if c.Cfg.DiscoveryEngineEndpoint != "" {
+			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin")
+			return c.generateViaDiscoveryDirect(prompt)
+		}
+		return "", &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab so the extension can capture a streamAssist template",
+		}
+	}
+
 	return "", lastErr
 }
 
@@ -440,13 +470,14 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
 			}
 		}
-		return c.generateViaDiscoveryStream(prompt, emit)
 		// Try captured template first (from extension net-hook capture)
 		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
+			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin (stream)")
 			return c.generateViaDiscoveryStream(prompt, emit)
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
+			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin (stream)")
 			return c.generateViaDiscoveryDirectStream(prompt, emit)
 		}
 		return &UpstreamError{
@@ -536,6 +567,35 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		if attempt < c.Cfg.RetryAttempts-1 {
 			c.Logf("Stream retry %d/%d: %v", attempt+1, c.Cfg.RetryAttempts, lastErr)
 			time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
+		}
+	}
+
+	// Batchexecute failed with unsupported (404) — Enterprise origin.
+	// Fall back to Discovery Engine streamAssist: captured template first,
+	// then direct endpoint call with session cookies.
+	if IsUnsupported(lastErr) {
+		c.Logf("Falling back to Discovery Engine streamAssist for Enterprise origin (stream)")
+		if len(fileRefs) > 0 {
+			return &UpstreamError{
+				Status: http.StatusNotFound,
+				Kind:   "unsupported",
+				Msg:    "this Gemini Enterprise origin needs the browser bridge for image attachments — keep the Gemini tab open",
+			}
+		}
+		// Try captured template first (from extension net-hook capture)
+		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
+			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin (stream)")
+			return c.generateViaDiscoveryStream(prompt, emit)
+		}
+		// Try direct streamAssist endpoint call with session cookies
+		if c.Cfg.DiscoveryEngineEndpoint != "" {
+			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin (stream)")
+			return c.generateViaDiscoveryDirectStream(prompt, emit)
+		}
+		return &UpstreamError{
+			Status: http.StatusNotFound,
+			Kind:   "unsupported",
+			Msg:    "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab so the extension can capture a streamAssist template",
 		}
 	}
 
