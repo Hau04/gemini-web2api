@@ -460,6 +460,9 @@ func (c *Client) generateViaDiscoveryStream(prompt string, emit func(string) err
 		if auth != "" {
 			req.Header.Set("Authorization", auth)
 		}
+		if c.Cfg.DiscoveryEngineServerToken != "" {
+			req.Header.Set("X-Server-Token", c.Cfg.DiscoveryEngineServerToken)
+		}
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {

@@ -56,10 +56,10 @@ func TestPromptMayReferenceLocalFiles(t *testing.T) {
 	}
 }
 
-// Oversized prompts used to be spilled into a .txt attachment and uploaded
-// through the browser's file UI, which stalls on some Gemini Enterprise
-// frontends. With cookies ready and no local files referenced, the request
-// must go straight to direct cookie mode (prompt inlined in the POST body).
+// When cookies are ready and an active bridge tab is connected, oversized prompts
+// stay on the browser bridge for .txt spillover (avoiding Enterprise batchexecute
+// body size limits). When the browser is closed (no active bridge), oversized
+// prompts route to direct cookie mode.
 func TestOversizedPromptRoutesDirectWhenCookiesReady(t *testing.T) {
 	tmpDir := t.TempDir()
 	cookieFile := filepath.Join(tmpDir, "cookie.json")
@@ -80,7 +80,7 @@ func TestOversizedPromptRoutesDirectWhenCookiesReady(t *testing.T) {
 	app.Gem.HTTP = failingRequester{}
 	handler := app.Handler()
 
-	// Register an active browser tab so bridge routing would normally win.
+	// Register an active browser tab so bridge spillover is active.
 	hbReq := httptest.NewRequest("POST", "/bridge/heartbeat", strings.NewReader(`{"tab":"vertexaisearch.cloud.google.com","client_id":"tab_1"}`))
 	hbRec := httptest.NewRecorder()
 	handler.ServeHTTP(hbRec, hbReq)
@@ -88,11 +88,15 @@ func TestOversizedPromptRoutesDirectWhenCookiesReady(t *testing.T) {
 		t.Fatalf("heartbeat failed: %d", hbRec.Code)
 	}
 
-	// A bridge worker waits for work — it must receive NOTHING.
 	bridgeGotRequest := make(chan bool, 1)
 	go func() {
-		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 2*time.Second)
-		bridgeGotRequest <- err == nil && req != nil
+		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 3*time.Second)
+		if err == nil && req != nil {
+			_ = app.Bridge.SubmitChunk(bridge.Chunk{ID: req.ID, Text: "ok", Done: true})
+			bridgeGotRequest <- true
+			return
+		}
+		bridgeGotRequest <- false
 	}()
 
 	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
@@ -101,20 +105,46 @@ func TestOversizedPromptRoutesDirectWhenCookiesReady(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if <-bridgeGotRequest {
-		t.Fatal("oversized prompt was routed to the browser bridge; want direct cookie mode")
+	if !<-bridgeGotRequest {
+		t.Fatal("oversized prompt with active bridge should use the browser bridge for .txt spillover")
 	}
-	// Direct mode ran and failed against the failing stub — any non-200 proves
-	// the request left the bridge path.
-	if rec.Code == http.StatusOK {
-		t.Fatalf("expected direct-mode failure status, got 200: %s", rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 from bridge spillover, got %d: %s", rec.Code, rec.Body.String())
 	}
 }
 
-// Coding-agent prompts constantly mention paths (config.json, src/app.py …) that
-// do not exist on the server's disk. Such mentions must NOT pin the request to
-// the bridge: nothing could be uploaded anyway, and the browser upload UI stalls
-// on some Gemini Enterprise frontends.
+// When the browser is closed (no active bridge), oversized prompts with cookies
+// ready must route to direct cookie mode.
+func TestOversizedPromptRoutesDirectWhenBrowserClosed(t *testing.T) {
+	tmpDir := t.TempDir()
+	cookieFile := filepath.Join(tmpDir, "cookie.json")
+	if err := os.WriteFile(cookieFile, []byte(`{"cookie":"SAPISID=abc; __Secure-1PSID=xyz","sapisid":"abc"}`), 0o600); err != nil {
+		t.Fatalf("write cookie file: %v", err)
+	}
+
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.CookieFile = cookieFile
+	cfg.RetryAttempts = 1
+	cfg.RequestTimeoutSec = 2
+
+	app := New(cfg, "test")
+	app.Gem.HTTP = failingRequester{}
+	handler := app.Handler()
+
+	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
+	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"` + big + `"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected direct-mode failure status against stub upstream, got 200: %s", rec.Body.String())
+	}
+}
+
+// When the browser is closed (no active bridge), even prompts mentioning
+// non-existent local paths route to direct cookie mode.
 func TestOversizedPromptWithMissingFileRefRoutesDirect(t *testing.T) {
 	tmpDir := t.TempDir()
 	cookieFile := filepath.Join(tmpDir, "cookie.json")
@@ -132,29 +162,13 @@ func TestOversizedPromptWithMissingFileRefRoutesDirect(t *testing.T) {
 	app.Gem.HTTP = failingRequester{}
 	handler := app.Handler()
 
-	hbReq := httptest.NewRequest("POST", "/bridge/heartbeat", strings.NewReader(`{"tab":"vertexaisearch.cloud.google.com","client_id":"tab_1"}`))
-	hbRec := httptest.NewRecorder()
-	handler.ServeHTTP(hbRec, hbReq)
-	if hbRec.Code != http.StatusOK {
-		t.Fatalf("heartbeat failed: %d", hbRec.Code)
-	}
-
-	bridgeGotRequest := make(chan bool, 1)
-	go func() {
-		req, err := app.Bridge.WaitForNextRequestForClient(context.Background(), "vertexaisearch.cloud.google.com", "tab_1", 2*time.Second)
-		bridgeGotRequest <- err == nil && req != nil
-	}()
-
 	big := strings.Repeat("x", cfg.BridgeSpilloverChars+1000)
-	// References a path that does NOT exist on this machine.
+	// References a path that does NOT exist on this machine, with browser closed.
 	chatBody := `{"model":"gemini-2.5-pro","messages":[{"role":"user","content":"please fix /nonexistent/dir_9f8a7b/missing.go and ` + big + `"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(chatBody))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	if <-bridgeGotRequest {
-		t.Fatal("prompt referencing a non-existent file was routed to the bridge; want direct cookie mode")
-	}
 	if rec.Code == http.StatusOK {
 		t.Fatalf("expected direct-mode failure status, got 200: %s", rec.Body.String())
 	}
@@ -338,7 +352,7 @@ func TestBridgeOfflineWithoutDirectModeReturns503(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "bridge_offline") {
 		t.Fatalf("expected bridge_offline error type, got: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "open Gemini in Chrome") {
+	if !strings.Contains(rec.Body.String(), "open Gemini tab") {
 		t.Fatalf("error must tell the user to open the tab, got: %s", rec.Body.String())
 	}
 }

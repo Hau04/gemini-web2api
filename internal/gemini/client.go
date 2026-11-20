@@ -328,7 +328,14 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		}
 		// Try captured template first (from extension net-hook capture)
 		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
-			return c.generateViaDiscovery(prompt)
+			resp, tplErr := c.generateViaDiscovery(prompt)
+			if tplErr == nil {
+				return resp, nil
+			}
+			if c.Cfg.DiscoveryEngineEndpoint == "" {
+				return "", tplErr
+			}
+			c.Logf("Captured Discovery Engine template failed (%v), falling back to direct endpoint", tplErr)
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
@@ -447,16 +454,23 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		// Try captured template first (from extension net-hook capture)
 		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin")
-			return c.generateViaDiscovery(prompt)
+			resp, tplErr := c.generateViaDiscovery(prompt)
+			if tplErr == nil {
+				return resp, nil
+			}
+			if c.Cfg.DiscoveryEngineEndpoint == "" {
+				return "", tplErr
+			}
+			c.Logf("Captured Discovery Engine template failed (%v), falling back to direct endpoint", tplErr)
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
 			c.Logf("Falling back to direct Discovery Engine streamAssist endpoint for Enterprise origin")
-			_, directErr := c.generateViaDiscoveryDirect(prompt)
+			resp, directErr := c.generateViaDiscoveryDirect(prompt)
 			if directErr != nil {
 				c.Logf("Direct Discovery Engine call failed: %v", directErr)
 			}
-			return "", directErr
+			return resp, directErr
 		}
 		return "", &UpstreamError{
 			Status: http.StatusNotFound,
@@ -483,7 +497,14 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		// Try captured template first (from extension net-hook capture)
 		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin (stream)")
-			return c.generateViaDiscoveryStream(prompt, emit)
+			tplErr := c.generateViaDiscoveryStream(prompt, emit)
+			if tplErr == nil {
+				return nil
+			}
+			if c.Cfg.DiscoveryEngineEndpoint == "" {
+				return tplErr
+			}
+			c.Logf("Captured Discovery Engine template stream failed (%v), falling back to direct endpoint", tplErr)
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
@@ -599,7 +620,14 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		// Try captured template first (from extension net-hook capture)
 		if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 			c.Logf("Falling back to captured Discovery Engine template for Enterprise origin (stream)")
-			return c.generateViaDiscoveryStream(prompt, emit)
+			tplErr := c.generateViaDiscoveryStream(prompt, emit)
+			if tplErr == nil {
+				return nil
+			}
+			if c.Cfg.DiscoveryEngineEndpoint == "" {
+				return tplErr
+			}
+			c.Logf("Captured Discovery Engine template stream failed (%v), falling back to direct endpoint", tplErr)
 		}
 		// Try direct streamAssist endpoint call with session cookies
 		if c.Cfg.DiscoveryEngineEndpoint != "" {
