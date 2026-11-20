@@ -388,6 +388,14 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
+**关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
+
+1. **一次性捕获（推荐，零配置）**：加载扩展后，在企业版标签页里手动上传一个文件。net-hook 会记录这次上传请求，扩展把文件名 / MIME / Base64 内容替换为 `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__` 占位符后推送到 `POST /bridge/uploadtemplate`，并保存在 Cookie 文件旁的 `discovery_upload_template.json`。此后服务器用最新 Cookie 重放该请求来上传**所有**附件，浏览器可以一直关闭。用 `GET /bridge/uploadtemplate` 查看状态。
+2. **直接配置端点**：没有捕获模板时，把 `discovery_engine_upload_endpoint` 设为标签页 DevTools 里的 `widgetAddContextFile` URL；若留空，服务器会把 `discovery_engine_endpoint` 中的 `widgetStreamAssist` 自动替换为 `widgetAddContextFile`。`discovery_engine_session`（如 `collections/default_collection/engines/my-engine/sessions/-`）和 `discovery_engine_config_id` 可固定会话与 Widget 配置，否则从捕获的请求体里读取。
+3. **文本内联兜底**：完全没有上传通道时，纯文本类附件（代码、JSON、CSV、Markdown、日志，单个 ≤200 KB、总计 ≤400 KB）会带 `--- Attached file: … ---` 标记内联进提示词，编码代理仍能读到文件内容；图片 / PDF / Office 等二进制附件会返回明确错误，而不是被静默丢弃。
+
+上传的文件与重放的 `streamAssist` 处于同一会话，后续对话会保留文件上下文；每次带附件的请求都会重新上传。
+
 ### WorkBuddy / AI 编码代理集成
 
 `gemini-web2api`作为编码代理的嵌入式 OpenAI 兼容提供程序，例如**工作伙伴**,**码友**、光标、克劳德·代码、艾德和克莱恩。因为`gemini-web2api`本机代理 OpenAI 函数调用（`tools`/`tool_calls`），代理可以自主检查和编辑本地文件。

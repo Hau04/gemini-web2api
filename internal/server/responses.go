@@ -205,7 +205,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 				var fileRefs []string
 				if len(images) > 0 {
 					var uErr error
-					fileRefs, uErr = a.uploadImages(images)
+					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
 					if uErr != nil {
 						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
 						return
@@ -234,7 +234,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			// Degraded bridge — use direct cookie mode
 			var fileRefs []string
 			if len(images) > 0 {
-				fileRefs, err = a.uploadImages(images)
+				fileRefs, gemOpt.Files, err = a.prepareAttachments(images)
 				if err != nil {
 					a.Logf("Image upload error: %v", err)
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})
@@ -264,7 +264,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}
 		var fileRefs []string
 		if len(images) > 0 {
-			fileRefs, err = a.uploadImages(images)
+			fileRefs, gemOpt.Files, err = a.prepareAttachments(images)
 			if err != nil {
 				a.Logf("Image upload error: %v", err)
 				writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", err)}})

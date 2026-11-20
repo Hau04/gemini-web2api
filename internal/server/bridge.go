@@ -307,3 +307,76 @@ func (a *App) handleBridgeReqTemplate(w http.ResponseWriter, r *http.Request) {
 	a.Logf("Captured Discovery Engine request template from browser tab %q (%s, %d bytes) — Enterprise direct replay ready", payload.Tab, tpl.URL, len(tpl.Body))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
+
+// handleBridgeUploadTemplate stores (or reports) a captured Gemini Enterprise
+// context-file upload request (Discovery Engine addContextFile). Replaying it
+// with fresh cookies is what lets direct cookie mode attach files with the
+// browser closed, where the consumer content-push pipeline does not exist.
+func (a *App) handleBridgeUploadTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		tpl := gemini.LoadDiscoveryUploadTemplate(a.cookieFilePath())
+		if tpl == nil {
+			writeJSON(w, http.StatusOK, map[string]any{"have_template": false})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"have_template": true,
+			"url":           tpl.URL,
+			"body_size":     len(tpl.Body),
+			"captured_at":   tpl.CapturedAt,
+		})
+		return
+	}
+
+	var payload struct {
+		URL     string            `json:"url"`
+		Method  string            `json:"method"`
+		Headers map[string]string `json:"headers"`
+		Body    string            `json:"body"`
+		Tab     string            `json:"tab"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON payload"})
+		return
+	}
+	payload.URL = strings.TrimSpace(payload.URL)
+	if payload.URL == "" || strings.TrimSpace(payload.Body) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing url or body"})
+		return
+	}
+	if len(payload.Body) > 4<<20 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "template body too large"})
+		return
+	}
+	if !strings.HasPrefix(payload.URL, "https://") ||
+		(!strings.Contains(payload.URL, "googleapis.com") && !strings.Contains(payload.URL, "google.com")) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "template url must be a Google https endpoint"})
+		return
+	}
+	hasPlaceholder := strings.Contains(payload.Body, gemini.UploadFileB64Placeholder) ||
+		strings.Contains(payload.Body, gemini.UploadFileNamePlaceholder)
+	if !hasPlaceholder {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "template body has no file placeholder — the extension could not identify the uploaded file fields"})
+		return
+	}
+	if payload.Method == "" {
+		payload.Method = http.MethodPost
+	}
+	if payload.Headers == nil {
+		payload.Headers = map[string]string{}
+	}
+
+	tpl := &gemini.DiscoveryUploadTemplate{
+		URL:        payload.URL,
+		Method:     payload.Method,
+		Headers:    payload.Headers,
+		Body:       payload.Body,
+		CapturedAt: time.Now(),
+	}
+	if err := gemini.SaveDiscoveryUploadTemplate(a.cookieFilePath(), tpl); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": err.Error()})
+		return
+	}
+	a.Logf("Captured Gemini Enterprise context-file upload template from browser tab %q (%s, %d bytes) — browserless attachments ready", payload.Tab, tpl.URL, len(tpl.Body))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}

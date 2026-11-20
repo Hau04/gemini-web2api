@@ -1433,6 +1433,58 @@
     }
   }
 
+  // substituteUploadFields rewrites a captured Discovery Engine context-file
+  // upload body (addContextFile) so the server can replay it with any file:
+  // inline content, name and mime type become placeholders. Returns null when
+  // the body carries no recognisable file fields.
+  function substituteUploadFields(body) {
+    if (typeof body !== "string" || !body) return null;
+    let obj;
+    try {
+      obj = JSON.parse(body);
+    } catch (e) {
+      return null;
+    }
+    let changed = false;
+    const CONTENT_KEYS = { filecontents: 1, file_contents: 1, filedata: 1, file_data: 1 };
+    const NAME_KEYS = { filename: 1, file_name: 1 };
+    const MIME_KEYS = { mimetype: 1, mime_type: 1, contenttype: 1, content_type: 1 };
+    const walk = (node) => {
+      if (!node || typeof node !== "object") return;
+      if (Array.isArray(node)) {
+        node.forEach(walk);
+        return;
+      }
+      for (const key of Object.keys(node)) {
+        const lk = key.toLowerCase();
+        const val = node[key];
+        if (CONTENT_KEYS[lk] && typeof val === "string") {
+          node[key] = "__W2A_FILE_B64__";
+          changed = true;
+          continue;
+        }
+        if (NAME_KEYS[lk] && typeof val === "string") {
+          node[key] = "__W2A_FILE_NAME__";
+          changed = true;
+          continue;
+        }
+        if (MIME_KEYS[lk] && typeof val === "string") {
+          node[key] = "__W2A_FILE_MIME__";
+          changed = true;
+          continue;
+        }
+        walk(val);
+      }
+    };
+    walk(obj);
+    if (!changed) return null;
+    try {
+      return JSON.stringify(obj);
+    } catch (e) {
+      return null;
+    }
+  }
+
   // substitutePromptInBody replaces the submitted prompt in a captured request
   // body with the replay placeholder. Returns null when the prompt is not found
   // (e.g. a background title request) — such bodies must never become templates.
@@ -1460,6 +1512,7 @@
       NET_MSG_KEY,
       jsonEscapeInner,
       substitutePromptInBody,
+      substituteUploadFields,
       isModelHeaderLine,
       isThinkingOnlyLine,
       cleanResponseText,
@@ -1603,6 +1656,10 @@
     // request is waiting (e.g. the user typed into the tab manually).
     if (type === "reqmeta") {
       handleReqMeta(data);
+      return;
+    }
+    if (type === "uploadmeta") {
+      handleUploadMeta(data);
       return;
     }
 
@@ -3371,6 +3428,48 @@
     } catch (e) {
       console.warn("[Web2API Bridge] Failed to push request template:", e);
     }
+  }
+
+  // Store a captured Discovery Engine context-file upload request and push it to
+  // the server so Gemini Enterprise attachments work with the browser closed.
+  let pendingUploadTemplate = null;
+  let uploadTemplatePushTimer = null;
+
+  async function pushUploadTemplate() {
+    if (!pendingUploadTemplate) return;
+    try {
+      const res = await fetch(`${BRIDGE_URL}/bridge/uploadtemplate`, {
+        method: "POST",
+        headers: bridgeHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify(pendingUploadTemplate)
+      });
+      if (res.ok) {
+        console.log("[Web2API Bridge] File upload request template pushed to server — browserless Enterprise attachments enabled");
+      }
+    } catch (e) {
+      console.warn("[Web2API Bridge] Failed to push upload template:", e);
+    }
+  }
+
+  function handleUploadMeta(data) {
+    try {
+      const body = typeof data.body === "string" ? data.body : "";
+      if (!body) return;
+      const templated = substituteUploadFields(body);
+      if (!templated) return;
+      pendingUploadTemplate = {
+        url: String(data.url || ""),
+        method: String(data.method || "POST"),
+        headers: data.headers || {},
+        body: templated,
+        tab: location.hostname
+      };
+      if (uploadTemplatePushTimer) clearTimeout(uploadTemplatePushTimer);
+      uploadTemplatePushTimer = setTimeout(() => {
+        uploadTemplatePushTimer = null;
+        pushUploadTemplate();
+      }, 3000);
+    } catch (e) {}
   }
 
   function handleReqMeta(data) {

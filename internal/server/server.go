@@ -103,6 +103,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /bridge/chatmode", a.handleBridgeChatMode)
 	mux.HandleFunc("POST /bridge/reqtemplate", a.handleBridgeReqTemplate)
 	mux.HandleFunc("GET /bridge/reqtemplate", a.handleBridgeReqTemplate)
+	mux.HandleFunc("POST /bridge/uploadtemplate", a.handleBridgeUploadTemplate)
+	mux.HandleFunc("GET /bridge/uploadtemplate", a.handleBridgeUploadTemplate)
 
 	handler := a.withAuthAndLogging(mux)
 	handler = a.withCORS(handler)

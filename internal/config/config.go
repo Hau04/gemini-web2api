@@ -51,6 +51,16 @@ type Config struct {
 	// DiscoveryEngineServerToken is the x-server-token header value for
 	// widgetStreamAssist (required to pass reCAPTCHA check).
 	DiscoveryEngineServerToken string `json:"discovery_engine_server_token"`
+	// DiscoveryEngineUploadEndpoint is the widgetAddContextFile URL used to
+	// attach files to a Gemini Enterprise session in direct cookie mode. When
+	// empty it is derived from discovery_engine_endpoint, and a request captured
+	// by the extension is preferred over both.
+	DiscoveryEngineUploadEndpoint string `json:"discovery_engine_upload_endpoint"`
+	// DiscoveryEngineSession is the (sanitized) session resource used for
+	// context-file uploads, e.g.
+	// "collections/default_collection/engines/my-engine/sessions/-". Empty means
+	// derive it from a captured request template.
+	DiscoveryEngineSession string `json:"discovery_engine_session"`
 }
 
 func Default() Config {
@@ -90,6 +100,8 @@ func Default() Config {
 		DiscoveryEngineEndpoint:    "",
 		DiscoveryEngineConfigID:    "",
 		DiscoveryEngineServerToken: "",
+		DiscoveryEngineUploadEndpoint: "",
+		DiscoveryEngineSession:        "",
 	}
 }
 
@@ -143,6 +155,8 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineEndpoint    *string   `json:"discovery_engine_endpoint"`
 		DiscoveryEngineConfigID    *string   `json:"discovery_engine_config_id"`
 		DiscoveryEngineServerToken *string   `json:"discovery_engine_server_token"`
+		DiscoveryEngineUploadEndpoint *string `json:"discovery_engine_upload_endpoint"`
+		DiscoveryEngineSession        *string `json:"discovery_engine_session"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -253,6 +267,12 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineServerToken != nil {
 		cfg.DiscoveryEngineServerToken = *aux.DiscoveryEngineServerToken
+	}
+	if aux.DiscoveryEngineUploadEndpoint != nil {
+		cfg.DiscoveryEngineUploadEndpoint = *aux.DiscoveryEngineUploadEndpoint
+	}
+	if aux.DiscoveryEngineSession != nil {
+		cfg.DiscoveryEngineSession = *aux.DiscoveryEngineSession
 	}
 
 	return cfg, nil

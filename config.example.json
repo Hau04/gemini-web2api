@@ -9,6 +9,11 @@
   "xsrf_token": null,
   "default_model": "gemini-3.6-flash",
   "tool_model": "",
+  "discovery_engine_endpoint": "",
+  "discovery_engine_config_id": "",
+  "discovery_engine_server_token": "",
+  "discovery_engine_upload_endpoint": "",
+  "discovery_engine_session": "",
   "api_keys": [
     "sk-gemini"
   ],

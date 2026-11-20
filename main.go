@@ -151,6 +151,15 @@ func main() {
 	if cfg.ToolModel != "" {
 		fmt.Printf("  Tool model:  %s (tool-enabled requests)\n", cfg.ToolModel)
 	}
+	if app.Gem.UsesDiscoveryEngine() {
+		attachments := "text-inline fallback only — attach one file in the Gemini Enterprise tab once, or set discovery_engine_upload_endpoint"
+		if app.Gem.HasDiscoveryUploadTemplate() {
+			attachments = "captured upload template (discovery_upload_template.json)"
+		} else if cfg.DiscoveryEngineUploadEndpoint != "" {
+			attachments = cfg.DiscoveryEngineUploadEndpoint
+		}
+		fmt.Printf("  Attachments: %s\n", attachments)
+	}
 	fmt.Println()
 
 	srv := &http.Server{
