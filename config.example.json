@@ -8,6 +8,7 @@
   "auth_user": null,
   "xsrf_token": null,
   "default_model": "gemini-3.6-flash",
+  "tool_model": "",
   "api_keys": [
     "sk-gemini"
   ],

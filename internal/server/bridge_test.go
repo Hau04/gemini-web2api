@@ -683,7 +683,9 @@ func TestBridgeOversizedToolResultSpillover(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected bridge request")
 	}
-	if len(got.Prompt) > 1400 {
+	// The inline prompt keeps the tool instructions but must never carry the
+	// ~4 KB code body; leave headroom for instruction wording growth.
+	if len(got.Prompt) > 1800 {
 		t.Errorf("expected compact prompt after spillover, got %d chars", len(got.Prompt))
 	}
 	if !strings.Contains(got.Prompt, "# Tool Use") {

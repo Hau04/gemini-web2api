@@ -33,13 +33,6 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		modelStr = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelStr, a.Cfg.DefaultModel)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
-		return
-	}
-	setModelHeaders(w, resolved)
-
 	inputRaw := req["input"]
 	instructions, _ := req["instructions"].(string)
 
@@ -113,6 +106,20 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	toolChoice := req["tool_choice"]
 	if toolChoice == nil {
 		toolChoice = "auto"
+	}
+	hasTools := len(reqTools) > 0
+	if choice, ok := toolChoice.(string); ok && choice == "none" {
+		hasTools = false
+	}
+
+	resolved, redirected, err := a.resolveRequestModel(modelStr, hasTools)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
+		return
+	}
+	setModelHeaders(w, resolved)
+	if redirected {
+		w.Header().Set("X-Tool-Model-Override", "true")
 	}
 
 	chatReq := models.OpenAIChatRequest{

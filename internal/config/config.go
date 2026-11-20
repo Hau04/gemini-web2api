@@ -16,6 +16,11 @@ type Config struct {
 	AuthUser                   string   `json:"auth_user"`
 	XSRFToken                  string   `json:"xsrf_token"`
 	DefaultModel               string   `json:"default_model"`
+	// ToolModel redirects tool-enabled requests to another upstream model so
+	// agent tool calls stay local (e.g. gemini-4-hydrogen, whose tool_call
+	// output WorkBuddy executes, instead of a model that prefers Gemini's
+	// built-in Deep Research / web tools). Empty disables the redirect.
+	ToolModel                  string   `json:"tool_model"`
 	LogRequests                bool     `json:"log_requests"`
 	CookieFile                 string   `json:"cookie_file"`
 	Proxy                      string   `json:"proxy"`
@@ -59,6 +64,7 @@ func Default() Config {
 		AuthUser:                   "",
 		XSRFToken:                  "",
 		DefaultModel:               "gemini-3.6-flash",
+		ToolModel:                  "",
 		LogRequests:                true,
 		CookieFile:                 "",
 		Proxy:                      "",
@@ -111,6 +117,7 @@ func Load(path string) (Config, error) {
 		AuthUser          *string   `json:"auth_user"`
 		XSRFToken         *string   `json:"xsrf_token"`
 		DefaultModel      *string   `json:"default_model"`
+		ToolModel         *string   `json:"tool_model"`
 		LogRequests       *bool     `json:"log_requests"`
 		CookieFile        *string   `json:"cookie_file"`
 		Proxy             *string   `json:"proxy"`
@@ -168,6 +175,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DefaultModel != nil {
 		cfg.DefaultModel = *aux.DefaultModel
+	}
+	if aux.ToolModel != nil {
+		cfg.ToolModel = *aux.ToolModel
 	}
 	if aux.LogRequests != nil {
 		cfg.LogRequests = *aux.LogRequests

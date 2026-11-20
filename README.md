@@ -426,6 +426,36 @@ Configure WorkBuddy via `~/.workbuddy/models.json` (or `%USERPROFILE%\.workbuddy
 ]
 ```
 
+#### Making Argon behave like Hydrogen for agent tool calls
+
+Some Gemini 4 models (notably **Argon**) prefer Gemini's built-in **Deep Research / web tools** and ignore the injected `# Tool Use` prompt, so WorkBuddy never receives a `tool_call` to execute locally. **Hydrogen** reliably emits the expected blocks:
+
+````text
+```tool_call
+{"name": "Bash", "arguments": {"command": "gh repo clone ..."}}
+```
+````
+
+If you want to keep `gemini-4-argon` configured in WorkBuddy but have tool-enabled turns actually run on Hydrogen, set `tool_model` in `config.json`:
+
+```json
+{
+  "tool_model": "gemini-4-hydrogen"
+}
+```
+
+Only requests that declare tools (and do not use `tool_choice: "none"`) are redirected; normal chat requests still use the requested model. Per-request suffixes such as `@new`, `@continue` and `@think=N` are preserved. A response header `X-Tool-Model-Override: true` and a server log line show when the override fired; `X-Resolved-Model` reports the model actually used.
+
+The setting can also be applied without editing the file:
+
+```bash
+./gemini-web2api --tool-model gemini-4-hydrogen
+# or
+GEMINI_TOOL_MODEL=gemini-4-hydrogen ./gemini-web2api
+```
+
+The injected tool prompt additionally tells the model that local files, shell commands, GitHub repos and email must be handled by emitting `tool_call` blocks, and explicitly forbids answering them with Gemini's built-in web search or Deep Research.
+
 ## Configuration
 
 Create `config.json` in the same directory:
@@ -440,6 +470,8 @@ Create `config.json` in the same directory:
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
   "auth_user": null,
   "xsrf_token": null,
+  "default_model": "gemini-3.6-flash",
+  "tool_model": "",
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,

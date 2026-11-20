@@ -102,15 +102,22 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		modelStr = a.Cfg.DefaultModel
 	}
 
-	resolved, err := models.Resolve(modelStr, a.Cfg.DefaultModel)
+	if req.ToolChoice == nil {
+		req.ToolChoice = "auto"
+	}
+	hasTools := len(req.Tools) > 0
+	if choice, ok := req.ToolChoice.(string); ok && choice == "none" {
+		hasTools = false
+	}
+
+	resolved, redirected, err := a.resolveRequestModel(modelStr, hasTools)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": err.Error()}})
 		return
 	}
 	setModelHeaders(w, resolved)
-
-	if req.ToolChoice == nil {
-		req.ToolChoice = "auto"
+	if redirected {
+		w.Header().Set("X-Tool-Model-Override", "true")
 	}
 
 	prompt, images, err := format.MessagesToPrompt(req)

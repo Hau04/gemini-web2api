@@ -410,6 +410,36 @@ https://gemini.google.com/u/1/app/...
 ]
 ```
 
+#### 让 Argon 在代理工具调用时表现得像 Hydrogen
+
+部分 Gemini 4 模型（尤其是 **Argon**）会优先使用 Gemini 内置的 **Deep Research / 网页工具**，忽略注入的 `# Tool Use` 提示，导致 WorkBuddy 收不到可本地执行的 `tool_call`。**Hydrogen** 则能稳定输出预期格式：
+
+````text
+```tool_call
+{"name": "Bash", "arguments": {"command": "gh repo clone ..."}}
+```
+````
+
+如果希望在 WorkBuddy 中保留 `gemini-4-argon` 模型 ID，但让带工具的回合实际走 Hydrogen，可在 `config.json` 中设置：
+
+```json
+{
+  "tool_model": "gemini-4-hydrogen"
+}
+```
+
+只有声明了工具（且未设置 `tool_choice: "none"`）的请求会被重定向，普通聊天请求仍使用原模型。请求后缀 `@new`、`@continue`、`@think=N` 会被保留。触发重定向时会返回 `X-Tool-Model-Override: true` 响应头并打印日志；`X-Resolved-Model` 显示实际使用的模型。
+
+也可以不修改配置文件，直接用启动参数或环境变量：
+
+```bash
+./gemini-web2api --tool-model gemini-4-hydrogen
+# 或
+GEMINI_TOOL_MODEL=gemini-4-hydrogen ./gemini-web2api
+```
+
+工具提示中也会明确要求：本地文件、shell 命令、GitHub 仓库和邮件必须通过输出 `tool_call` 块交给本地客户端执行，禁止用 Gemini 内置的网页搜索 / Deep Research 来回答。
+
 ## 配置
 
 创造`config.json`在同一目录中：
@@ -424,6 +454,8 @@ https://gemini.google.com/u/1/app/...
   "gemini_bl": "boq_assistant-bard-web-server_20260716.08_p0",
   "auth_user": null,
   "xsrf_token": null,
+  "default_model": "gemini-3.6-flash",
+  "tool_model": "",
   "api_keys": ["sk-your-key"],
   "cookie_file": null,
   "proxy": null,

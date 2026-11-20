@@ -40,6 +40,7 @@ func main() {
 	proxyFlag := flag.String("proxy", "", "HTTP proxy URL")
 	impersonateFlag := flag.String("impersonate", "", "TLS impersonation profile")
 	baseURLFlag := flag.String("base-url", "", "Upstream Gemini base URL (e.g. https://gemini.google.com or https://vertexaisearch.cloud.google.com)")
+	toolModelFlag := flag.String("tool-model", "", "Model used for tool-enabled requests (e.g. gemini-4-hydrogen) so agent tool calls stay local")
 	bridgeCooldownFlag := flag.Int("bridge-cooldown", -1, "Minimum milliseconds between consecutive bridge requests (-1 uses config default)")
 	versionFlag := flag.Bool("version", false, "Show version")
 	flag.Parse()
@@ -76,6 +77,11 @@ func main() {
 	}
 	if *baseURLFlag != "" {
 		cfg.BaseURL = *baseURLFlag
+	}
+	if *toolModelFlag != "" {
+		cfg.ToolModel = *toolModelFlag
+	} else if envToolModel := strings.TrimSpace(os.Getenv("GEMINI_TOOL_MODEL")); envToolModel != "" {
+		cfg.ToolModel = envToolModel
 	}
 	if *bridgeCooldownFlag >= 0 {
 		cfg.BridgeMinIntervalMs = *bridgeCooldownFlag
@@ -142,6 +148,9 @@ func main() {
 	fmt.Printf("  Proxy:       %s\n", proxyStatus)
 	fmt.Printf("  Impersonate: %s\n", impersonateStatus)
 	fmt.Printf("  Temporary:   %s\n", temporaryStatus)
+	if cfg.ToolModel != "" {
+		fmt.Printf("  Tool model:  %s (tool-enabled requests)\n", cfg.ToolModel)
+	}
 	fmt.Println()
 
 	srv := &http.Server{
