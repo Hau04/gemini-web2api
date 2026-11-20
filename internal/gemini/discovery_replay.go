@@ -553,7 +553,7 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 // streamAssist endpoint URL in the server config.
 func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, session string, requestedModel string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, requestedModel, nil, func(delta string) error {
+	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, ConversationInfo{}, requestedModel, nil, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -563,7 +563,7 @@ func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, ses
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, requestedModel string, media func(string), emit func(string) error) error {
+func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, conv ConversationInfo, requestedModel string, media func(string), emit func(string) error) error {
 	configID := strings.TrimSpace(c.enterpriseConfigID(nil))
 	if configID == "" {
 		return &UpstreamError{
@@ -600,10 +600,19 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		}
 	}
 
-	// One conversation per process: reuse a pinned session, otherwise create one.
-	// Cookie-authenticated requests need this just as much as bearer ones —
-	// without it the tenant answers each message in a brand-new conversation.
-	session = c.reuseOrCreateEnterpriseSession(session)
+	// One conversation per client chat: a pinned session wins, otherwise the
+	// session owned by this conversation is reused (or a fresh one is opened when
+	// the client started a new chat). Cookie-authenticated requests need this just
+	// as much as bearer ones — without it the tenant answers each message in a
+	// brand-new conversation.
+	convOpts := ModelOptions{
+		ConversationKey:        conv.Key,
+		ConversationHasHistory: conv.HasHistory,
+	}
+	session = c.reuseOrCreateEnterpriseSession(session, convOpts)
+	if session != "" {
+		c.recordEnterpriseSession(session, convOpts)
+	}
 
 	fileIDsJSON := "[]"
 	if len(fileIDs) > 0 {

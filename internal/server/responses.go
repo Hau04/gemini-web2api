@@ -163,12 +163,15 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		prompt += format.MediaGenerationInstruction(clientMediaTools)
 	}
 
+	convKey, convHasHistory := format.ConversationID(chatReq.Messages)
 	gemOpt := gemini.ModelOptions{
-		ModelName:   resolved.Name,
-		ModelID:     resolved.Mode,
-		ThinkMode:   resolved.Think,
-		ModelHeader: resolved.Header,
-		Extra:       resolved.Extra,
+		ModelName:              resolved.Name,
+		ModelID:                resolved.Mode,
+		ThinkMode:              resolved.Think,
+		ModelHeader:            resolved.Header,
+		Extra:                  resolved.Extra,
+		ConversationKey:        convKey,
+		ConversationHasHistory: convHasHistory,
 	}
 	var mediaRaw strings.Builder
 	if len(clientMediaTools) > 0 {

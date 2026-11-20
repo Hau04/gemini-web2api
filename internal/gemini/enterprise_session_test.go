@@ -110,7 +110,7 @@ func TestCookieOnlyStreamAssistReusesOneSession(t *testing.T) {
 	c := sessionTestClient(t, srv, rec, nil)
 
 	for i := 0; i < 3; i++ {
-		if err := c.generateViaDiscoveryDirectStream("hello", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
+		if err := c.generateViaDiscoveryDirectStream("hello", nil, "", ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 			t.Fatalf("direct stream %d failed: %v", i, err)
 		}
 	}
@@ -142,7 +142,7 @@ func TestPlaceholderSessionIsReplaced(t *testing.T) {
 	c := sessionTestClient(t, srv, rec, nil)
 
 	placeholder := "collections/c/engines/e/sessions/-"
-	if err := c.generateViaDiscoveryDirectStream("hi", nil, placeholder, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("hi", nil, placeholder, ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("direct stream failed: %v", err)
 	}
 	if rec.creates != 1 {
@@ -160,7 +160,7 @@ func TestPinnedSessionIsUsedVerbatim(t *testing.T) {
 	c := sessionTestClient(t, srv, rec, nil)
 
 	pinned := "collections/c/engines/e/sessions/pinned"
-	if err := c.generateViaDiscoveryDirectStream("hi", nil, pinned, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("hi", nil, pinned, ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("direct stream failed: %v", err)
 	}
 	if rec.creates != 0 {
@@ -179,7 +179,7 @@ func TestSessionCreationFailureIsReported(t *testing.T) {
 	rec.createErr = http.StatusForbidden
 	c := sessionTestClient(t, srv, rec, nil)
 
-	if err := c.generateViaDiscoveryDirectStream("hi", nil, "", "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
+	if err := c.generateViaDiscoveryDirectStream("hi", nil, "", ConversationInfo{}, "gemini-4-hydrogen", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("the request should still run without a session: %v", err)
 	}
 	if !strings.Contains(rec.logText(), "new conversation") {

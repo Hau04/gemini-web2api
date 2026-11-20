@@ -92,13 +92,16 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 	a.Logf("Google API: model=%s stream=%t tools=%t prompt_len=%d images=%d files=%d", resolved.Name, stream, hasTools, len(prompt), len(fileRefs), len(rawFiles))
 
+	convKey, convHasHistory := format.GoogleConversationID(req)
 	gemOpt := gemini.ModelOptions{
-		ModelName:   resolved.Name,
-		ModelID:     resolved.Mode,
-		ThinkMode:   resolved.Think,
-		ModelHeader: resolved.Header,
-		Extra:       resolved.Extra,
-		Files:       rawFiles,
+		ModelName:              resolved.Name,
+		ModelID:                resolved.Mode,
+		ThinkMode:              resolved.Think,
+		ModelHeader:            resolved.Header,
+		Extra:                  resolved.Extra,
+		Files:                  rawFiles,
+		ConversationKey:        convKey,
+		ConversationHasHistory: convHasHistory,
 	}
 	var mediaRaw strings.Builder
 	if len(clientMediaTools) > 0 {

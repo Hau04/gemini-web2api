@@ -148,12 +148,15 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		prompt += format.MediaGenerationInstruction(clientMediaTools)
 	}
 
+	convKey, convHasHistory := format.ConversationID(req.Messages)
 	gemOpt := gemini.ModelOptions{
-		ModelName:   resolved.Name,
-		ModelID:     resolved.Mode,
-		ThinkMode:   resolved.Think,
-		ModelHeader: resolved.Header,
-		Extra:       resolved.Extra,
+		ModelName:              resolved.Name,
+		ModelID:                resolved.Mode,
+		ThinkMode:              resolved.Think,
+		ModelHeader:            resolved.Header,
+		Extra:                  resolved.Extra,
+		ConversationKey:        convKey,
+		ConversationHasHistory: convHasHistory,
 	}
 
 	// Media only exists in the raw payload, and only a request that asked for

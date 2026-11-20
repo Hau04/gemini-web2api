@@ -414,7 +414,19 @@ Enterprise: continuing in assistant session 8f1c (reused for every turn of this 
 Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
 ```
 
-每个进程通过 `widgetCreateSession` 创建一个会话并被所有请求复用，所以一整天的消息都落在同一个 Gemini 会话里，而且**所有**客户端聊天共享它。重启、或 cookie/JWT 重置会开新会话 —— 上下文不会丢（客户端会重发历史），但租户那边的线程是新的（昨天的附件 fileId 也已经失效）。若租户拒绝创建会话，日志会明确说出来：
+**每个客户端聊天一个会话。** 请求里没有会话 id，所以代理用「第一条用户消息」推导出聊天身份（继续同一个聊天时它不变，新开聊天时它不同），并按聊天维护会话：
+
+- 继续同一个聊天 → 同一个会话，记忆连续；
+- **在客户端里新开聊天 → 全新的会话**，不会继承上一个线程的记忆（多轮对话之后突然来一条单条消息，正是这个信号）；
+- 回到更早的聊天 → 重新用回它自己的会话，而不是最近那个；
+- 一直只发单条消息、无历史的客户端 → 保持同一个会话，因为无法把它的消息和「继续」区分开。
+
+```
+Enterprise: continuing in assistant session 8f1c for conversation 4c1a9ba2
+Enterprise: switching back to the session owned by conversation 4c1a9ba2
+```
+
+以前是每个进程一个会话（`widgetCreateSession`），所有聊天共享它。重启、或 cookie/JWT 重置会开新会话 —— 上下文不会丢（客户端会重发历史），但租户那边的线程是新的（昨天的附件 fileId 也已经失效）。若租户拒绝创建会话，日志会明确说出来：
 
 ```
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
