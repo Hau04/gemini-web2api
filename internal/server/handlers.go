@@ -32,6 +32,8 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"parallel_tool_calls":   true,
 			"prevent_deep_research": a.Cfg.PreventDeepResearch,
 			"model_probe":           true,
+			"image_generation":      true,
+			"video_generation":      true,
 		},
 		"status":  "ok",
 		"version": a.Version,

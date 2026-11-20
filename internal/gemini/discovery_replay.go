@@ -415,7 +415,7 @@ func replayAuthCandidates(tpl *DiscoveryTemplate, sapisid string) []string {
 // prompt and returns the assembled answer text.
 func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session string, requestedModel string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryStream(prompt, fileIDs, session, requestedModel, func(delta string) error {
+	err := c.generateViaDiscoveryStream(prompt, fileIDs, session, requestedModel, nil, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -425,7 +425,7 @@ func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session s
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, requestedModel string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, requestedModel string, media func(string), emit func(string) error) error {
 	tpl := LoadDiscoveryTemplate(c.Cfg.CookieFile)
 	if tpl == nil {
 		return &UpstreamError{
@@ -514,6 +514,9 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				if media != nil {
+					media(string(buf[:n]))
+				}
 				parser.feed(string(buf[:n]))
 			}
 			if rerr != nil {
@@ -550,7 +553,7 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 // streamAssist endpoint URL in the server config.
 func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, session string, requestedModel string) (string, error) {
 	var sb strings.Builder
-	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, requestedModel, func(delta string) error {
+	err := c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, requestedModel, nil, func(delta string) error {
 		sb.WriteString(delta)
 		return nil
 	})
@@ -560,7 +563,7 @@ func (c *Client) generateViaDiscoveryDirect(prompt string, fileIDs []string, ses
 	return sb.String(), nil
 }
 
-func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, requestedModel string, emit func(string) error) error {
+func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []string, session string, requestedModel string, media func(string), emit func(string) error) error {
 	configID := strings.TrimSpace(c.enterpriseConfigID(nil))
 	if configID == "" {
 		return &UpstreamError{
@@ -696,6 +699,9 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			if n > 0 {
 				if rawSniff.Len() < 4096 {
 					rawSniff.Write(buf[:n])
+				}
+				if media != nil {
+					media(string(buf[:n]))
 				}
 				parser.feed(string(buf[:n]))
 			}
