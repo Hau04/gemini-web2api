@@ -246,12 +246,22 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	// prompts. Normal-sized prompts go through direct cookie mode (prompt inlined).
 	bridgeAlive := a.Bridge != nil && a.Bridge.IsConnected()
 
-	spilloverBridge := a.keepBridgeForSpillover(prompt, bridgeAlive)
-	if a.cookiesReady() && !spilloverBridge {
+	// A model direct mode cannot name must go through the bridge: its picker is
+	// the only transport that can select it (Enterprise tenant model ids are not
+	// always known). Everything else prefers direct mode as before.
+	modelNeedsBridge := bridgeAlive && !a.directCanHonourModel(resolved)
+	switch {
+	case modelNeedsBridge:
+		a.Logf("Keeping the browser bridge: direct mode has no tenant model id for %q, so only the tab's model picker can select it (map discovery_engine_models to make direct mode honour it)", resolved.Name)
+		w.Header().Set("X-Model-Route", "bridge-picker")
+	case a.cookiesReady() && !a.keepBridgeForSpillover(prompt, bridgeAlive):
 		bridgeAlive = false
 	}
+	if !bridgeAlive {
+		a.warnModelDropped(resolved)
+	}
 
-	if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() {
+	if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() && !modelNeedsBridge {
 		a.Logf("Browser bridge degraded after recent timeout — routing via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
 		bridgeAlive = false
 	}
