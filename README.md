@@ -477,6 +477,20 @@ How it works:
 - `response_format: "b64_json"` inlines the bytes; that only fetches from Google asset hosts (a URL scraped out of model output never becomes an arbitrary server-side request).
 - Image/video model names (`nano-banana`, `veo-3`, …) are not chat models in the registry, so an unknown name is forwarded upstream with the default transport settings and resolved by the tenant's own model-id rules (`/v1/model-probe` still works for those).
 
+#### If the client has its own image tool (WorkBuddy credits)
+
+WorkBuddy ships `generate_image` / `create_video`-style tools. When the model emits a `tool_call` for one of those, the **client** renders the media and spends its own credits — Gemini never gets to render it.
+
+So the proxy removes those tools from the request before the model ever sees them, and tells the model to render with its own media tool instead:
+
+- names matched (`generate_image`, `image_generation`, `create_image`, `text_to_image`, `nano_banana`, `imagen`, `generate_video`, `create_video`, `text_to_video`, `veo`, plus camelCase/`-`/`_` variants and MCP-namespaced forms)
+- response header `X-Media-Tools-Intercepted: generate_image` and log line `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
+- the rendered asset comes back appended to the reply: `![generated image](data:image/png;base64,…)` for inline bytes (capped at 8 MB) or `![generated image](https://…)` for links, `[generated video](…)` for video
+
+Everything else keeps working: ordinary tools (files, shell, connectors) are untouched, a `tool_choice` that named a removed tool falls back to `auto`, and requests that offered no media tool capture nothing at all.
+
+If the log shows **no** `Client offered its own media tool(s)` line for an image prompt, the client is generating it without calling this API at all — that switch lives in WorkBuddy's settings, not here.
+
 ### 4. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:

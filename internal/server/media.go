@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ikhsan3adi/gemini-web2api/internal/format"
 	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
@@ -325,4 +326,69 @@ func summarizeMediaText(text string) string {
 		trimmed = trimmed[:600] + "…"
 	}
 	return trimmed
+}
+
+// maxInlineChatMediaChars caps a base64 asset inlined into chat text. A chat reply
+// is not the right place for a 40 MB blob; the URL form is used when available.
+const maxInlineChatMediaChars = 8 << 20
+
+// interceptClientMediaTools removes the client's own image/video generators from
+// a chat request. Left in place they would be executed by the client (and billed
+// there) instead of being rendered by the signed-in Gemini account.
+func interceptClientMediaTools(req models.OpenAIChatRequest) (models.OpenAIChatRequest, []string) {
+	kept, removed := format.SplitMediaGenerationTools(req.Tools)
+	if len(removed) == 0 {
+		return req, nil
+	}
+	req.Tools = kept
+
+	// A tool_choice naming a removed tool would force a call that no longer
+	// exists, so fall back to automatic choice (other tools may remain).
+	if name := format.ToolChoiceName(req.ToolChoice); name != "" {
+		for _, gone := range removed {
+			if strings.EqualFold(name, gone) {
+				req.ToolChoice = "auto"
+				break
+			}
+		}
+	}
+	if len(kept) == 0 {
+		if choice, ok := req.ToolChoice.(string); ok && strings.EqualFold(choice, "required") {
+			req.ToolChoice = "none"
+		}
+	}
+	return req, removed
+}
+
+// chatMediaSuffix turns media found in a captured upstream payload into markdown
+// the chat client can render. Empty when the payload carried no media.
+func chatMediaSuffix(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	return mediaChatMarkdown(gemini.ExtractMedia(raw))
+}
+
+// mediaChatMarkdown renders assets as markdown images/links. Inline bytes become
+// a data: URI (bounded), so the client never has to fetch an authenticated URL.
+func mediaChatMarkdown(assets []gemini.MediaAsset) string {
+	var b strings.Builder
+	for _, asset := range assets {
+		src := asset.URL
+		if src == "" && asset.DataB64 != "" {
+			if len(asset.DataB64) > maxInlineChatMediaChars {
+				continue
+			}
+			src = "data:" + asset.MIME + ";base64," + asset.DataB64
+		}
+		if src == "" {
+			continue
+		}
+		if asset.Kind == "video" {
+			b.WriteString("\n\n[generated video](" + src + ")")
+			continue
+		}
+		b.WriteString("\n\n![generated image](" + src + ")")
+	}
+	return b.String()
 }

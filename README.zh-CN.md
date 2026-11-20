@@ -469,6 +469,20 @@ curl http://localhost:8081/v1/videos/generations \
 - `response_format: "b64_json"` 会把字节内联返回；只会从 Google 资源域名下载（模型输出里扒出来的 URL 不会被当成任意服务器端请求）。
 - 图片/视频模型名（`nano-banana`、`veo-3` …）不在聊天模型注册表里，未知名字会带着默认传输参数直接发给上游，由租户自己的模型 id 规则裁定（这些名字同样可用 `/v1/model-probe`）。
 
+#### 客户端自带图片工具时（WorkBuddy 扣积分问题）
+
+WorkBuddy 自带 `generate_image` / `create_video` 这类工具。模型一旦为它们输出 `tool_call`，就是**客户端**在出图并扣自己的积分 —— Gemini 根本没机会画。
+
+所以代理会在模型看到之前把这些工具摘掉，并告诉模型用自己的媒体工具出图：
+
+- 匹配名单：`generate_image`、`image_generation`、`create_image`、`text_to_image`、`nano_banana`、`imagen`、`generate_video`、`create_video`、`text_to_video`、`veo`，以及 camelCase / `-` / `_` 变体和 MCP 命名空间形式
+- 响应头 `X-Media-Tools-Intercepted: generate_image`，日志 `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
+- 生成结果拼在回复末尾：内联字节为 `![generated image](data:image/png;base64,…)`（上限 8 MB），链接为 `![generated image](https://…)`，视频为 `[generated video](…)`
+
+其他行为不受影响：普通工具（文件、shell、连接器）保持可用；`tool_choice` 指向被摘掉的工具时回落到 `auto`；没有提供媒体工具的请求完全不做任何捕获。
+
+若日志里**没有**出现 `Client offered its own media tool(s)`，说明客户端根本没调用本 API 就自己出图了 —— 那个开关在 WorkBuddy 的设置里，不在这里。
+
 ### 4. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
