@@ -40,6 +40,17 @@ func (a *App) buildBridgeStatusPayload() map[string]any {
 		"chat_mode":     chatMode,
 		"cookies_ready": a.cookiesReady(),
 	}
+	a.modelStateMu.Lock()
+	if a.modelState.seen {
+		payload["model_selection"] = map[string]any{
+			"requested": a.modelState.Requested,
+			"applied":   a.modelState.Applied,
+			"ok":        a.modelState.OK,
+			"tab":       a.modelState.Tab,
+			"at":        a.modelState.At,
+		}
+	}
+	a.modelStateMu.Unlock()
 	lastSync, authErr, authErrAt := a.CookieSync.snapshot()
 	if a.Gem != nil {
 		payload["configured_base_url"] = a.Gem.Cfg.BaseURL
@@ -378,5 +389,48 @@ func (a *App) handleBridgeUploadTemplate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	a.Logf("Captured Gemini Enterprise context-file upload template from browser tab %q (%s, %d bytes) — browserless attachments ready", payload.Tab, tpl.URL, len(tpl.Body))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// bridgeModelState is what the extension last reported about model switching in
+// the tab. It matters because a bridge turn is answered by whatever the tab has
+// selected: if the requested model is missing from the picker, the answer comes
+// from the tab's current model (usually Auto) with no other signal.
+type bridgeModelState struct {
+	Requested string `json:"requested"`
+	Applied   string `json:"applied,omitempty"`
+	OK        bool   `json:"ok"`
+	Tab       string `json:"tab,omitempty"`
+	At        int64  `json:"at,omitempty"`
+	seen      bool
+}
+
+// handleBridgeModelState records the extension's model-selection outcome and
+// warns loudly when the requested model could not be selected, so "I picked
+// Hydrogen but the reply says Auto" is visible in the log and in /bridge/status.
+func (a *App) handleBridgeModelState(w http.ResponseWriter, r *http.Request) {
+	var payload bridgeModelState
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	a.modelStateMu.Lock()
+	previous := a.modelState
+	payload.seen = true
+	a.modelState = payload
+	a.modelStateMu.Unlock()
+
+	if !payload.OK {
+		key := "modelstate:" + payload.Requested + ":" + payload.Applied
+		if _, seen := modelWarnSeen.LoadOrStore(key, true); !seen {
+			if a.Logf != nil {
+				a.Logf("MODEL SELECTION WARNING: the extension could not select %q in the tab (picker currently shows %q) — "+
+					"this turn and later turns are answered by whatever the tab has open, so the model you chose in your client is ignored. "+
+					"Add the alias to discovery_engine_models (Enterprise) or pick a model the picker actually offers.",
+					payload.Requested, payload.Applied)
+			}
+		}
+	} else if a.Logf != nil && (!previous.seen || previous.Applied != payload.Applied || previous.Requested != payload.Requested) {
+		a.Logf("Tab model selection confirmed: requested %q -> picker shows %q", payload.Requested, payload.Applied)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
