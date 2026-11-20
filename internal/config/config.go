@@ -86,6 +86,11 @@ type Config struct {
 	// DiscoveryEngineDefaultModelID is used for requests whose model has no
 	// mapping entry. Empty leaves the tenant default (its own "auto").
 	DiscoveryEngineDefaultModelID string `json:"discovery_engine_default_model_id"`
+	// DiscoveryEngineProbeModels asks the tenant once per alias whether it accepts
+	// that alias as a model id and caches the answer. It is how a tenant id gets
+	// discovered automatically instead of sending nothing and being answered by
+	// the tenant's auto/default model.
+	DiscoveryEngineProbeModels bool `json:"discovery_engine_probe_models"`
 	// EnterpriseAutoAttachLocalFiles reads files the latest user message
 	// references by path and attaches them as context files instead of letting
 	// their content be re-inlined on every turn (the usual rate-limit cause for
@@ -145,6 +150,7 @@ func Default() Config {
 		DiscoveryEngineLocation:        "",
 		DiscoveryEngineModels:          map[string]string{},
 		DiscoveryEngineDefaultModelID:  "",
+		DiscoveryEngineProbeModels:     true,
 		EnterpriseAutoAttachLocalFiles: true,
 		EnterpriseAutoAttachMinBytes:   0,
 		EnterpriseAttachLargePrompt:    true,
@@ -209,6 +215,7 @@ func Load(path string) (Config, error) {
 		DiscoveryEngineLocation        *string           `json:"discovery_engine_location"`
 		DiscoveryEngineModels          map[string]string `json:"discovery_engine_models"`
 		DiscoveryEngineDefaultModelID  *string           `json:"discovery_engine_default_model_id"`
+		DiscoveryEngineProbeModels     *bool             `json:"discovery_engine_probe_models"`
 		EnterpriseAutoAttachLocalFiles *bool             `json:"enterprise_auto_attach_local_files"`
 		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
 		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
@@ -346,6 +353,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineDefaultModelID != nil {
 		cfg.DiscoveryEngineDefaultModelID = *aux.DiscoveryEngineDefaultModelID
+	}
+	if aux.DiscoveryEngineProbeModels != nil {
+		cfg.DiscoveryEngineProbeModels = *aux.DiscoveryEngineProbeModels
 	}
 	if aux.EnterpriseAutoAttachLocalFiles != nil {
 		cfg.EnterpriseAutoAttachLocalFiles = *aux.EnterpriseAutoAttachLocalFiles

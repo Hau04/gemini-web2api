@@ -360,12 +360,28 @@ func (c *Client) ensureEnterpriseSession(configID string) (string, error) {
 	}
 	c.enterpriseAuthMu.Unlock()
 
-	token, err := c.enterpriseBearer()
-	if err != nil {
-		return "", err
-	}
+	token, tokenErr := c.enterpriseBearer()
+	usingBearer := tokenErr == nil
 	location := c.enterpriseWidgetLocation()
-	endpoint := contentWidgetEndpoint(location, "widgetCreateSession")
+	endpoint := ""
+	if usingBearer {
+		endpoint = contentWidgetEndpoint(location, "widgetCreateSession")
+	} else {
+		// Cookie-authenticated widget calls can create a session too: the app's
+		// own request carries nothing but cookies and the ?key= parameter.
+		for _, base := range []string{c.Cfg.DiscoveryEngineEndpoint, c.Cfg.DiscoveryEngineUploadEndpoint} {
+			if strings.TrimSpace(base) == "" {
+				continue
+			}
+			if swapped := swapWidgetMethod(base, "widgetCreateSession"); swapped != "" {
+				endpoint = swapped
+				break
+			}
+		}
+		if endpoint == "" {
+			return "", tokenErr
+		}
+	}
 	payload := map[string]any{
 		"configId":         configID,
 		"additionalParams": widgetAdditionalParams(),
@@ -379,7 +395,11 @@ func (c *Client) ensureEnterpriseSession(configID string) (string, error) {
 	if reqErr != nil {
 		return "", reqErr
 	}
-	c.applyEnterpriseWidgetHeaders(req, token)
+	if usingBearer {
+		c.applyEnterpriseWidgetHeaders(req, token)
+	} else {
+		req.Header = c.discoveryHeaders(endpoint)
+	}
 
 	resp, doErr := c.HTTP.Do(req)
 	if doErr != nil {
@@ -395,15 +415,10 @@ func (c *Client) ensureEnterpriseSession(configID string) (string, error) {
 				resp.StatusCode, configID, summarizeBody(raw)),
 		}
 	}
-	var parsed struct {
-		Session struct {
-			Name string `json:"name"`
-		} `json:"session"`
-	}
-	if err := json.Unmarshal(raw, &parsed); err != nil || strings.TrimSpace(parsed.Session.Name) == "" {
+	session := parseCreateSessionName(raw)
+	if session == "" {
 		return "", fmt.Errorf("widgetCreateSession returned no session name: %s", summarizeBody(raw))
 	}
-	session := strings.TrimSpace(parsed.Session.Name)
 	c.enterpriseAuthMu.Lock()
 	c.enterpriseSession = session
 	c.enterpriseAuthMu.Unlock()
@@ -446,6 +461,7 @@ const (
 	ModelIDSourceMapping       = "mapping"            // discovery_engine_models hit
 	ModelIDSourcePassthrough   = "passthrough"        // caller already used a tenant id
 	ModelIDSourceConfigured    = "configured-default" // discovery_engine_default_model_id
+	ModelIDSourceLearned       = "learned"            // verified by a probe, cached per alias
 	ModelIDSourceCaptured      = "captured"           // learned from the tab's captured request
 	ModelIDSourceTenantDefault = "tenant-default"     // nothing selected: tenant decides
 )
@@ -463,6 +479,11 @@ func (c *Client) EnterpriseModelIDSource(requested string) (string, string) {
 	}
 	if def := strings.TrimSpace(c.Cfg.DiscoveryEngineDefaultModelID); def != "" {
 		return def, ModelIDSourceConfigured
+	}
+	// A probe-verified id beats the generic captured id: it is known to be
+	// accepted for THIS alias and selectable in direct mode.
+	if learned := c.learnedModelID(name); learned != "" {
+		return learned, ModelIDSourceLearned
 	}
 	// The tab's own captured streamAssist request carries a modelId the tenant
 	// accepts. Using it is strictly better than sending nothing: it is a real
@@ -551,4 +572,40 @@ func injectTemplateModelID(body, modelID string) string {
 	}
 	insertAt := idx + len(needle)
 	return body[:insertAt] + `"assistGenerationConfig":{"modelId":` + string(idJSON) + "}," + body[insertAt:]
+}
+
+// parseCreateSessionName extracts the session resource from a widgetCreateSession
+// response. The widget wraps it as createSessionResponse.session.name, while some
+// tenants answer with a bare session object or a plain string.
+func parseCreateSessionName(raw []byte) string {
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	nameFrom := func(v any) string {
+		switch t := v.(type) {
+		case string:
+			return strings.TrimSpace(t)
+		case map[string]any:
+			if name, ok := t["name"].(string); ok {
+				return strings.TrimSpace(name)
+			}
+		}
+		return ""
+	}
+	if name := nameFrom(payload["session"]); name != "" {
+		return name
+	}
+	if inner, ok := payload["createSessionResponse"].(map[string]any); ok {
+		if name := nameFrom(inner["session"]); name != "" {
+			return name
+		}
+		if name := nameFrom(inner["sessionName"]); name != "" {
+			return name
+		}
+	}
+	if name := nameFrom(payload["sessionName"]); name != "" {
+		return name
+	}
+	return ""
 }

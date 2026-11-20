@@ -255,6 +255,30 @@ send one message in the Gemini Enterprise tab with the extension enabled …, or
 
 `source=captured` 的含义是「已经在发送租户认可的模型，但那是标签页当时选中的那个」；想要固定某个模型就配置映射。之前日志打印 `model="gemini-4-hydrogen"` 会让人以为别名被发送了 —— 实际上从来没有。
 
+### 自动发现租户模型 id（不用翻 DevTools）
+
+直连模式要报出模型，就必须知道租户 id。现在服务器不再靠猜，而是**直接问租户**：发一个最小的 `widgetStreamAssist`，把请求的别名当作 `assistGenerationConfig.modelId` 发过去。被接受就验证成功、按别名缓存到 `enterprise_models.json`，之后一直使用：
+
+```
+Gemini Enterprise: tenant accepted model id "gemini-4-hydrogen" for "gemini-4-hydrogen" — cached in enterprise_models.json
+```
+
+被拒绝则本次进程内不再重试该别名，请求继续（不带 modelId，走租户默认）而不是报错：
+
+```
+Gemini Enterprise: tenant does not accept "gemini-4-neon" as a model id (HTTP 400) … — falling back to the tenant's auto/default model
+```
+
+开关是 `discovery_engine_probe_models`（默认 `true`）；也可以手动探测并看到上游原话：
+
+```bash
+curl -X POST localhost:8081/v1/model-probe \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"gemini-4-hydrogen","candidate":"gemini-4-hydrogen"}'
+```
+
+逐个换候选 id（如 `"candidate":"gemini-2.5-flash"`）直到被接受，每次成功都会被记住。解析顺序：`discovery_engine_models` → 直接使用租户 id → `discovery_engine_default_model_id` → **learned（探测验证）** → 标签页捕获的 id → 租户默认。
+
 ### 让下拉框真正生效的路由规则
 
 企业版里只有两条路能拿到你指定的模型：

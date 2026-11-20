@@ -353,7 +353,10 @@ func (c *Client) buildEnterpriseUploadBody(file RawFile) string {
 		"mimeType":     file.MIME,
 		"fileContents": base64.StdEncoding.EncodeToString(file.Data),
 	}
-	if session := c.enterpriseSessionName(); session != "" {
+	if session := c.enterpriseSessionName(); session != "" && !strings.HasSuffix(session, "/-") {
+		// The widget expects the session resource next to the file; "name" is kept
+		// for tenants that read the older shape.
+		req["session"] = session
 		req["name"] = session
 	}
 	payload := map[string]any{
@@ -402,11 +405,14 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 		// A Bearer JWT is only valid on the regional content-* widget host.
 		endpoint = contentWidgetEndpoint(c.enterpriseLocationFromURL(endpoint), "widgetAddContextFile")
 	}
-	if usingBearer {
-		if session := strings.TrimSpace(c.enterpriseSessionName()); session == "" || strings.HasSuffix(session, "/-") {
-			if _, err := c.ensureEnterpriseSession(c.enterpriseConfigID(nil)); err != nil {
-				c.Logf("Gemini Enterprise: could not create an upload session (%v)", err)
-			}
+	// The widget needs a session for the upload even when the request is only
+	// cookie-authenticated; without one it answers HTTP 400 "One or more required
+	// fields are missing". Create it lazily and say so when it fails.
+	if session := strings.TrimSpace(c.enterpriseSessionName()); session == "" || strings.HasSuffix(session, "/-") {
+		if created, err := c.ensureEnterpriseSession(c.enterpriseConfigID(nil)); err == nil && created != "" {
+			c.Logf("Gemini Enterprise: opened assistant session %s for context-file uploads (bearer=%t)", created, usingBearer)
+		} else if err != nil {
+			c.Logf("Gemini Enterprise: could not create an upload session (%v) — the widget may reject the upload as missing required fields", err)
 		}
 	}
 	if endpoint == "" {
@@ -684,6 +690,11 @@ func (c *Client) cachedEnterpriseFileID(key, sessionName string) (string, string
 	c.uploadMu.Lock()
 	defer c.uploadMu.Unlock()
 	entry, ok := c.uploadCache[key+"\x00"+sessionName]
+	if !ok && sessionName != "" {
+		// Uploaded before a session existed: the entry carries the session the
+		// file belongs to, and the caller uses it for the following request.
+		entry, ok = c.uploadCache[key+"\x00"]
+	}
 	if !ok {
 		return "", "", false
 	}

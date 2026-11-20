@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -194,4 +195,64 @@ func (a *App) handleModelInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	info := a.describeModelSelection(requested, resolved)
 	writeJSON(w, http.StatusOK, info)
+}
+
+// handleModelProbe serves POST /v1/model-probe {"model":"gemini-4-hydrogen",
+// "candidate":"gemini-4-hydrogen"}: it asks the tenant whether that model id is
+// accepted, and caches it for the alias when it is. This is how a tenant id is
+// discovered without reading DevTools by hand.
+func (a *App) handleModelProbe(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		Model     string `json:"model"`
+		Candidate string `json:"candidate"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+	if payload.Model == "" {
+		payload.Model = r.URL.Query().Get("model")
+	}
+	if payload.Candidate == "" {
+		payload.Candidate = r.URL.Query().Get("candidate")
+	}
+	if payload.Model == "" {
+		payload.Model = a.Cfg.DefaultModel
+	}
+	if payload.Candidate == "" {
+		payload.Candidate = payload.Model
+	}
+	if a.Gem == nil || !a.Gem.UsesDiscoveryEngine() {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":    false,
+			"error": "model probing is only meaningful on a Gemini Enterprise origin",
+		})
+		return
+	}
+
+	learned, err := a.Gem.ProbeAndLearnModel(payload.Model, payload.Candidate)
+	if err != nil {
+		if a.Logf != nil {
+			a.Logf("Model probe: %q -> %q failed: %v", payload.Model, payload.Candidate, err)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":        false,
+			"model":     payload.Model,
+			"candidate": payload.Candidate,
+			"error":     err.Error(),
+			"hint": "try another candidate id (the tenant's assistGenerationConfig.modelId, visible in the tab's own widgetStreamAssist request), " +
+				"or keep the alias unmapped and let the browser bridge select it in the picker",
+		})
+		return
+	}
+
+	resolved, resolveErr := models.Resolve(payload.Model, a.Cfg.DefaultModel)
+	if resolveErr != nil {
+		resolved = models.Resolved{Name: payload.Model}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":        true,
+		"model":     payload.Model,
+		"model_id":  learned,
+		"source":    gemini.ModelIDSourceLearned,
+		"cached_in": "enterprise_models.json",
+		"model_info": a.describeModelSelection(payload.Model, resolved),
+	})
 }
