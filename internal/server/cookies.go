@@ -110,7 +110,7 @@ func (a *App) directModeUsable() bool {
 			a.Logf("directModeUsable: true — Discovery Engine endpoint configured: %s", a.Cfg.DiscoveryEngineEndpoint)
 			return true
 		}
-		a.Logf("directModeUsable: false — Enterprise origin, no template captured, no discovery_engine_endpoint configured")
+		a.Logf("directModeUsable: false — Enterprise origin, no template captured, DiscoveryEngineEndpoint='%s' (empty)", a.Cfg.DiscoveryEngineEndpoint)
 		return false
 	}
 	a.Logf("directModeUsable: true — Bard web RPC available")
