@@ -160,6 +160,11 @@ func TestDirectStreamProbesUnmappedAliasOnce(t *testing.T) {
 
 	var models []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Session bootstrap is not a streamAssist call; only count those.
+		if strings.Contains(r.URL.Path, "widgetCreateSession") {
+			_, _ = w.Write([]byte(`{"createSessionResponse":{"session":{"name":"collections/c/engines/e/sessions/1"}}}`))
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		body := string(raw)
 		if i := strings.Index(body, `"modelId":"`); i >= 0 {
@@ -212,6 +217,11 @@ func TestDirectStreamFallsBackWhenProbeRejected(t *testing.T) {
 
 	var calls, probes int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Session bootstrap is not a streamAssist call; only count those.
+		if strings.Contains(r.URL.Path, "widgetCreateSession") {
+			_, _ = w.Write([]byte(`{"createSessionResponse":{"session":{"name":"collections/c/engines/e/sessions/1"}}}`))
+			return
+		}
 		raw, _ := io.ReadAll(r.Body)
 		calls++
 		if strings.Contains(string(raw), `"assistGenerationConfig"`) {

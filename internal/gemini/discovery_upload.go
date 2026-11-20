@@ -901,6 +901,10 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	if err != nil {
 		return err
 	}
+	// A captured template carries the app's session id with the id replaced by
+	// "-", which the tenant reads as "new conversation". Resolve a real one so
+	// the tab's thread and the replayed request agree.
+	session = c.reuseOrCreateEnterpriseSession(session)
 
 	_, bearerErr := c.enterpriseBearer()
 	hasBearer := bearerErr == nil
@@ -924,11 +928,11 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	if hasBearer || hasEndpoint {
 		modelID, modelSource := c.EnterpriseModelIDSource(opt.ModelName)
 		if modelID == "" {
-			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, requested=%q, modelId=<none: %s>)",
-				len(fileIDs), hasBearer, opt.ModelName, modelSource)
+			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, session=%s, requested=%q, modelId=<none: %s>)",
+				len(fileIDs), hasBearer, shortSessionName(session), opt.ModelName, modelSource)
 		} else {
-			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, requested=%q, modelId=%q, source=%s)",
-				len(fileIDs), hasBearer, opt.ModelName, modelID, modelSource)
+			c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t, session=%s, requested=%q, modelId=%q, source=%s)",
+				len(fileIDs), hasBearer, shortSessionName(session), opt.ModelName, modelID, modelSource)
 		}
 		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, opt.ModelName, opt.MediaSink, emit)
 	}

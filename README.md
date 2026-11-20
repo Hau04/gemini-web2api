@@ -410,6 +410,25 @@ In **bridge mode**, each request either starts a fresh chat in the open Gemini t
 2. **Extension popup "Chat Mode" selector** — *Auto (recommended)* / *Always new chat* / *Continue open chat*. The choice is pushed to the server (`POST /bridge/chatmode`) and persists until changed. With *Continue open chat*, click any old chat in the Gemini history sidebar first — API turns then keep adding to that conversation.
 3. **Auto heuristic (default)** — a brand-new client conversation (e.g. WorkBuddy "New Chat") starts a fresh browser chat; follow-up turns continue it.
 
+The heuristic can only see what the client sends: it fires when a request carries *no* assistant/tool history **and** a user message that differs from the previous single turn — which is also what a stateless client looks like. If every message opens a new chat in the tab, either set `"bridge_auto_new_chat": false`, switch the popup to *Continue open chat*, or use `@continue`. Turn history is re-sent in full when the tab holds nothing, so continuity never depends on the tab alone.
+
+#### Direct mode has the same question — and one shared session per process
+
+Without a browser tab, continuity lives in the Discovery Engine **session**. `/v1/model-info` plus one log line tell you which one is in play:
+
+```
+Enterprise: continuing in assistant session 8f1c (reused for every turn of this conversation)
+Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
+```
+
+One session is created per process (`widgetCreateSession`) and reused by every request, so a whole day of messages lands in one Gemini conversation, and every client chat shares it. A restart, or a cookie/JWT reset, starts a new one — the transcript is not lost because your client re-sends its history, but the tenant's thread is new (and yesterday's uploaded file ids are gone). If the tenant refuses to create a session you get the opposite symptom, spelled out in the log:
+
+```
+Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
+```
+
+Pin a specific conversation with `"discovery_engine_session": "collections/…/sessions/…"` in `config.json`.
+
 ### Model Inspection Headers
 
 Every API response (both JSON and streaming SSE) includes HTTP response headers indicating actual model routing:
