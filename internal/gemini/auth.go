@@ -24,6 +24,9 @@ type CookieInfo struct {
 	// necessarily the configured base_url.
 	BaseURL     string
 	ServerToken string
+	// Csesidx is the Gemini Enterprise conversation/config sequence id harvested
+	// from the tab URL; it scopes the widget XSRF token used to mint the JWT.
+	Csesidx string
 }
 
 type CookieCache struct {
@@ -72,6 +75,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 	var geminiBL string
 	var baseURL string
 	var serverToken string
+	var csesidx string
 
 	if strings.HasPrefix(content, "{") {
 		var data struct {
@@ -82,6 +86,7 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 			GeminiBL    *string         `json:"gemini_bl"`
 			BaseURL     *string         `json:"base_url"`
 			ServerToken *string         `json:"server_token"`
+			Csesidx     *string         `json:"csesidx"`
 		}
 		if err := json.Unmarshal([]byte(content), &data); err == nil {
 			cookieStr = data.Cookie
@@ -104,6 +109,9 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 			if data.ServerToken != nil {
 				serverToken = *data.ServerToken
 			}
+			if data.Csesidx != nil {
+				csesidx = *data.Csesidx
+			}
 		}
 	} else {
 		cookieStr = content
@@ -122,13 +130,14 @@ func (c *CookieCache) Load() (CookieInfo, error) {
 
 	c.mtime = stat.ModTime()
 	c.info = CookieInfo{
-		Cookie:    cookieStr,
-		SAPISID:   sapisid,
-		AuthUser:  authUser,
-		XSRFToken: xsrfToken,
+		Cookie:      cookieStr,
+		SAPISID:     sapisid,
+		AuthUser:    authUser,
+		XSRFToken:   xsrfToken,
 		GeminiBL:    geminiBL,
 		BaseURL:     baseURL,
 		ServerToken: serverToken,
+		Csesidx:     csesidx,
 	}
 
 	return c.info, nil

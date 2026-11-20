@@ -106,6 +106,10 @@ func (a *App) directModeUsable() bool {
 			a.Logf("directModeUsable: true — Discovery Engine template captured")
 			return true
 		}
+		if a.Gem.HasEnterpriseWidgetAuth() {
+			a.Logf("directModeUsable: true — %s", a.Gem.EnterpriseWidgetAuthStatus())
+			return true
+		}
 		if a.Cfg.DiscoveryEngineEndpoint != "" {
 			a.Logf("directModeUsable: true — Discovery Engine endpoint configured: %s", a.Cfg.DiscoveryEngineEndpoint)
 			return true
@@ -138,6 +142,21 @@ func sanitizeSyncedOrigin(raw string) string {
 	return ""
 }
 
+// sanitizeCsesidx keeps only the numeric conversation/config sequence id the
+// Gemini Enterprise tab URL carries (?csesidx=...).
+func sanitizeCsesidx(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || len(trimmed) > 32 {
+		return ""
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return ""
+		}
+	}
+	return trimmed
+}
+
 // handleBridgeCookies receives session cookies pushed by the browser extension's
 // background service worker and persists them to the cookie file. The direct-mode
 // client's CookieCache reloads the file on its next use (mtime-based), so fresh
@@ -153,6 +172,7 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 		BaseURL     string `json:"base_url"`
 		Origin      string `json:"origin"`
 		ServerToken string `json:"server_token"`
+		Csesidx     string `json:"csesidx"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid JSON payload"})
@@ -205,6 +225,9 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 			if payload.ServerToken == "" {
 				payload.ServerToken = existing.ServerToken
 			}
+			if payload.Csesidx == "" {
+				payload.Csesidx = existing.Csesidx
+			}
 		}
 	}
 
@@ -226,6 +249,10 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 	}
 	if payload.ServerToken != "" {
 		stored["server_token"] = payload.ServerToken
+	}
+	payload.Csesidx = sanitizeCsesidx(payload.Csesidx)
+	if payload.Csesidx != "" {
+		stored["csesidx"] = payload.Csesidx
 	}
 
 	data, err := json.Marshal(stored)
@@ -265,13 +292,14 @@ func (a *App) handleBridgeCookies(w http.ResponseWriter, r *http.Request) {
 
 	_, authErr, authErrAt := a.CookieSync.snapshot()
 	resp := map[string]any{
-		"ok":          true,
-		"synced_at":   time.Now().UTC().Format(time.RFC3339),
+		"ok":               true,
+		"synced_at":        time.Now().UTC().Format(time.RFC3339),
 		"has_xsrf":         payload.XSRFToken != "" || a.Cfg.XSRFToken != "",
 		"has_server_token": payload.ServerToken != "" || a.Cfg.DiscoveryEngineServerToken != "",
+		"has_csesidx":      payload.Csesidx != "" || a.Cfg.DiscoveryEngineCsesidx != "",
 		"needs_xsrf":       payload.XSRFToken == "" && a.Cfg.XSRFToken == "",
-		"auth_error":  nil,
-		"cookie_file": filepath.Base(path),
+		"auth_error":       nil,
+		"cookie_file":      filepath.Base(path),
 	}
 	if authErr != "" {
 		resp["auth_error"] = authErr

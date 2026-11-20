@@ -80,6 +80,14 @@ type Client struct {
 	// of uploading again (Enterprise files stay in their session).
 	uploadMu    sync.Mutex
 	uploadCache map[string]cachedUpload
+
+	// Gemini Enterprise widget auth: an HS256 JWT minted from the portal XSRF
+	// token, plus the assistant session every widget call must reference.
+	enterpriseAuthMu  sync.Mutex
+	enterpriseJWT     string
+	enterpriseJWTExp  time.Time
+	enterpriseJWTKey  string
+	enterpriseSession string
 }
 
 func NewClient(cfg config.Config) *Client {

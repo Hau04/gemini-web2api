@@ -159,6 +159,11 @@ func main() {
 			attachments = cfg.DiscoveryEngineUploadEndpoint
 		}
 		fmt.Printf("  Attachments: %s\n", attachments)
+		if widgetAuth := app.Gem.EnterpriseWidgetAuthStatus(); widgetAuth != "" {
+			fmt.Printf("  Widget auth: %s\n", widgetAuth)
+		} else {
+			fmt.Printf("  Widget auth: cookie fallback (no csesidx yet — open the Gemini Enterprise tab once or set discovery_engine_csesidx)\n")
+		}
 	}
 	fmt.Println()
 

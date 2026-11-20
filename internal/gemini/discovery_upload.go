@@ -267,7 +267,11 @@ func (c *Client) enterpriseSessionName() string {
 			return replaceSessionID(s, "-")
 		}
 	}
-	return ""
+	// A session this client created at runtime (widgetCreateSession) keeps
+	// context-file uploads and streamAssist on the same conversation.
+	c.enterpriseAuthMu.Lock()
+	defer c.enterpriseAuthMu.Unlock()
+	return c.enterpriseSession
 }
 
 // enterpriseConfigID resolves the WidgetConfig id the widget API requires.
@@ -352,7 +356,7 @@ func (c *Client) buildEnterpriseUploadBody(file RawFile) string {
 		req["name"] = session
 	}
 	payload := map[string]any{
-		"location":              c.enterpriseLocation(),
+		"additionalParams":      widgetAdditionalParams(),
 		"addContextFileRequest": req,
 	}
 	if id := c.enterpriseConfigID(nil); id != "" {
@@ -382,6 +386,19 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 
 	tpl := LoadDiscoveryUploadTemplate(c.Cfg.CookieFile)
 	endpoint := c.enterpriseUploadEndpoint(tpl)
+	bearer, bearerErr := c.enterpriseBearer()
+	usingBearer := bearerErr == nil
+	if usingBearer && !strings.Contains(endpoint, "content-") {
+		// A Bearer JWT is only valid on the regional content-* widget host.
+		endpoint = contentWidgetEndpoint(c.enterpriseLocationFromURL(endpoint), "widgetAddContextFile")
+	}
+	if usingBearer {
+		if session := strings.TrimSpace(c.enterpriseSessionName()); session == "" || strings.HasSuffix(session, "/-") {
+			if _, err := c.ensureEnterpriseSession(c.enterpriseConfigID(nil)); err != nil {
+				c.Logf("Gemini Enterprise: could not create an upload session (%v)", err)
+			}
+		}
+	}
 	if endpoint == "" {
 		return "", "", &UpstreamError{
 			Status: http.StatusNotFound,
@@ -393,7 +410,7 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 	}
 
 	var body string
-	if tpl != nil {
+	if tpl != nil && !usingBearer {
 		body, err = tpl.SubstituteFile(file)
 		if err != nil {
 			return "", "", err
@@ -406,7 +423,7 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 	}
 
 	headers := c.discoveryHeaders(endpoint)
-	if tpl != nil {
+	if tpl != nil && !usingBearer {
 		for k, v := range tpl.Headers {
 			switch strings.ToLower(k) {
 			case "authorization", "cookie", "content-length", "host", "origin", "referer", "x-server-token":
@@ -422,6 +439,9 @@ func (c *Client) UploadEnterpriseFile(file RawFile) (fileID string, session stri
 		return "", "", err
 	}
 	req.Header = headers
+	if usingBearer {
+		c.applyEnterpriseWidgetHeaders(req, bearer)
+	}
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -855,29 +875,36 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 		return err
 	}
 
-	// Captured template first (exact shape of the app's own request).
+	_, bearerErr := c.enterpriseBearer()
+	hasBearer := bearerErr == nil
+	hasEndpoint := strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != ""
+
+	// A captured template is the app's own request and therefore the most
+	// faithful replay while it is fresh; fall through to the widget API when it
+	// fails and another transport is configured.
 	if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 		c.Logf("Enterprise: replaying captured Discovery Engine template (files=%d)", len(fileIDs))
 		tplErr := c.generateViaDiscoveryStream(prompt, fileIDs, session, emit)
 		if tplErr == nil {
 			return nil
 		}
-		if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) == "" {
+		if !hasBearer && !hasEndpoint {
 			return tplErr
 		}
-		c.Logf("Captured Discovery Engine template failed (%v), falling back to direct endpoint", tplErr)
+		c.Logf("Captured Discovery Engine template failed (%v), falling back to the direct widget API", tplErr)
 	}
-	// Then the configured streamAssist endpoint.
-	if strings.TrimSpace(c.Cfg.DiscoveryEngineEndpoint) != "" {
-		c.Logf("Enterprise: calling configured Discovery Engine streamAssist endpoint (files=%d)", len(fileIDs))
+
+	if hasBearer || hasEndpoint {
+		c.Logf("Enterprise: calling the Discovery Engine widgetStreamAssist API (files=%d, bearer=%t)", len(fileIDs), hasBearer)
 		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, emit)
 	}
+
 	return &UpstreamError{
 		Status: http.StatusNotFound,
 		Kind:   "unsupported",
-		Msg: "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured " +
-			"and no request template captured — set discovery_engine_endpoint in config.json, or send one prompt through the open Gemini tab " +
-			"so the extension can capture a streamAssist template",
+		Msg: "direct cookie mode is unavailable on this Gemini Enterprise origin: no Discovery Engine streamAssist endpoint configured, " +
+			"no widget csesidx captured, and no request template captured — set discovery_engine_endpoint / discovery_engine_csesidx in config.json, " +
+			"or send one prompt through the open Gemini tab so the extension can capture a template",
 	}
 }
 

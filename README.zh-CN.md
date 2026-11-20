@@ -388,6 +388,16 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
+**Widget JWT 鉴权（解决企业版 502 的关键）：** `vertexaisearch.cloud.google.com` 上的 Discovery Engine widget 接口（`widgetStreamAssist` / `widgetCreateSession` / `widgetAddContextFile`）**不接受**消费版的 `SAPISIDHASH` 头，而是使用短期 HS256 JWT：
+
+1. 带 Cookie 请求 `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` → `{"xsrfToken":"<base64url HMAC 密钥>","keyId":"<kid>"}`
+2. 用该密钥签发 `{"iss":<origin>,"aud":"https://content-us-discoveryengine.googleapis.com","sub":"csesidx/<id>","iat","exp":+300,"nbf"}`，header 带 `kid`
+3. 先 `widgetCreateSession`，再 `widgetStreamAssist`，请求头为 `Authorization: Bearer <jwt>`、`Origin/Referer: <企业版 origin>`，body 带 `additionalParams: {"token":"-","origin":"ORIGIN_UNSPECIFIED"}`
+
+只要服务器知道 **`csesidx`**（企业版标签页 URL 里的会话/配置序号），以上流程全自动：扩展在同步 Cookie 时会顺带采集 `?csesidx=…`，也可以手动配置 `discovery_engine_csesidx`。还需要 `discovery_engine_config_id`（应用发出的 widget `configId`，在标签页里上传一次文件即可被捕获）。`discovery_engine_location`（默认 `us`，或从 endpoint 推导）决定区域 widget 域名。
+
+未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
+
 **关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
 
 1. **一次性捕获（推荐，零配置）**：加载扩展后，在企业版标签页里手动上传一个文件。net-hook 会记录这次上传请求，扩展把文件名 / MIME / Base64 内容替换为 `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__` 占位符后推送到 `POST /bridge/uploadtemplate`，并保存在 Cookie 文件旁的 `discovery_upload_template.json`。此后服务器用最新 Cookie 重放该请求来上传**所有**附件，浏览器可以一直关闭。用 `GET /bridge/uploadtemplate` 查看状态。
