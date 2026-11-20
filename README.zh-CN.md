@@ -411,6 +411,19 @@ https://gemini.google.com/u/1/app/...
 
 未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
 
+**编辑长代码文件，不再反复读取：** 当提示词引用了达到或超过 `enterprise_auto_attach_min_bytes`（默认复用 `bridge_large_code_upload_bytes`，8 KB）的源码文件时，文件会作为附件上传，提示词里只放一份简短清单：
+
+```
+# Attached workspace files (already loaded — do not re-read)
+- /work/app/handlers.ts — 1,842 lines, 78 KB — attached as context file "handlers.ts"
+These attachments are the current on-disk version as of this request. Do not call read_file ... re-attached
+automatically on the next turn, so no verification read is needed.
+```
+
+这样往返成本的两半都被消掉：模型不必再花一轮去 `read_file`，也不必把整个文件内容当作工具参数回吐（这是最贵的输出）。WorkBuddy 写入补丁后，**下一次**请求会重新从磁盘读取并把新版本作为新附件上传，模型无需验证性重读即可看到自己的修改。上传按内容哈希缓存：每个文件*版本*上传一次，每轮零上传。
+
+需要说清楚的边界：附件是只读上下文，真正的写入仍由 WorkBuddy 的写工具完成 —— 但那个方向是免费的，内容从模型流向你的磁盘，不会回流到 Gemini。
+
 **图片是怎么被读到的：** `widgetAddContextFile` 就是 Gemini Enterprise 应用在输入框粘贴图片时自己发出的调用 —— 字节进入助手会话，`streamAssist` 通过 `fileId` 引用，多模态助手直接读图（视觉 token），而不是只拿到一个文件名。服务器按真实 MIME 原样上传图片（`image/png`、`image/jpeg` 等），绝不会把图片转成文本：`IsTextLike()` 对图片类型返回 false，所以图片不会被悄悄内联成乱码。日志可直接验证：`Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`。
 
 图片来源有三种：OpenAI `image_url` 片段（data URL 或远程 URL，先抓取再上传）、Google `inlineData` 片段、以及提示词里引用的本地路径（`.png/.jpg/.jpeg/.webp/.gif/.bmp` 会被自动附加）。若租户拒绝上传，请求会给出可操作的报错，而不是丢弃图片。

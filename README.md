@@ -423,6 +423,20 @@ Values must be model ids your tenant accepts (look at `assistGenerationConfig.mo
 
 Without a `csesidx` the server falls back to the old cookie-authenticated `?key=` endpoint, which is exactly the path that answers `502` / `no answer text` on most tenants — the startup banner reports which transport is in use (`Widget auth: widget JWT (csesidx=…)` vs `cookie fallback`).
 
+**Editing a long code file without the fetch loop:** when a prompt references a source file at or above `enterprise_auto_attach_min_bytes` (default: `bridge_large_code_upload_bytes`, 8 KB), the file is attached and the prompt gets a short inventory instead of the body:
+
+```
+# Attached workspace files (already loaded — do not re-read)
+- /work/app/handlers.ts — 1,842 lines, 78 KB — attached as context file "handlers.ts"
+These attachments are the current on-disk version as of this request. Do not call read_file, grep or shell cat to
+fetch their contents again ... Make the change with your edit/write tool using a targeted patch (str_replace /
+line range) — the updated file is re-attached automatically on the next turn, so no verification read is needed.
+```
+
+That removes both halves of the round-trip cost: the model never spends a turn `read_file`-ing the file, and it never has to echo the whole file back as a tool argument (the expensive output). After WorkBuddy writes the patch, the **next** request re-reads the file from disk and attaches the new bytes as a new version, so the model sees its own edit without a verification read. Uploads are content-hash cached: one upload per file *version*, zero per turn.
+
+Honest scope: the attachment is read-only context. The actual edit still goes through WorkBuddy's own write tool — but that direction is free, because content moves from the model to your disk, never back to Gemini.
+
 **How images are actually read:** `widgetAddContextFile` is the same call the Gemini Enterprise app makes when you paste a picture into its composer — the bytes land in the assistant session and `streamAssist` references them by `fileId`, so the multimodal assistant reads the image itself (vision tokens), not a filename. `gemini-web2api` uploads images byte-for-byte with their real MIME type (`image/png`, `image/jpeg`, …) and never converts them to text: `IsTextLike()` returns false for image types, so an image can never be silently inlined as garbage. The upload log proves the shape: `Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`.
 
 Images arrive by any of the three routes: OpenAI `image_url` parts (data URL or remote URL, fetched then uploaded), Google `inlineData` parts, and local paths referenced in a prompt (`.png/.jpg/.jpeg/.webp/.gif/.bmp` are auto-attached). If the tenant rejects the upload, the request fails with an actionable error instead of dropping the image.

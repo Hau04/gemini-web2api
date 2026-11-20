@@ -108,8 +108,11 @@ func TestAppendLocalFileAttachmentsReadsReferencedFiles(t *testing.T) {
 	if !strings.Contains(string(images[0].Data), "%PDF-1.4") {
 		t.Error("attachment does not carry the file bytes")
 	}
-	if prompt != "please summarise "+pdfPath {
-		t.Error("prompt must not be rewritten when files are simply referenced")
+	if !strings.HasSuffix(prompt, "please summarise "+pdfPath) {
+		t.Errorf("the user's own request must survive verbatim at the end, got: %.200q", prompt)
+	}
+	if !strings.Contains(prompt, "report.pdf") || !strings.Contains(prompt, "do not re-read") {
+		t.Errorf("prompt should carry the attachment inventory, got: %.200q", prompt)
 	}
 
 	// Already-attached files are not attached twice.
@@ -140,5 +143,73 @@ func TestAttachEnterpriseContextRespectsConfig(t *testing.T) {
 	}
 	if got := len([]format.Image(nil)); got != 0 {
 		t.Fatal("unreachable")
+	}
+}
+
+// An edit loop must not need a read after every write: the prompt says the
+// attachment is the current on-disk version and forbids a verification fetch.
+func TestAttachEnterpriseContextTellsModelNotToReReadAttachedFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "handlers.ts")
+	var b strings.Builder
+	for i := 0; i < 300; i++ {
+		b.WriteString("export function handler")
+		b.WriteString(strings.Repeat("x", 6))
+		b.WriteString("(req: Request) { return req.body; }\n")
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newEnterpriseApp(t, nil)
+	messages := []models.OpenAIMessage{{Role: "user", Content: "refactor the error handling in " + path}}
+
+	prompt, images := app.attachEnterpriseContext(messages, "refactor the error handling in "+path, nil)
+	if len(images) != 1 {
+		t.Fatalf("expected the source file to be attached, got %d attachments", len(images))
+	}
+	if !strings.HasPrefix(prompt, "# Attached workspace files") {
+		t.Errorf("prompt should open with the attachment inventory, got: %.120q", prompt)
+	}
+	for _, want := range []string{"handlers.ts", "300 lines", "read_file", "re-attached automatically", "str_replace"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("inventory should mention %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(prompt, "refactor the error handling") {
+		t.Error("the user's own instruction must survive")
+	}
+}
+
+// After the client writes the model's patch, the next request carries the new
+// bytes automatically — so the agent never has to spend a tool call reading it.
+func TestAttachEnterpriseContextReattachesEditedFileWithoutToolCall(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "service.py")
+	v1 := strings.Repeat("# padding line to pass the large-code threshold\n", 300) + "def run(): return 1\n"
+	if err := os.WriteFile(path, []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newEnterpriseApp(t, nil)
+	messages := []models.OpenAIMessage{{Role: "user", Content: "fix run() in " + path}}
+
+	_, first := app.attachEnterpriseContext(messages, "fix run() in "+path, nil)
+	if len(first) != 1 || !strings.Contains(string(first[0].Data), "def run(): return 1") {
+		t.Fatalf("first turn should attach the current file, got %d attachments", len(first))
+	}
+
+	// The agent's edit lands on disk (as WorkBuddy's write tool would).
+	v2 := strings.Replace(v1, "def run(): return 1", "def run(): return 2  # fixed", 1)
+	if err := os.WriteFile(path, []byte(v2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, second := app.attachEnterpriseContext(messages, "fix run() in "+path, nil)
+	if len(second) != 1 {
+		t.Fatalf("second turn attachments = %d", len(second))
+	}
+	if !strings.Contains(string(second[0].Data), "return 2  # fixed") {
+		t.Error("second turn must attach the freshly edited bytes, not a cached copy")
 	}
 }
