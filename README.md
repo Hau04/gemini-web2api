@@ -254,6 +254,27 @@ and the startup banner states the same thing instead of promising a fallback. Wh
 
 `source=captured` means "a tenant-valid model is now being sent, but it is whatever the tab had selected" — set a mapping if you want a specific one. Previously the log printed `model="gemini-4-hydrogen"`, which implied the alias was sent upstream; it never was.
 
+### Routing rule that makes the picker authoritative
+
+On a Gemini Enterprise origin there are exactly two ways to get the model you asked for:
+
+1. **Direct mode** — `assistGenerationConfig.modelId` in the widget request. This only works when a tenant id is known (a `discovery_engine_models` mapping, a passthrough tenant id, a configured default, or the id learned from the tab's captured request).
+2. **Bridge mode** — the extension clicks the model in the tab's picker. This always works for models the picker actually shows.
+
+So routing is now model-aware: **if direct mode cannot name the requested model, the request goes through the bridge instead of being silently answered by the tenant's auto model.** That is the case that used to produce "I selected Hydrogen, it still says Auto":
+
+```
+Keeping the browser bridge: direct mode has no tenant model id for "gemini-4-hydrogen",
+so only the tab's model picker can select it (map discovery_engine_models to make direct mode honour it)
+```
+
+The response carries `X-Model-Route: bridge-picker`, and `/v1/model-info` reports `"source": "bridge-picker"` with `selection_live: true`.
+
+Two consequences worth knowing:
+
+- **The tab must stay open and awake.** Chrome's Memory Saver freezes background tabs; a frozen tab is reported as disconnected, the bridge is unusable, and the turn falls back to direct mode → tenant auto. The log says so explicitly (`MODEL SELECTION WARNING: … no usable browser tab …`), and `/bridge/status` shows `frozen: true`.
+- **Mapped aliases never touch the tab.** Once `discovery_engine_models` has the id, direct mode serves the request with no browser at all — which is also what makes attachments (`files=N`) possible.
+
 ## "I selected Hydrogen, but it answers as Auto" — diagnosing model selection
 
 The model that answers is decided in three different places depending on the route, and every one of them can silently fall back. `GET /v1/model-info?model=gemini-4-hydrogen` reports which one applies right now:
@@ -279,6 +300,9 @@ The model that answers is decided in three different places depending on the rou
 | `configured-default` | alias unmapped, `discovery_engine_default_model_id` used |
 | `tenant-default` | **nothing was selected — the tenant decides (usually "Auto")** |
 | `alias` | consumer origin: the alias itself routes the model |
+| `bridge-picker` | Enterprise without a tenant id: the request goes through the browser bridge, which selects the model in the tab's picker |
+| `captured` | Enterprise without a mapping: the tenant `modelId` learned from the tab's captured request is reused |
+| `(tab picker)` (warning) | a model picker is required but no tab is connected — the turn falls back to the tenant's auto model |
 
 Every chat response carries the same verdict in headers, so you never have to believe the answer text (`Gemini`'s self-description in the reply is generated prose, not a routing report):
 

@@ -255,6 +255,26 @@ send one message in the Gemini Enterprise tab with the extension enabled …, or
 
 `source=captured` 的含义是「已经在发送租户认可的模型，但那是标签页当时选中的那个」；想要固定某个模型就配置映射。之前日志打印 `model="gemini-4-hydrogen"` 会让人以为别名被发送了 —— 实际上从来没有。
 
+### 让下拉框真正生效的路由规则
+
+企业版里只有两条路能拿到你指定的模型：
+
+1. **直连模式** —— 在 widget 请求里带 `assistGenerationConfig.modelId`。前提是知道租户 id（`discovery_engine_models` 映射、直接使用租户 id、配置的默认值，或从标签页捕获请求里学到的 id）。
+2. **桥模式** —— 扩展在标签页下拉框里点选。只要下拉框里有该模型就一定生效。
+
+所以路由现在会**看模型**：直连模式报不出你请求的模型时，请求改走桥，而不是被租户的 auto 模型悄悄回答 —— 这正是「我选了 Hydrogen，还是 Auto」的根因：
+
+```
+Keeping the browser bridge: direct mode has no tenant model id for "gemini-4-hydrogen" …
+```
+
+响应头带 `X-Model-Route: bridge-picker`，`/v1/model-info` 显示 `"source": "bridge-picker"`、`selection_live: true`。
+
+两点注意：
+
+- **标签页必须保持打开且未休眠。** Chrome 的内存节省会把后台标签页冻结，冻结即视为断开，桥不可用 → 回退直连 → 租户 auto。日志会明确写出，`/bridge/status` 里 `frozen: true`。
+- **已映射的别名完全不依赖标签页。** 一旦 `discovery_engine_models` 里有了 id，直连模式即可服务请求（附件 `files=N` 也依赖这条）。
+
 ## 「我选了 Hydrogen，为什么还是 Auto 回答」—— 模型选择诊断
 
 实际回答的模型由三处决定，每一处都可能静默回退。`GET /v1/model-info?model=gemini-4-hydrogen` 会直接告诉你当前是哪种情况：
@@ -278,6 +298,8 @@ send one message in the Gemini Enterprise tab with the extension enabled …, or
 | `configured-default` | 别名未映射，使用了 `discovery_engine_default_model_id` |
 | `tenant-default` | **什么都没选 —— 由租户决定，通常就是「Auto」** |
 | `alias` | 消费版：别名本身就决定路由 |
+| `bridge-picker` | 企业版没有租户模型 id：请求走浏览器桥，由标签页的下拉框选择模型 |
+| `captured` | 企业版没有映射：复用从标签页捕获请求中得到的租户 `modelId` |
 
 每个聊天响应都会在响应头里给出同样的结论（模型自己说它是什么并不可靠，那只是生成文本）：
 

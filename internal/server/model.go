@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/ikhsan3adi/gemini-web2api/internal/format"
+	"github.com/ikhsan3adi/gemini-web2api/internal/gemini"
 	"github.com/ikhsan3adi/gemini-web2api/internal/models"
 )
 
@@ -135,4 +136,37 @@ func (a *App) applyToolPolicy(req *models.OpenAIChatRequest, resolved models.Res
 		a.Logf("%s", msg)
 	}
 	return true
+}
+
+// directCanHonourModel reports whether direct mode can actually send the model the
+// client asked for.
+//
+// On a Discovery Engine origin the only lever is assistGenerationConfig.modelId.
+// When no id is known for the requested alias, the request carries nothing and the
+// tenant answers with its auto/default model — the "I picked Hydrogen but it says
+// Auto" complaint. The browser bridge can select that model in the tab's picker,
+// so routing must respect this before preferring direct mode.
+func (a *App) directCanHonourModel(resolved models.Resolved) bool {
+	if a.Gem == nil || !a.Gem.UsesDiscoveryEngine() {
+		return true
+	}
+	_, source := a.Gem.EnterpriseModelIDSource(resolved.Name)
+	return source != gemini.ModelIDSourceTenantDefault
+}
+
+// warnModelDropped logs once when a request is about to be answered by the
+// tenant's auto model because neither direct mode has a model id nor a bridge tab
+// is available to select it.
+func (a *App) warnModelDropped(resolved models.Resolved) {
+	if a.directCanHonourModel(resolved) {
+		return
+	}
+	key := "model-dropped:" + resolved.Name
+	if _, seen := modelWarnSeen.LoadOrStore(key, true); seen {
+		return
+	}
+	if a.Logf != nil {
+		a.Logf("MODEL SELECTION WARNING: no tenant model id for %q and no usable browser tab, so this turn is answered by the tenant's auto/default model. "+
+			"Wake the Gemini Enterprise tab (the picker is the only way to select it) or map the alias in discovery_engine_models.", resolved.Name)
+	}
 }

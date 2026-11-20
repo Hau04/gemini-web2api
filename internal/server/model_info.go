@@ -77,8 +77,8 @@ func (a *App) describeModelSelection(requested string, resolved models.Resolved)
 	if info.Origin == originEnterprise && a.Gem != nil {
 		id, source := a.Gem.EnterpriseModelIDSource(resolved.Name)
 		info.Upstream = upstreamModel{
-			ModelID:       id,
-			Source:        source,
+			ModelID: id,
+			Source:  source,
 			SelectionLive: source == gemini.ModelIDSourceMapping ||
 				source == gemini.ModelIDSourcePassthrough ||
 				source == gemini.ModelIDSourceCaptured,
@@ -89,7 +89,22 @@ func (a *App) describeModelSelection(requested string, resolved models.Resolved)
 				info.Mappings[k] = v
 			}
 		}
-		info.Warnings = a.modelSelectionWarnings(resolved, id, source)
+		if source == gemini.ModelIDSourceTenantDefault {
+			// No tenant id: direct mode cannot name the model, so a live bridge tab
+			// is what makes selection possible at all.
+			if a.Bridge != nil && a.Bridge.IsConnected() {
+				info.Upstream = upstreamModel{ModelID: "(tab picker)", Source: "bridge-picker", SelectionLive: true}
+				info.Warnings = append(info.Warnings, fmt.Sprintf(
+					"direct mode has no tenant model id for %q, so requests are routed through the browser bridge and %q is selected in the tab's model picker — "+
+						"the Gemini Enterprise tab must stay open and awake. Map the alias in discovery_engine_models to let direct mode honour it too.",
+					resolved.Name, resolved.Name))
+				return info
+			}
+			info.Warnings = append(info.Warnings, fmt.Sprintf(
+				"no browser tab is connected and direct mode has no tenant model id for %q, so this request would be answered by the tenant's auto/default model — "+
+					"open (or wake) the Gemini Enterprise tab, or map the alias in discovery_engine_models.", resolved.Name))
+		}
+		info.Warnings = append(info.Warnings, a.modelSelectionWarnings(resolved, id, source)...)
 		return info
 	}
 

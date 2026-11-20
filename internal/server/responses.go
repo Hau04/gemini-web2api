@@ -164,10 +164,17 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		// browser's file composer (prepareBridgeRequest →
 		// SpilloverOversizedPrompt), avoiding Enterprise batchexecute body
 		// size limits for fully inlined prompts.
-		if a.cookiesReady() && !a.keepBridgeForSpillover(prompt, bridgeAlive) {
+		modelNeedsBridge := bridgeAlive && !a.directCanHonourModel(resolved)
+		if modelNeedsBridge {
+			a.Logf("Keeping the browser bridge: direct mode has no tenant model id for %q, so only the tab's model picker can select it (map discovery_engine_models to make direct mode honour it)", resolved.Name)
+			w.Header().Set("X-Model-Route", "bridge-picker")
+		} else if a.cookiesReady() && !a.keepBridgeForSpillover(prompt, bridgeAlive) {
 			bridgeAlive = false
 		}
-		if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() {
+		if !bridgeAlive {
+			a.warnModelDropped(resolved)
+		}
+		if bridgeAlive && a.Bridge.IsDegraded() && a.directModeUsable() && !modelNeedsBridge {
 			a.Logf("Browser bridge degraded after recent timeout — routing responses request via direct cookie mode for %ds", int(a.Bridge.DegradedRemaining().Seconds()))
 			bridgeAlive = false
 		}
