@@ -629,7 +629,14 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	if s := strings.TrimSpace(session); s != "" {
 		sessionJSON = fmt.Sprintf(`"session":%q,`, s)
 	}
-	toolsSpec := `{"toolRegistry":"default_tool_registry"}`
+	toolsSpec, toolsSource := c.enterpriseToolsSpec()
+	c.logToolsSpec(toolsSpec, toolsSource)
+	// discovery_engine_tools_spec=none omits the field entirely, so the
+	// assistant's own configured actions decide what the model may call.
+	toolsSpecField := ""
+	if toolsSpec != "" {
+		toolsSpecField = `"toolsSpec":` + toolsSpec + ","
+	}
 	// Without this Gemini Enterprise always answers with the tenant's own
 	// default model, regardless of the model the client asked for.
 	// With nothing mapped, probe the tenant once per alias: if it accepts the
@@ -647,13 +654,13 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	}
 	buildBody := func() string {
 		return fmt.Sprintf(
-			`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"","toolsSpec":%s,"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
+			`{"configId":"%s","additionalParams":{"token":"-","origin":"ORIGIN_UNSPECIFIED"},"streamAssistRequest":{%s%s"query":{"parts":[{"text":"%s"}]},"answerGenerationMode":"NORMAL","assistSkippingMode":"REQUEST_ASSIST","fileIds":%s,"filter":"",%s"languageCode":"en-US","userMetadata":{"timeZone":"UTC"}}}`,
 			configID,
 			sessionJSON,
 			modelJSON,
 			jsonEscapeInner(prompt),
 			fileIDsJSON,
-			toolsSpec,
+			toolsSpecField,
 		)
 	}
 	body := buildBody()

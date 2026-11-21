@@ -547,7 +547,33 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 
 裁剪保留头部（系统提示、指令、附件说明）与尾部（最近几轮、当前问题），中间替换成一行说明，让模型知道自己看到的历史不完整；当前问题永远不会被截断。设置 `"enterprise_max_prompt_chars"` 可以跳过「失败一次才知道」的那一轮。
 
-### 6. TLS 模拟（绕过 WAF）
+### 6. 租户工具、MCP 连接器与 toolsSpec
+
+Gemini Enterprise 运行的是**助手（assistant）**自带的工具 —— 包括 MCP 连接器导入的 actions —— 而不是代理声明的工具。`StreamAssistRequest.ToolsSpec` 里根本没有任意工具的注册表字段，它只有 Vertex AI Search、网页检索、图像、视频这几项。所以当模型说「我没有 REA 工具」时，答案在租户侧，不在 `/v1/chat/completions`：
+
+- MCP data store 必须是 **Active**，并关联到 widget `configId` 指向的同一个应用；
+- 导入的 **actions** 必须在 data store 上启用（默认是关闭的）；
+- 一个对话只能看到它开始时就有的 actions —— 新启用的需要用**新对话**。
+
+代理能控制的是它请求的 `toolsSpec`，并且每轮都会记录：
+
+```
+Enterprise: toolsSpec from default: {"toolRegistry":"default_tool_registry"}
+```
+
+三种设置方式：
+
+| `discovery_engine_tools_spec` | 效果 |
+|---|---|
+| 不设置 | 用抓包模板里的 toolsSpec，没有则用上面的默认值 |
+| `"none"` | 完全不发送该字段 —— 由助手自身配置决定 |
+| 一个 JSON 对象 | 原样发送；把真实应用在启用 actions 后发的值粘进来 |
+
+建议先试 `"none"` 做 A/B：如果「固定一个 toolRegistry」正是让自定义 actions 消失的原因，去掉该字段它们就会回来 —— 日志会告诉你用的是哪种形态。
+
+prompt 侧也补了一句：宿主侧工具（MCP actions、文档生成）属于另一组合法工具，避免模型只看到声明的客户端工具就断定自己没有别的能力。
+
+### 7. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：
 
