@@ -102,6 +102,10 @@ type Client struct {
 	// enterpriseSessions maps a client conversation key to the assistant session
 	// it owns, so a new chat gets a new thread and resuming an old chat finds its
 	// own again.
+	// learnedPromptCeiling is the prompt size the tenant has accepted since the
+	// last PROMPT_TOO_LARGE refusal (0 = not known yet), and promptMu guards it.
+	learnedPromptCeiling     int
+	promptMu                 sync.Mutex
 	enterpriseSessions       map[string]string
 	enterpriseSessionKey     string
 	enterprisePendingKey     string

@@ -546,6 +546,15 @@ For the same reason an oversized prompt is no longer spilled into `code_context.
 
 Binary attachments (images, PDFs) are never mirrored — their bytes cannot be inlined as text, so they still depend on the upload transport.
 
+Keeping the instructions inline has a ceiling of its own: Discovery Engine refuses an oversized prompt with `INVALID_ARGUMENT / PROMPT_TOO_LARGE`, and the cap differs per tenant. The proxy learns it — the first oversized turn is retried with the oldest turns omitted, and every later turn is trimmed before it is sent:
+
+```
+Direct Discovery Engine rejected the prompt as too large (305089 chars) — retrying with the oldest turns omitted (228816 chars)
+Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to stay under the upstream limit
+```
+
+Trimming keeps the head (system prompt, instructions, attached-file preamble) and the tail (recent turns, the current question), replaces the middle with a one-line notice so the model knows the history is partial, and never cuts the current question. Set `"enterprise_max_prompt_chars"` to skip the single learn-by-failing round trip.
+
 ### 6. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:

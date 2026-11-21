@@ -538,6 +538,15 @@ Enterprise attachments: 1 uploaded as context files, 1 inlined (1 of them also w
 
 二进制附件（图片、PDF）永远不会被镜像 —— 它们的字节无法作为文本内联，仍依赖上传通道。
 
+把指令留在 prompt 里也有上限：Discovery Engine 会用 `INVALID_ARGUMENT / PROMPT_TOO_LARGE` 拒绝过大的 prompt，而各租户的上限并不相同。代理会自己学：第一次超限的那一轮会用「省略最旧对话」重试，之后每一轮都在发送前裁剪：
+
+```
+Direct Discovery Engine rejected the prompt as too large (305089 chars) — retrying with the oldest turns omitted (228816 chars)
+Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to stay under the upstream limit
+```
+
+裁剪保留头部（系统提示、指令、附件说明）与尾部（最近几轮、当前问题），中间替换成一行说明，让模型知道自己看到的历史不完整；当前问题永远不会被截断。设置 `"enterprise_max_prompt_chars"` 可以跳过「失败一次才知道」的那一轮。
+
 ### 6. TLS 模拟（绕过 WAF）
 
 如果您在 Google 使用 403 Forbidden 阻止 IP 的数据中心（如 AWS/DigitalOcean）中运行此工具，您可以模拟真实浏览器的 TLS 签名：

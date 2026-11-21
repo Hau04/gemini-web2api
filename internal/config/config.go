@@ -103,6 +103,10 @@ type Config struct {
 	// EnterpriseAttachLargePrompt spills an oversized prompt (or its large code
 	// blocks) into one .txt context file so the replayed prompt stays small.
 	EnterpriseAttachLargePrompt bool `json:"enterprise_attach_large_prompt"`
+	// EnterpriseMaxPromptChars caps the prompt sent to the Discovery Engine
+	// streamAssist endpoint. 0 learns the tenant's own limit from a
+	// PROMPT_TOO_LARGE refusal and remembers it.
+	EnterpriseMaxPromptChars int `json:"enterprise_max_prompt_chars"`
 	// EnterpriseMirrorTextInline also writes a text file's content into the
 	// prompt, on top of uploading it as a context file. An upload only becomes
 	// readable if the tenant's file reader exposes it; the prompt always is. Set
@@ -226,6 +230,7 @@ func Load(path string) (Config, error) {
 		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
 		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
 		EnterpriseMirrorTextInline     *bool             `json:"enterprise_mirror_text_inline"`
+		EnterpriseMaxPromptChars       *int              `json:"enterprise_max_prompt_chars"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -369,6 +374,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.EnterpriseAutoAttachMinBytes != nil {
 		cfg.EnterpriseAutoAttachMinBytes = *aux.EnterpriseAutoAttachMinBytes
+	}
+	if aux.EnterpriseMaxPromptChars != nil {
+		cfg.EnterpriseMaxPromptChars = *aux.EnterpriseMaxPromptChars
 	}
 	if aux.EnterpriseMirrorTextInline != nil {
 		cfg.EnterpriseMirrorTextInline = *aux.EnterpriseMirrorTextInline
