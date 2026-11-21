@@ -25,10 +25,13 @@ func newEnterpriseApp(t *testing.T, mutate func(*config.Config)) *App {
 	return New(cfg, "test")
 }
 
-// An oversized prompt on Enterprise must become a context-file attachment instead
-// of being re-inlined into every replayed streamAssist body.
+// An oversized prompt becomes a context-file attachment instead of being
+// re-inlined into every replayed streamAssist body — but only when the model can
+// read that attachment back, i.e. with mirroring switched off.
 func TestAttachEnterpriseContextOffloadsOversizedPrompt(t *testing.T) {
-	app := newEnterpriseApp(t, nil)
+	app := newEnterpriseApp(t, func(cfg *config.Config) {
+		cfg.EnterpriseMirrorTextInline = false
+	})
 	prompt := "# Tool Use\n" + strings.Repeat("func longCode() { /* padding */ }\n", app.Cfg.BridgeSpilloverChars/20)
 
 	gotPrompt, images := app.attachEnterpriseContext(nil, prompt, nil)
@@ -46,6 +49,21 @@ func TestAttachEnterpriseContextOffloadsOversizedPrompt(t *testing.T) {
 	}
 	if !strings.Contains(string(images[0].Data), "longCode") {
 		t.Error("spilled attachment does not contain the moved prompt content")
+	}
+}
+
+// By default the prompt keeps its own text: on this tenant a context file is not
+// readable by the model, so spilling would lose the instructions.
+func TestAttachEnterpriseContextKeepsPromptInlineByDefault(t *testing.T) {
+	app := newEnterpriseApp(t, nil)
+	prompt := "# Tool Use\n" + strings.Repeat("func longCode() { /* padding */ }\n", app.Cfg.BridgeSpilloverChars/20)
+
+	gotPrompt, images := app.attachEnterpriseContext(nil, prompt, nil)
+	if len(images) != 0 {
+		t.Fatalf("expected no spillover attachment by default, got %d", len(images))
+	}
+	if gotPrompt != prompt {
+		t.Fatalf("prompt must stay inline by default: %d -> %d chars", len(prompt), len(gotPrompt))
 	}
 }
 

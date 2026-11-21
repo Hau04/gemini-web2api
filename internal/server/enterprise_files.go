@@ -42,7 +42,7 @@ func (a *App) attachEnterpriseContext(messages []models.OpenAIMessage, prompt st
 		prompt, images = a.appendLocalFileAttachments(messages, prompt, images)
 	}
 	if a.Cfg.EnterpriseAttachLargePrompt {
-		prompt, images = a.spillLargePrompt(prompt, images)
+		prompt, images = a.spillLargePromptIfEnabled(prompt, images)
 	}
 	return prompt, images
 }
@@ -144,6 +144,23 @@ func formatCount(n int) string {
 		out = append(out, byte(r))
 	}
 	return string(out)
+}
+
+// spillLargePromptIfEnabled spills an oversized prompt only when the content it
+// removes can be read back by the model.
+//
+// On a tenant whose file reader does not hand context-file bodies to the model,
+// a prompt that says "your instructions are in code_context.txt" loses them: the
+// model answers that the file "can no longer be read" and asks for a new chat.
+// So while enterprise_mirror_text_inline is on, the content stays inline.
+func (a *App) spillLargePromptIfEnabled(prompt string, images []format.Image) (string, []format.Image) {
+	if !a.Cfg.EnterpriseMirrorTextInline {
+		return a.spillLargePrompt(prompt, images)
+	}
+	if a.Cfg.BridgeSpilloverChars > 0 && len(prompt) > a.Cfg.BridgeSpilloverChars {
+		a.Logf("Enterprise: keeping the %d-char prompt inline — this tenant's model does not receive context-file bodies, so a prompt that only points at one loses its instructions (enterprise_mirror_text_inline=false spills it instead)", len(prompt))
+	}
+	return prompt, images
 }
 
 // spillLargePrompt replaces an oversized prompt (or its large code blocks) with a

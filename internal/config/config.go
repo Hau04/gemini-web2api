@@ -103,6 +103,11 @@ type Config struct {
 	// EnterpriseAttachLargePrompt spills an oversized prompt (or its large code
 	// blocks) into one .txt context file so the replayed prompt stays small.
 	EnterpriseAttachLargePrompt bool `json:"enterprise_attach_large_prompt"`
+	// EnterpriseMirrorTextInline also writes a text file's content into the
+	// prompt, on top of uploading it as a context file. An upload only becomes
+	// readable if the tenant's file reader exposes it; the prompt always is. Set
+	// false to keep prompts small and trust the upload path entirely.
+	EnterpriseMirrorTextInline bool `json:"enterprise_mirror_text_inline"`
 }
 
 func Default() Config {
@@ -154,6 +159,7 @@ func Default() Config {
 		EnterpriseAutoAttachLocalFiles: true,
 		EnterpriseAutoAttachMinBytes:   0,
 		EnterpriseAttachLargePrompt:    true,
+		EnterpriseMirrorTextInline:     true,
 	}
 }
 
@@ -219,6 +225,7 @@ func Load(path string) (Config, error) {
 		EnterpriseAutoAttachLocalFiles *bool             `json:"enterprise_auto_attach_local_files"`
 		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
 		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
+		EnterpriseMirrorTextInline     *bool             `json:"enterprise_mirror_text_inline"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -362,6 +369,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.EnterpriseAutoAttachMinBytes != nil {
 		cfg.EnterpriseAutoAttachMinBytes = *aux.EnterpriseAutoAttachMinBytes
+	}
+	if aux.EnterpriseMirrorTextInline != nil {
+		cfg.EnterpriseMirrorTextInline = *aux.EnterpriseMirrorTextInline
 	}
 	if aux.EnterpriseAttachLargePrompt != nil {
 		cfg.EnterpriseAttachLargePrompt = *aux.EnterpriseAttachLargePrompt

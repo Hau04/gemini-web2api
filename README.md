@@ -412,7 +412,7 @@ In **bridge mode**, each request either starts a fresh chat in the open Gemini t
 
 The heuristic can only see what the client sends: it fires when a request carries *no* assistant/tool history **and** a user message that differs from the previous single turn — which is also what a stateless client looks like. If every message opens a new chat in the tab, either set `"bridge_auto_new_chat": false`, switch the popup to *Continue open chat*, or use `@continue`. Turn history is re-sent in full when the tab holds nothing, so continuity never depends on the tab alone.
 
-#### Direct mode has the same question — and one shared session per process
+#### Direct mode has the same question — one session per client chat
 
 Without a browser tab, continuity lives in the Discovery Engine **session**. `/v1/model-info` plus one log line tell you which one is in play:
 
@@ -530,7 +530,23 @@ Enterprise context file "code_context.txt" uploaded as text/plain (20 KB, fileId
 
 If the retry still fails, the attachment is inlined as before and the log says why.
 
-### 5. TLS Impersonation (Bypass WAF)
+### 5. Instructions the model can actually read
+
+A context file is only readable if the tenant's file reader hands its body to the model — on the tenants seen so far it does not, and the model answers about your own instruction file:
+
+> *"I am unable to view your latest reply because this conversation's context file (`code_context.txt`) has exceeded the inline display limit… Please open a new chat."*
+
+That reply means the instructions were in the file and nowhere else. So `enterprise_mirror_text_inline` (default **true**) makes every text attachment travel **both** ways: uploaded as a context file for the tenant, and written into the prompt the model certainly reads.
+
+```
+Enterprise attachments: 1 uploaded as context files, 1 inlined (1 of them also written into the prompt so the model can read them)
+```
+
+For the same reason an oversized prompt is no longer spilled into `code_context.txt` while mirroring is on: a prompt that merely points at an unreadable file has no instructions left. Set `"enterprise_mirror_text_inline": false` to get the old behaviour back (small prompts, everything in attachments) if your tenant does serve file bodies.
+
+Binary attachments (images, PDFs) are never mirrored — their bytes cannot be inlined as text, so they still depend on the upload transport.
+
+### 6. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:
 
