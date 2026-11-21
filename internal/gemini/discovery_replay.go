@@ -609,6 +609,9 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 		ConversationKey:        conv.Key,
 		ConversationHasHistory: conv.HasHistory,
 	}
+	// A prompt the tenant refuses as too large fails the whole turn, so the
+	// ceiling learned from an earlier refusal is applied before sending.
+	prompt = c.fitPrompt(prompt)
 	session = c.reuseOrCreateEnterpriseSession(session, convOpts)
 	if session != "" {
 		c.recordEnterpriseSession(session, convOpts)
@@ -657,6 +660,7 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 
 	var lastErr error
 	sessionDropped := false
+	promptShrinks := 0
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
 		req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
 		if err != nil {
@@ -706,6 +710,26 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 				sessionJSON = ""
 				body = buildBody()
 				attempt-- // do not spend a retry on a stale session
+				continue
+			}
+			// PROMPT_TOO_LARGE: the tenant's cap is smaller than we knew (or is not
+			// known yet). Shrink the prompt, remember the new ceiling, and retry —
+			// losing the oldest turns beats losing the whole turn.
+			if resp.StatusCode == http.StatusBadRequest && promptTooLarge(bodyText) && promptShrinks < maxPromptShrinkRetries {
+				promptShrinks++
+				limit := len(prompt) * 3 / 4
+				if limit <= 0 {
+					limit = len(prompt) / 2
+				}
+				c.Logf("Direct Discovery Engine rejected the prompt as too large (%d chars) — retrying with the oldest turns omitted (%d chars)", len(prompt), limit)
+				c.rememberPromptCeiling(limit)
+				fitted, trimmed := fitPromptForUpstream(prompt, limit)
+				if !trimmed {
+					break
+				}
+				prompt = fitted
+				body = buildBody()
+				attempt-- // a shrink is not a transport retry
 				continue
 			}
 			c.Logf("Direct Discovery Engine streamAssist returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyText)))
