@@ -103,6 +103,11 @@ type Config struct {
 	// EnterpriseAttachLargePrompt spills an oversized prompt (or its large code
 	// blocks) into one .txt context file so the replayed prompt stays small.
 	EnterpriseAttachLargePrompt bool `json:"enterprise_attach_large_prompt"`
+	// DiscoveryEngineToolsSpec overrides the toolsSpec sent to widgetStreamAssist.
+	// Paste what the real Gemini Enterprise app sends once the app's actions
+	// (including MCP connector tools) are enabled. Empty uses the toolsSpec from
+	// the captured template, or the captured default.
+	DiscoveryEngineToolsSpec string `json:"discovery_engine_tools_spec"`
 	// EnterpriseMaxPromptChars caps the prompt sent to the Discovery Engine
 	// streamAssist endpoint. 0 learns the tenant's own limit from a
 	// PROMPT_TOO_LARGE refusal and remembers it.
@@ -231,6 +236,7 @@ func Load(path string) (Config, error) {
 		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
 		EnterpriseMirrorTextInline     *bool             `json:"enterprise_mirror_text_inline"`
 		EnterpriseMaxPromptChars       *int              `json:"enterprise_max_prompt_chars"`
+		DiscoveryEngineToolsSpec       *string           `json:"discovery_engine_tools_spec"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -374,6 +380,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.EnterpriseAutoAttachMinBytes != nil {
 		cfg.EnterpriseAutoAttachMinBytes = *aux.EnterpriseAutoAttachMinBytes
+	}
+	if aux.DiscoveryEngineToolsSpec != nil {
+		cfg.DiscoveryEngineToolsSpec = *aux.DiscoveryEngineToolsSpec
 	}
 	if aux.EnterpriseMaxPromptChars != nil {
 		cfg.EnterpriseMaxPromptChars = *aux.EnterpriseMaxPromptChars

@@ -555,7 +555,33 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 
 Trimming keeps the head (system prompt, instructions, attached-file preamble) and the tail (recent turns, the current question), replaces the middle with a one-line notice so the model knows the history is partial, and never cuts the current question. Set `"enterprise_max_prompt_chars"` to skip the single learn-by-failing round trip.
 
-### 6. TLS Impersonation (Bypass WAF)
+### 6. Tenant tools, MCP connectors and the toolsSpec
+
+Gemini Enterprise runs the tools the **assistant** owns — including the actions imported from an MCP connector — not tools the proxy declares. `StreamAssistRequest.ToolsSpec` has no registry of arbitrary tools at all: it holds the Vertex AI Search, web-grounding, image and video specs. So when the model says "I have no REA tools", the answer is in the tenant, not in `/v1/chat/completions`:
+
+- the MCP data store must be **Active** and linked to the same app the widget `configId` points at;
+- its imported **actions** must be enabled on the data store (they start disabled);
+- a chat only sees the actions it started with — a *new chat* picks up newly enabled ones.
+
+What the proxy does control is the `toolsSpec` it asks for, and it logs it every turn:
+
+```
+Enterprise: toolsSpec from default: {"toolRegistry":"default_tool_registry"}
+```
+
+Three ways to set it:
+
+| `discovery_engine_tools_spec` | Effect |
+|---|---|
+| unset | the toolsSpec from the captured template, else the captured default above |
+| `"none"` | the field is omitted entirely — the assistant's own configuration decides |
+| a JSON object | sent verbatim; paste what the real app sends once its actions are on |
+
+`"none"` is the A/B test worth trying first: if pinning a tool registry is what hides the tenant's custom actions, omitting the field brings them back — and the log line tells you which shape was used.
+
+Prompt-side, the tool preamble now says that host-side tools (MCP actions, a document generator) are a permitted, separate set, so a model that only sees the declared client tools does not conclude it has nothing else.
+
+### 7. TLS Impersonation (Bypass WAF)
 
 If you run this tool in datacenters (like AWS/DigitalOcean) where Google blocks the IP with a 403 Forbidden, you can impersonate a real browser's TLS signature:
 
