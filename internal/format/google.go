@@ -41,7 +41,8 @@ func BuildToolPrompt(defs []models.GoogleFunctionDeclaration) string {
 			"When calling tools:\n"+
 			"- Do NOT use Gemini's built-in web search, Deep Research, or any built-in tools. Use the declared tools below via function_call blocks.\n"+
 			"- Host-side tools are a different set: if this session exposes its own tools or actions (an MCP connector, a document generator), they execute on the host and are allowed — use one when it is the right tool for a step.\n"+
-			"- Output ONLY the function_call block(s), nothing else\n"+
+			"- End the message with the function_call block(s): one short sentence before them is fine, nothing after them\n"+
+			"- Never include your own planning or notes about these instructions in the answer\n"+
 			"- You may call multiple tools with multiple blocks\n"+
 			"- After receiving a [Tool result for ...], use that data to answer the user\n\n"+
 			"Available tools:\n%s",

@@ -209,6 +209,18 @@ Supports Google native API endpoints:
 
 ## WorkBuddy / MCP compatibility
 
+### Tool-call format: one rule, not two
+
+WorkBuddy's own system prompt says *"Always narrate before a tool call"*; the proxy used to say *"Output ONLY the tool_call block(s)"*. A model told both rules negotiates them out loud, and that deliberation lands in the answer — `Let me check…`, `Wait—should I output only the block?`, a draft block before the real one.
+
+The preamble now matches the client: **a short sentence before the block is fine, nothing after it**, and planning/self-checks must never be written into the answer. Leading prose is emitted as normal content (the block is still what becomes `tool_calls`), so both sides get what they asked for.
+
+If the model calls a tool the request never declared, the log says so instead of leaving a broken turn unexplained:
+
+```
+MODEL TOOL WARNING: the model called "resolve_issue" which this request did not declare (26 declared: …) — the client cannot run it
+```
+
 Built for agent runtimes that drive tools, connectors, skills and MCP servers (WorkBuddy, Claude-style agents, the OpenAI SDKs):
 
 | Feature | Behaviour |

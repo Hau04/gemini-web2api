@@ -519,6 +519,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				if hasTools {
 					if isBufferingToolCall {
 						_, toolCalls := format.ParseToolCallsWithContext(fullText.String(), req.Tools, req.Messages)
+						a.warnUndeclaredToolCalls(req.Tools, toolCalls)
 						if len(toolCalls) > 0 {
 							tcChunk := models.OpenAIChatResponse{
 								ID:      cid,
@@ -712,6 +713,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		var toolCalls []models.OpenAIToolCall
 		if len(req.Tools) > 0 && text != "" && !isToolNone {
 			text, toolCalls = format.ParseToolCallsWithContext(text, req.Tools, req.Messages)
+			a.warnUndeclaredToolCalls(req.Tools, toolCalls)
 		}
 
 		msg := models.OpenAIMessage{
@@ -869,6 +871,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	var toolCalls []models.OpenAIToolCall
 	if len(req.Tools) > 0 && text != "" && !isToolNone {
 		text, toolCalls = format.ParseToolCallsWithContext(text, req.Tools, req.Messages)
+		a.warnUndeclaredToolCalls(req.Tools, toolCalls)
 	}
 
 	msg := models.OpenAIMessage{
