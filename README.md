@@ -555,6 +555,20 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 
 Trimming keeps the head (system prompt, instructions, attached-file preamble) and the tail (recent turns, the current question), replaces the middle with a one-line notice so the model knows the history is partial, and never cuts the current question. Set `"enterprise_max_prompt_chars"` to skip the single learn-by-failing round trip.
 
+Two rules keep this from eating a conversation alive:
+
+- **A session is dropped before a prompt is trimmed.** A session's own history counts towards the tenant's limit and grows by a whole prompt every turn, so a long-running session eventually refuses every request however small the prompt is. On such a refusal the session is cleared and the same (untrimmed) prompt is retried — the client re-sends its history anyway:
+
+  ```
+  Direct Discovery Engine refused the prompt as too large (HTTP 400, 286688 chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt
+  ```
+
+- **Nothing is learned below 8 KB.** A refusal of a small prompt is not about prompt size, so it never lowers the remembered ceiling — that is how an earlier version ratcheted itself down to 247-char prompts and failed every turn. Such a refusal is reported instead:
+
+  ```
+  Direct Discovery Engine refused a 247-char prompt as too large and it cannot be the prompt size — check the tenant's own limits (session history, attachments, model) rather than the request
+  ```
+
 ### 6. Tenant tools, MCP connectors and the toolsSpec
 
 Gemini Enterprise runs the tools the **assistant** owns — including the actions imported from an MCP connector — not tools the proxy declares. `StreamAssistRequest.ToolsSpec` has no registry of arbitrary tools at all: it holds the Vertex AI Search, web-grounding, image and video specs. So when the model says "I have no REA tools", the answer is in the tenant, not in `/v1/chat/completions`:

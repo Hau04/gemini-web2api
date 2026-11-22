@@ -547,6 +547,20 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 
 裁剪保留头部（系统提示、指令、附件说明）与尾部（最近几轮、当前问题），中间替换成一行说明，让模型知道自己看到的历史不完整；当前问题永远不会被截断。设置 `"enterprise_max_prompt_chars"` 可以跳过「失败一次才知道」的那一轮。
 
+两条规则避免把对话裁到窒息：
+
+- **先换会话，再裁 prompt。** 会话自身的历史也计入租户的上限，并且每轮都增加一整个 prompt，所以长会话最终无论 prompt 多小都会被拒。遇到这种拒绝时，先清掉会话、用**未裁剪**的同一 prompt 重试 —— 客户端本来就会重发历史：
+
+  ```
+  Direct Discovery Engine refused the prompt as too large (HTTP 400, 286688 chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt
+  ```
+
+- **低于 8 KB 的拒绝不被学习。** 小 prompt 被拒显然不是因为大小，所以它不会下调记住的上限 —— 早先版本正是这样一路把上限压到 247 字符、每轮必败。这类拒绝会被如实报出来：
+
+  ```
+  Direct Discovery Engine refused a 247-char prompt as too large and it cannot be the prompt size — check the tenant's own limits (session history, attachments, model) rather than the request
+  ```
+
 ### 6. 租户工具、MCP 连接器与 toolsSpec
 
 Gemini Enterprise 运行的是**助手（assistant）**自带的工具 —— 包括 MCP 连接器导入的 actions —— 而不是代理声明的工具。`StreamAssistRequest.ToolsSpec` 里根本没有任意工具的注册表字段，它只有 Vertex AI Search、网页检索、图像、视频这几项。所以当模型说「我没有 REA 工具」时，答案在租户侧，不在 `/v1/chat/completions`：

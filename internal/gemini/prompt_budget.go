@@ -19,6 +19,13 @@ import (
 
 const (
 	promptTooLargeMarkerReserve = 240
+	// promptCeilingFloor is the smallest cap worth believing. A tenant that
+	// refuses a prompt this small is not refusing it for its size — something
+	// else in the request (typically the session's accumulated history) is what
+	// is too large, and shrinking the prompt only digs a hole: the ceiling
+	// ratchets down, every later turn is trimmed to nothing, and the hole never
+	// recovers. Refusals below the floor are therefore not learned from.
+	promptCeilingFloor = 8 << 10
 	// maxPromptShrinkRetries bounds the shrink-and-retry loop: each round trip
 	// costs seconds, and one or two 25% cuts either fit or the tenant wants a
 	// prompt far smaller than a conversation can be.
@@ -41,10 +48,17 @@ func fitPromptForUpstream(prompt string, limit int) (string, bool) {
 	if limit <= 0 || len(prompt) <= limit {
 		return prompt, false
 	}
-	budget := limit - promptTooLargeMarkerReserve
-	if budget <= 0 {
-		budget = limit / 2
+	// Too small for a marker: the current question is the only part worth
+	// keeping, and it must fit — a prompt that overshoots the limit it was
+	// trimmed to would be refused again with no way out.
+	if limit <= promptTooLargeMarkerReserve {
+		start := len(prompt) - limit
+		if start < 0 {
+			start = 0
+		}
+		return prompt[start:], true
 	}
+	budget := limit - promptTooLargeMarkerReserve
 	headBudget := budget * 2 / 5
 	tailBudget := budget - headBudget
 	if tailBudget < 0 {
@@ -68,7 +82,14 @@ func fitPromptForUpstream(prompt string, limit int) (string, bool) {
 		// Never cut the tail: it holds the current question. Trim the head.
 		overflow := len(out) - limit
 		if overflow < len(head) {
-			out = head[:len(head)-overflow] + marker + tail
+			head = head[:len(head)-overflow]
+			out = head + marker + tail
+		}
+		if len(out) > limit {
+			out = tail
+			if len(out) > limit {
+				out = out[len(out)-limit:]
+			}
 		}
 	}
 	return out, true
@@ -125,7 +146,7 @@ func (c *Client) promptCeiling() int {
 // rememberPromptCeiling stores a limit the tenant has just enforced, so later
 // turns are trimmed before they are sent instead of after a 400.
 func (c *Client) rememberPromptCeiling(limit int) {
-	if limit <= 0 {
+	if limit < promptCeilingFloor {
 		return
 	}
 	c.promptMu.Lock()
