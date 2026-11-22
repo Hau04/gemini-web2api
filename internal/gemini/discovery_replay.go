@@ -722,22 +722,40 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			// PROMPT_TOO_LARGE: the tenant's cap is smaller than we knew (or is not
 			// known yet). Shrink the prompt, remember the new ceiling, and retry —
 			// losing the oldest turns beats losing the whole turn.
-			if resp.StatusCode == http.StatusBadRequest && promptTooLarge(bodyText) && promptShrinks < maxPromptShrinkRetries {
-				promptShrinks++
-				limit := len(prompt) * 3 / 4
-				if limit <= 0 {
-					limit = len(prompt) / 2
+			if resp.StatusCode == http.StatusBadRequest && promptTooLarge(bodyText) {
+				// The tenant counts the session's own history towards the limit, and
+				// it grows by a whole prompt every turn: a session that has been
+				// talking for a while is too large no matter how small this prompt
+				// is. Dropping it keeps the turn (and the full prompt) alive, so it
+				// is tried before cutting the user's content away.
+				if !sessionDropped && sessionJSON != "" {
+					sessionDropped = true
+					c.Logf("Direct Discovery Engine refused the prompt as too large (HTTP 400, %d chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt", len(prompt))
+					c.clearEnterpriseSession()
+					session = ""
+					sessionJSON = ""
+					body = buildBody()
+					attempt-- // not a transport retry
+					continue
 				}
-				c.Logf("Direct Discovery Engine rejected the prompt as too large (%d chars) — retrying with the oldest turns omitted (%d chars)", len(prompt), limit)
-				c.rememberPromptCeiling(limit)
-				fitted, trimmed := fitPromptForUpstream(prompt, limit)
-				if !trimmed {
-					break
+				// No session to blame: the prompt itself is over the cap. Shrink it —
+				// but only while the prompt is big enough for that to be the reason.
+				if promptShrinks < maxPromptShrinkRetries && len(prompt) > promptCeilingFloor {
+					promptShrinks++
+					limit := len(prompt) * 3 / 4
+					c.Logf("Direct Discovery Engine rejected the prompt as too large (%d chars) — retrying with the oldest turns omitted (%d chars)", len(prompt), limit)
+					if fitted, trimmed := fitPromptForUpstream(prompt, limit); trimmed {
+						c.rememberPromptCeiling(limit)
+						prompt = fitted
+						body = buildBody()
+						attempt-- // a shrink is not a transport retry
+						continue
+					}
 				}
-				prompt = fitted
-				body = buildBody()
-				attempt-- // a shrink is not a transport retry
-				continue
+				// A prompt this small is not too large: report the tenant's refusal
+				// instead of trimming the conversation down to nothing.
+				c.Logf("Direct Discovery Engine refused a %d-char prompt as too large and it cannot be the prompt size — check the tenant's own limits (session history, attachments, model) rather than the request", len(prompt))
+				promptShrinks = maxPromptShrinkRetries
 			}
 			c.Logf("Direct Discovery Engine streamAssist returned HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(bodyText)))
 			return &UpstreamError{
