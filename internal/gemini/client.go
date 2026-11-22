@@ -104,7 +104,13 @@ type Client struct {
 	// own again.
 	// learnedPromptCeiling is the prompt size the tenant has accepted since the
 	// last PROMPT_TOO_LARGE refusal (0 = not known yet), and promptMu guards it.
-	learnedPromptCeiling     int
+	learnedPromptCeiling int
+	// enterpriseSessionRefused remembers conversations whose session had to be
+	// dropped because the tenant counted its history towards the prompt limit.
+	enterpriseSessionRefused map[string]bool
+	// sessionSkipLogged keeps the "no session for this conversation" notice to
+	// one line per conversation instead of one per turn.
+	sessionSkipLogged        map[string]bool
 	promptMu                 sync.Mutex
 	enterpriseSessions       map[string]string
 	enterpriseSessionKey     string

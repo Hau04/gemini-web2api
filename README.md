@@ -557,6 +557,12 @@ Trimming keeps the head (system prompt, instructions, attached-file preamble) an
 
 Two rules keep this from eating a conversation alive:
 
+- **A big prompt gets no session at all.** An agent loop re-sends its whole history (hundreds of KB), so a session adds no memory — only its own growing history against the same limit. Above `"enterprise_session_max_prompt_chars"` (default 32 KB) the request goes out sessionless, and a conversation whose session was refused once is not offered one again:
+
+  ```
+  Enterprise: no session for conversation 6574ddca — the prompt already carries the conversation; a session is reused only while the prompt is small
+  ```
+
 - **A session is dropped before a prompt is trimmed.** A session's own history counts towards the tenant's limit and grows by a whole prompt every turn, so a long-running session eventually refuses every request however small the prompt is. On such a refusal the session is cleared and the same (untrimmed) prompt is retried — the client re-sends its history anyway:
 
   ```

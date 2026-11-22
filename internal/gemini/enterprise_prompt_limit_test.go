@@ -197,8 +197,10 @@ func TestPromptTooLargeDropsTheSessionFirst(t *testing.T) {
 	var logs []string
 	c.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 
-	prompt := "INSTRUCTIONS: keep me.\n" + strings.Repeat("context line\n", 20000) + "[User]: go\n"
-	if err := c.generateViaDiscoveryDirectStream(prompt, nil, "", ConversationInfo{}, "gemini-4-argon", nil, func(string) error { return nil }); err != nil {
+	// Small enough that a session is attached (under the session threshold), so the
+	// refusal can only come from the session's own history.
+	prompt := "INSTRUCTIONS: keep me.\n" + strings.Repeat("context line\n", 2000) + "[User]: go\n"
+	if err := c.generateViaDiscoveryDirectStream(prompt, nil, "", ConversationInfo{Key: "conv0007"}, "gemini-4-argon", nil, func(string) error { return nil }); err != nil {
 		t.Fatalf("the turn should survive by dropping the oversized session, got %v", err)
 	}
 
