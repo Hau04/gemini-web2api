@@ -77,7 +77,9 @@ The background worker, content script bridge, and popup all use the saved addres
 
 The popup includes a **Chat Mode** selector controlling where API requests land in the open Gemini tab:
 
-- **Auto (recommended)** — a brand-new client conversation starts a fresh browser chat; follow-ups continue it.
+- **Auto (recommended)** — the same client conversation ID continues the current Gemini chat; a changed ID or a clear reset from multi-turn history starts a clean chat. The server recognizes common `conversation_id` / `chat_id` / `thread_id` / `session_id` fields and Responses API `previous_response_id` chains.
+
+If a client sends only one user message per request and no stable conversation ID, Auto cannot tell a follow-up from a new chat. It favors continuity to avoid opening one Gemini chat per prompt; use *Always new chat* / `@new` for a deliberate reset, or configure the client to send an ID.
 - **Always new chat** — every API request starts a fresh chat.
 - **Continue open chat** — requests keep appending to the chat currently open in the tab. Open any old chat from the Gemini history sidebar first, and API turns will keep its Gemini memory/context.
 

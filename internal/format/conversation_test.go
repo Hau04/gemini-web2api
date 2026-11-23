@@ -27,6 +27,21 @@ func TestConversationIDStableForSameChat(t *testing.T) {
 	}
 }
 
+func TestConversationIDFromClientIDIsStableAndDistinct(t *testing.T) {
+	first := ConversationIDFromClientID("workbuddy-chat-a")
+	second := ConversationIDFromClientID("workbuddy-chat-a")
+	other := ConversationIDFromClientID("workbuddy-chat-b")
+	if first == "" || first != second {
+		t.Fatalf("same client conversation id must produce a stable key: %q vs %q", first, second)
+	}
+	if first == other {
+		t.Fatalf("different client conversation ids should produce different keys: %q", first)
+	}
+	if len(first) != 64 {
+		t.Fatalf("client conversation key should retain the full SHA-256 digest, got %d hex characters", len(first))
+	}
+}
+
 func TestConversationIDDiffersForNewChat(t *testing.T) {
 	a, _ := ConversationID([]models.OpenAIMessage{{Role: "user", Content: "hi"}})
 	b, _ := ConversationID([]models.OpenAIMessage{{Role: "user", Content: "write a function"}})

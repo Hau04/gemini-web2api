@@ -27,6 +27,11 @@ type App struct {
 	modelStateMu sync.Mutex
 	modelState   bridgeModelState
 
+	// responseConversations links Responses API ids to a stable client chat id,
+	// allowing previous_response_id chains to remain on the same Gemini thread.
+	responseConversationMu  sync.Mutex
+	responseConversations   map[string]responseConversationEntry
+
 	// mediaGenerate is a test seam for the media endpoints; nil means "call the
 	// real Gemini client".
 	mediaGenerate func(prompt string, opt gemini.ModelOptions) (string, []gemini.MediaAsset, error)

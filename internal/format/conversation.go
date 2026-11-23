@@ -11,10 +11,10 @@ import (
 // ConversationID identifies which client conversation a request belongs to, so
 // the upstream can keep one thread per chat instead of one thread for everything.
 //
-// The identity is the first user message: continuing a chat resends it verbatim
-// as the first element of the history, while a brand-new chat starts with a
-// different first message. No conversation id is available from OpenAI-shaped
-// clients, so this is the only stable signal in the payload.
+// When a client doesn't provide an explicit conversation ID, the identity is
+// the first user message: continuing a chat resends it verbatim as the first
+// element of the history. This is a fallback only; it cannot reliably identify
+// a new chat for stateless clients that send only the latest user message.
 //
 // hasHistory reports whether the client sent assistant/tool turns — the
 // difference between "a real conversation is under way" and "a single message",
@@ -37,6 +37,18 @@ func ConversationID(messages []models.OpenAIMessage) (key string, hasHistory boo
 	}
 	sum := sha256.Sum256([]byte(firstUser))
 	return hex.EncodeToString(sum[:4]), hasHistory
+}
+
+// ConversationIDFromClientID returns a stable, non-reversible key for a client
+// supplied conversation identifier. Hashing keeps arbitrary client IDs out of
+// logs and upstream payloads while preserving a stable session key.
+func ConversationIDFromClientID(clientID string) string {
+	clientID = strings.TrimSpace(clientID)
+	if clientID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(clientID))
+	return hex.EncodeToString(sum[:])
 }
 
 // GoogleConversationID is ConversationID for a Google-shaped request: the first

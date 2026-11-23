@@ -49,11 +49,14 @@ type ModelOptions struct {
 	// fileRefs); Gemini Enterprise uploads them into the assistant session
 	// instead, because content-push does not exist on that origin.
 	Files []RawFile
-	// ConversationKey identifies the client chat this request belongs to (see
-	// format.ConversationID). Used to bind one Discovery Engine session per chat.
+	// ConversationKey identifies the client chat this request belongs to. It is
+	// derived from an explicit client ID when available, otherwise from the first
+	// user message (see format.ConversationID). Used to bind one Discovery Engine
+	// session per chat.
 	ConversationKey string
-	// ConversationHasHistory is true when the client sent assistant/tool turns,
-	// i.e. a conversation is already under way rather than a lone message.
+	// ConversationHasHistory is true when the client sent assistant/tool turns
+	// or supplied an explicit conversation ID. The latter lets a stateless client
+	// keep one session across requests that each contain only one user message.
 	ConversationHasHistory bool
 	// MediaSink, when set, receives the raw upstream payload as it streams in so
 	// the caller can extract generated images/videos (see ExtractMedia). The

@@ -1303,16 +1303,17 @@ func ConversationFingerprints(req models.OpenAIChatRequest) []string {
 }
 
 type preparedBridgeTurn struct {
-	Prompt           string
-	Attachments      []bridge.Attachment
-	NewChat          bool
-	LoopPenalty      bool
-	SessionClient    string
-	SessionConv      string
-	Fingerprints     []string
-	UserFingerprints []string
-	ToolNames        map[string]bool
-	UploadedSigs     map[string]string
+	Prompt                string
+	Attachments           []bridge.Attachment
+	NewChat               bool
+	LoopPenalty           bool
+	SessionClient         string
+	SessionConv           string
+	ClientConversationID  string
+	Fingerprints          []string
+	UserFingerprints      []string
+	ToolNames             map[string]bool
+	UploadedSigs          map[string]string
 }
 
 // ExtractUserFingerprints returns the per-user-message digests from ConversationFingerprints
@@ -1335,13 +1336,14 @@ func ExtractUserFingerprints(req models.OpenAIChatRequest, allFingerprints []str
 }
 
 func (a *App) recordBridgeTurnSuccess(p preparedBridgeTurn) {
-	a.Bridge.RecordTurnSuccessWithTools(
+	a.Bridge.RecordTurnSuccessWithClientConversation(
 		p.SessionClient,
 		p.SessionConv,
 		p.Fingerprints,
 		p.UserFingerprints,
 		p.ToolNames,
 		p.UploadedSigs,
+		p.ClientConversationID,
 		p.NewChat,
 	)
 }
@@ -1355,7 +1357,7 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	// Chat-session selection priority:
 	//   1. Per-request model suffix (@new / @continue)
 	//   2. Extension popup override (POST /bridge/chatmode)
-	//   3. Auto heuristic: a brand-new client conversation starts a fresh chat
+	//   3. Auto: explicit client chat id, then message-history heuristic
 	if chatMode == "" {
 		chatMode = a.Bridge.ChatMode()
 	}
@@ -1368,10 +1370,13 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 		newChat = false
 		a.Logf("Chat mode 'continue' requested — appending to the tab's currently open chat")
 	default:
-		// Detect when the client (e.g. WorkBuddy) started a brand-new chat while the open
-		// browser tab still holds an older conversation, so Gemini starts a clean New Chat
-		// with zero stale memory or leftover files from the previous chat.
-		newChat = a.Cfg.BridgeAutoNewChat && a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+		if a.Cfg.BridgeAutoNewChat {
+			if changed, known := a.Bridge.ClientConversationChanged(req.ClientConversationID, req.ClientConversationContinuation); known {
+				newChat = changed
+			} else {
+				newChat = a.Bridge.IsNewConversation(userFPs, hasAssistantOrTool)
+			}
+		}
 		if newChat {
 			a.Logf("Bridge detected new client conversation — instructing browser tab to start a fresh chat")
 		}
@@ -1571,15 +1576,16 @@ func (a *App) prepareBridgeRequest(r *http.Request, req models.OpenAIChatRequest
 	}
 
 	return preparedBridgeTurn{
-		Prompt:           bridgePrompt,
-		Attachments:      attachments,
-		NewChat:          newChat,
-		LoopPenalty:      loopPenalty,
-		SessionClient:    sessClient,
-		SessionConv:      sessConvGen,
-		Fingerprints:     fingerprints,
-		UserFingerprints: userFPs,
-		ToolNames:        currentToolNames,
-		UploadedSigs:     uploadedSigs,
+		Prompt:               bridgePrompt,
+		Attachments:          attachments,
+		NewChat:              newChat,
+		LoopPenalty:          loopPenalty,
+		SessionClient:        sessClient,
+		SessionConv:          sessConvGen,
+		ClientConversationID: req.ClientConversationID,
+		Fingerprints:         fingerprints,
+		UserFingerprints:     userFPs,
+		ToolNames:            currentToolNames,
+		UploadedSigs:         uploadedSigs,
 	}
 }

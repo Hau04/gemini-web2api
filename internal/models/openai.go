@@ -5,6 +5,13 @@ type OpenAIChatRequest struct {
 	Messages   []OpenAIMessage `json:"messages"`
 	Tools      []OpenAITool    `json:"tools"`
 	ToolChoice any             `json:"tool_choice"`
+
+	// ClientConversationID is populated by the server from optional client
+	// metadata/headers; it is never serialized as part of the OpenAI response.
+	ClientConversationID           string `json:"-"`
+	// ClientConversationContinuation is true when the client explicitly chains
+	// this request from a prior Responses API response id.
+	ClientConversationContinuation bool   `json:"-"`
 	// ParallelToolCalls is honoured when a client explicitly disables batching
 	// (some MCP-heavy agent runtimes need strictly one tool call per turn).
 	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`

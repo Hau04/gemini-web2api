@@ -408,9 +408,9 @@ In **bridge mode**, each request either starts a fresh chat in the open Gemini t
    carbon@new                           # aliases work too
    ```
 2. **Extension popup "Chat Mode" selector** — *Auto (recommended)* / *Always new chat* / *Continue open chat*. The choice is pushed to the server (`POST /bridge/chatmode`) and persists until changed. With *Continue open chat*, click any old chat in the Gemini history sidebar first — API turns then keep adding to that conversation.
-3. **Auto heuristic (default)** — a brand-new client conversation (e.g. WorkBuddy "New Chat") starts a fresh browser chat; follow-up turns continue it.
+3. **Auto heuristic (default)** — a clear transition from a multi-turn client transcript to a fresh, single-message request starts a fresh browser chat. When the client supplies a stable conversation ID, that ID is used instead: the same ID continues the existing Gemini chat and a different ID starts a clean one.
 
-The heuristic can only see what the client sends: it fires when a request carries *no* assistant/tool history **and** a user message that differs from the previous single turn — which is also what a stateless client looks like. If every message opens a new chat in the tab, either set `"bridge_auto_new_chat": false`, switch the popup to *Continue open chat*, or use `@continue`. Turn history is re-sent in full when the tab holds nothing, so continuity never depends on the tab alone.
+The proxy recognizes `conversation_id`, `chat_id`, `thread_id`, and `session_id` (also in `metadata`), the corresponding `X-...-ID` headers, and Responses API `previous_response_id` chains. The ID must stay the same for every turn of one WorkBuddy chat and change when the user starts a new one. If a client sends only a single user message per request and supplies no stable ID, a follow-up and a new chat are indistinguishable; Auto favors continuity rather than opening one Gemini chat per prompt. In that case, use *Always new chat* / `@new` for deliberate resets, or configure the client to send its conversation ID. `@continue` or *Continue open chat* disables automatic resets. When the client sends history, the proxy replays it in full whenever the tab has no matching context.
 
 #### Direct mode has the same question — one session per client chat
 
@@ -421,12 +421,13 @@ Enterprise: continuing in assistant session 8f1c (reused for every turn of this 
 Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
 ```
 
-**One session per client chat.** The payload carries no conversation id, so the proxy derives one from the first user message (stable while a chat is continued, different when a new chat starts) and keeps a session per chat:
+**One session per client chat.** When the client supplies a stable conversation ID, the proxy uses it as the session key; otherwise it falls back to the first user message and transcript history:
 
-- continuing a chat → the same session, so the thread keeps its memory;
-- **opening a new chat in the client → a fresh session**, so the new chat never inherits the previous thread's memory (a single message arriving right after a multi-turn exchange is exactly that signal);
-- resuming an earlier chat → its own session again, not the most recent one;
-- a client that only ever sends one message with no history keeps one session, since there is nothing to tell its messages apart from a continuation.
+- continuing a chat with the same ID → the same session, so the thread keeps its memory;
+- **opening a new chat with a changed ID → a fresh session**, so it never inherits the previous thread's memory;
+- without an ID, a reset from a multi-turn transcript to a single-message request remains the legacy fallback signal, but it can be ambiguous for stateless clients;
+- resuming an earlier chat with its ID → that chat's own session again, not the most recent one;
+- a client that only ever sends one message with no history or ID keeps one session, since there is nothing to distinguish a new chat from a continuation.
 
 ```
 Enterprise: continuing in assistant session 8f1c for conversation 4c1a9ba2
