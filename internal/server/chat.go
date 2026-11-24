@@ -96,6 +96,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid JSON"}})
 		return
 	}
+	req.ClientConversationID, req.ClientConversationContinuation = a.clientConversationFromBody(r, bodyBytes)
 
 	modelStr := req.Model
 	if modelStr == "" {
@@ -148,7 +149,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		prompt += format.MediaGenerationInstruction(clientMediaTools)
 	}
 
-	convKey, convHasHistory := format.ConversationID(req.Messages)
+	convKey, convHasHistory := openAIConversationInfo(req)
 	gemOpt := gemini.ModelOptions{
 		ModelName:              resolved.Name,
 		ModelID:                resolved.Mode,

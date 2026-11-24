@@ -246,9 +246,9 @@ const (
 )
 
 // sessionAction decides whether the coming request belongs to the cached
-// conversation. The payload carries no conversation id, so the decision uses the
-// two signals it does carry: the first user message (stable while a chat is being
-// continued) and whether assistant/tool turns are present.
+// conversation. A stable explicit conversation key takes precedence; without
+// one, the first user message and assistant/tool history provide the existing
+// best-effort fallback for clients that resend transcripts.
 func (c *Client) sessionAction(opt ModelOptions) sessionAction {
 	c.enterpriseAuthMu.Lock()
 	defer c.enterpriseAuthMu.Unlock()

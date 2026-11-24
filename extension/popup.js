@@ -31,7 +31,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // -------------------- Chat Mode --------------------
 
   const CHAT_MODE_HINTS = {
-    auto: "Auto: a new client conversation starts a fresh chat; follow-ups continue it.",
+    auto: "Auto: same conversation ID continues; a changed ID or clear history reset starts a fresh Gemini chat.",
     new: "Every API request starts a brand-new chat in the browser tab.",
     continue: "Requests keep adding to the chat currently open in the tab — open an old chat from the history sidebar first.",
   };

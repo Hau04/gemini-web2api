@@ -138,11 +138,12 @@ type inFlightEntry struct {
 }
 
 type tabSession struct {
-	convGen          string
-	fingerprints     []string
-	userFingerprints []string
-	toolNames        map[string]bool
-	uploadedFiles    map[string]string // canonical path or "sha256:..." -> signature
+	convGen              string
+	clientConversationID string
+	fingerprints         []string
+	userFingerprints     []string
+	toolNames            map[string]bool
+	uploadedFiles        map[string]string // canonical path or "sha256:..." -> signature
 }
 
 type persistedPacingState struct {
@@ -575,6 +576,7 @@ func (h *Hub) UpdateTabSession(tabName, clientID, convGen string) {
 		if sess.convGen != "" && sess.convGen != convGen {
 			sess.fingerprints = nil
 			sess.userFingerprints = nil
+			sess.clientConversationID = ""
 			sess.toolNames = nil
 			sess.uploadedFiles = make(map[string]string)
 		}
@@ -655,10 +657,12 @@ func (h *Hub) MatchDeltaPrefixWithTools(fingerprints []string, currentTools map[
 	return len(prev), addedTools
 }
 
-// IsNewConversation returns true when the client (e.g. WorkBuddy) started a brand-new
-// Turn-1 conversation while the open browser tab still holds a previous conversation.
-// Never triggers on multi-turn continuations (messages with assistant/tool history) or
-// identical Turn-1 retries.
+// IsNewConversation returns true when the client (e.g. WorkBuddy) clearly reset
+// from a multi-turn transcript to a fresh, single-user-message conversation.
+// A different one-message prompt alone is not enough evidence: stateless clients
+// (including clients that send only the latest input) look exactly the same, and
+// treating each prompt as a new chat would split one client conversation across
+// many Gemini chats. In that ambiguous case, prefer continuing the open chat.
 func (h *Hub) IsNewConversation(incomingUserFPs []string, hasAssistantOrTool bool) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -669,10 +673,41 @@ func (h *Hub) IsNewConversation(incomingUserFPs []string, hasAssistantOrTool boo
 	if hasAssistantOrTool || len(incomingUserFPs) != 1 {
 		return false
 	}
-	if len(sess.userFingerprints) > 1 {
-		return true
+	// A prior request with multiple user turns followed by a lone user turn is
+	// the strongest signal available that the client opened a new conversation.
+	// If both requests carry only one user message, there is no reliable way to
+	// distinguish a new chat from a stateless client's next turn.
+	return len(sess.userFingerprints) > 1
+}
+
+// ClientConversationChanged compares an explicit client-side conversation id
+// with the id attached to the last successful turn. A known Responses API chain
+// is accepted as a continuation when the prior turn had no id. The second return
+// value is false when neither an id nor a chain can resolve the current turn, so
+// the caller should fall back to the message-history heuristic.
+func (h *Hub) ClientConversationChanged(clientConversationID string, isContinuation bool) (changed, known bool) {
+	clientConversationID = strings.TrimSpace(clientConversationID)
+	if clientConversationID == "" {
+		return false, false
 	}
-	return incomingUserFPs[0] != sess.userFingerprints[0]
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	sess := h.ensureSessionLocked(h.activeClientID)
+	if sess.clientConversationID != "" {
+		return sess.clientConversationID != clientConversationID, true
+	}
+	if isContinuation {
+		// A linked Responses API turn is an explicit continuation even if the
+		// preceding response predates this server's conversation-id tracking.
+		return false, true
+	}
+	if len(sess.userFingerprints) > 0 {
+		// The client started sending an id after an untagged turn. Treat the
+		// first id as a different conversation rather than risk carrying memory
+		// from an unidentifiable chat into it.
+		return true, true
+	}
+	return false, false
 }
 
 // RecordTurnSuccess saves the conversation prefix and uploaded file signatures for the
@@ -692,6 +727,13 @@ func (h *Hub) RecordTurnSuccessWithConversation(clientID, convGen string, finger
 // RecordTurnSuccessWithTools additionally stores the declared tool names for the session
 // so purely additive mid-chat tool updates can preserve delta context.
 func (h *Hub) RecordTurnSuccessWithTools(clientID, convGen string, fingerprints, userFingerprints []string, toolNames map[string]bool, uploadedSigs map[string]string, resetSession bool) {
+	h.RecordTurnSuccessWithClientConversation(clientID, convGen, fingerprints, userFingerprints, toolNames, uploadedSigs, "", resetSession)
+}
+
+// RecordTurnSuccessWithClientConversation stores a client conversation id along
+// with turn state so Auto mode can distinguish a new client chat from a stateless
+// follow-up that contains only a single user message.
+func (h *Hub) RecordTurnSuccessWithClientConversation(clientID, convGen string, fingerprints, userFingerprints []string, toolNames map[string]bool, uploadedSigs map[string]string, clientConversationID string, resetSession bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	sess := h.ensureSessionLocked(clientID)
@@ -701,9 +743,16 @@ func (h *Hub) RecordTurnSuccessWithTools(clientID, convGen string, fingerprints,
 	if convGen != "" && sess.convGen == "" {
 		sess.convGen = convGen
 	}
+	clientConversationID = strings.TrimSpace(clientConversationID)
 	if resetSession {
 		sess.uploadedFiles = make(map[string]string)
 		sess.toolNames = nil
+		if clientConversationID == "" {
+			sess.clientConversationID = ""
+		}
+	}
+	if clientConversationID != "" {
+		sess.clientConversationID = clientConversationID
 	}
 	cp := make([]string, len(fingerprints))
 	copy(cp, fingerprints)

@@ -139,10 +139,13 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Tool-Model-Override", "true")
 	}
 
+	clientConversationID, clientConversationContinuation := a.clientConversationFromPayload(r, req)
 	chatReq := models.OpenAIChatRequest{
-		Messages:   reqMessages,
-		Tools:      reqTools,
-		ToolChoice: toolChoice,
+		Messages:                       reqMessages,
+		Tools:                          reqTools,
+		ToolChoice:                     toolChoice,
+		ClientConversationID:           clientConversationID,
+		ClientConversationContinuation: clientConversationContinuation,
 	}
 	if parallel, ok := req["parallel_tool_calls"].(bool); ok {
 		chatReq.ParallelToolCalls = &parallel
@@ -163,7 +166,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		prompt += format.MediaGenerationInstruction(clientMediaTools)
 	}
 
-	convKey, convHasHistory := format.ConversationID(chatReq.Messages)
+	convKey, convHasHistory := openAIConversationInfo(chatReq)
 	gemOpt := gemini.ModelOptions{
 		ModelName:              resolved.Name,
 		ModelID:                resolved.Mode,
@@ -336,6 +339,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rid := fmt.Sprintf("resp_%s", format.RandHex(16))
+	a.rememberResponseConversation(rid, responseConversationAnchor(chatReq))
 	mid := fmt.Sprintf("msg_%s", format.RandHex(12))
 
 	outputItems := format.BuildResponseOutput(text, toolCalls, mid)

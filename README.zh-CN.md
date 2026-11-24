@@ -401,9 +401,9 @@ gemini-4-argon@think=4              # Low (default for standard models)
    gemini-4-hydrogen@think=0@continue   # deep thinking, keep the open chat (incl. Gemini memory)
    ```
 2. **扩展弹出“聊天模式”选择器**—*自动（推荐）*/*总是有新的聊天*/*继续打开聊天*。选择被推送到服务器（`POST /bridge/chatmode`）并持续存在直到发生改变。和*继续打开聊天*，首先单击 Gemini 历史记录侧栏中的任何旧聊天 - API 轮流然后继续添加到该对话。
-3. **自动启发式（默认）**— 全新的客户端对话（例如 WorkBuddy“新聊天”）启动新的浏览器聊天；后续回合继续进行。
+3. **自动启发式（默认）**— 当客户端历史从多轮对话明确回到一条全新的用户消息时，启动新的浏览器聊天。若客户端提供稳定的聊天 ID，则以 ID 为准：同一个 ID 继续当前 Gemini 聊天，不同 ID 会新建干净的聊天。
 
-这个启发式只能看到客户端发来的内容：当请求**没有** assistant/tool 历史、且只有一条与上一轮不同的用户消息时触发 —— 而这恰好也是「无状态客户端」的样子。如果每条消息都在浏览器里开新聊天，可以设 `"bridge_auto_new_chat": false`、在扩展弹窗里选 *继续当前聊天*，或者用 `@continue`。标签页里没有内容时历史会整段重发，所以上下文不依赖标签页。
+代理识别 `conversation_id`、`chat_id`、`thread_id`、`session_id`（也支持放在 `metadata` 中）、对应的 `X-...-ID` 请求头，以及 Responses API 的 `previous_response_id` 链。一个 WorkBuddy 聊天的每一轮必须使用同一个 ID；新聊天则必须换 ID。如果客户端每次请求只发送一条用户消息且不提供稳定 ID，就无法区分后续消息和新聊天。自动模式会优先保持连续性，避免每条输入都新开 Gemini 聊天；此时可在新聊天时使用 *总是新聊天* / `@new`，或让客户端发送聊天 ID。`@continue` 或 *继续当前聊天* 会禁用自动重置。客户端发送了历史时，如果标签页上下文不匹配，代理会重新发送完整历史。
 
 #### 直连模式同样的问题 —— 每个进程共用一个会话
 
@@ -414,12 +414,13 @@ Enterprise: continuing in assistant session 8f1c (reused for every turn of this 
 Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
 ```
 
-**每个客户端聊天一个会话。** 请求里没有会话 id，所以代理用「第一条用户消息」推导出聊天身份（继续同一个聊天时它不变，新开聊天时它不同），并按聊天维护会话：
+**每个客户端聊天一个会话。** 如果客户端提供稳定的聊天 ID，代理会用它作为会话键；否则退回到第一条用户消息和对话历史：
 
-- 继续同一个聊天 → 同一个会话，记忆连续；
-- **在客户端里新开聊天 → 全新的会话**，不会继承上一个线程的记忆（多轮对话之后突然来一条单条消息，正是这个信号）；
-- 回到更早的聊天 → 重新用回它自己的会话，而不是最近那个；
-- 一直只发单条消息、无历史的客户端 → 保持同一个会话，因为无法把它的消息和「继续」区分开。
+- 使用相同 ID 继续聊天 → 继续使用同一个会话，记忆连续；
+- **使用不同 ID 新开聊天 → 创建全新会话**，不会继承上一个线程的记忆；
+- 没有 ID 时，从多轮历史重置为单条消息仍是旧版回退信号，但对无状态客户端来说可能有歧义；
+- 使用原来的 ID 回到更早的聊天 → 重新使用它自己的会话，而不是最近那个；
+- 一直只发单条消息、无历史且无 ID 的客户端 → 保持同一个会话，因为无法区分新聊天和后续消息。
 
 ```
 Enterprise: continuing in assistant session 8f1c for conversation 4c1a9ba2

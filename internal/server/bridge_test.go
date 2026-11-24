@@ -1090,6 +1090,112 @@ func TestBridgeStreamingParsesJSONToolCallsAndFlushesNormalJSON(t *testing.T) {
 	}
 }
 
+func TestBridgeAutoNewChatKeepsStatelessSingleMessageClientInSameChat(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeAutoNewChat = true
+	app := New(cfg, "test")
+	app.Bridge.UpdateTabSession("gemini.google.com", "tab_stateless", "1")
+
+	// Some clients send only the latest user message on every turn. A changed
+	// prompt is not proof of a new client chat, so Auto must keep using the
+	// current Gemini chat instead of opening one chat per request.
+	for _, prompt := range []string{"First question", "Follow-up question", "One more follow-up"} {
+		req := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
+			{Role: "user", Content: prompt},
+		}}
+		prepared := app.prepareBridgeRequest(nil, req, prompt, nil, "")
+		if prepared.NewChat {
+			t.Fatalf("stateless turn %q unexpectedly started a new Gemini chat", prompt)
+		}
+		app.recordBridgeTurnSuccess(prepared)
+	}
+}
+
+func TestBridgeAutoNewChatUsesClientConversationID(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeAutoNewChat = true
+	app := New(cfg, "test")
+	app.Bridge.UpdateTabSession("gemini.google.com", "tab_workbuddy_ids", "1")
+
+	makeRequest := func(id, prompt string) preparedBridgeTurn {
+		req := models.OpenAIChatRequest{
+			ClientConversationID: id,
+			Messages:             []models.OpenAIMessage{{Role: "user", Content: prompt}},
+		}
+		return app.prepareBridgeRequest(nil, req, prompt, nil, "")
+	}
+
+	first := makeRequest("client:workbuddy-chat-a", "First question")
+	if first.NewChat {
+		t.Fatal("first request on a clean tab should not need to start another Gemini chat")
+	}
+	app.recordBridgeTurnSuccess(first)
+
+	followUp := makeRequest("client:workbuddy-chat-a", "Follow-up in the same WorkBuddy chat")
+	if followUp.NewChat {
+		t.Fatal("same WorkBuddy conversation id must continue the current Gemini chat")
+	}
+	app.recordBridgeTurnSuccess(followUp)
+
+	multiTurnFollowUp := models.OpenAIChatRequest{
+		ClientConversationID: "client:workbuddy-chat-a",
+		Messages: []models.OpenAIMessage{
+			{Role: "user", Content: "First question"},
+			{Role: "assistant", Content: "First answer"},
+			{Role: "user", Content: "Follow-up in the same WorkBuddy chat"},
+		},
+	}
+	preparedMultiTurn := app.prepareBridgeRequest(nil, multiTurnFollowUp, "Follow-up in the same WorkBuddy chat", nil, "")
+	if preparedMultiTurn.NewChat {
+		t.Fatal("same WorkBuddy conversation id must override the transcript-reset heuristic")
+	}
+	app.recordBridgeTurnSuccess(preparedMultiTurn)
+
+	statelessFollowUp := makeRequest("client:workbuddy-chat-a", "Another stateless follow-up in the same chat")
+	if statelessFollowUp.NewChat {
+		t.Fatal("matching WorkBuddy conversation id must continue after a multi-turn transcript")
+	}
+	app.recordBridgeTurnSuccess(statelessFollowUp)
+
+	newWorkBuddyChat := makeRequest("client:workbuddy-chat-b", "First question in a new WorkBuddy chat")
+	if !newWorkBuddyChat.NewChat {
+		t.Fatal("a changed WorkBuddy conversation id must start a clean Gemini chat")
+	}
+	app.recordBridgeTurnSuccess(newWorkBuddyChat)
+
+	newChatFollowUp := makeRequest("client:workbuddy-chat-b", "Follow-up in the new WorkBuddy chat")
+	if newChatFollowUp.NewChat {
+		t.Fatal("follow-ups under the new WorkBuddy conversation id must use its fresh Gemini chat")
+	}
+}
+
+func TestBridgeAutoNewChatTrustsResponsesPreviousID(t *testing.T) {
+	cfg := config.Default()
+	cfg.LogRequests = false
+	cfg.BridgeAutoNewChat = true
+	app := New(cfg, "test")
+	app.Bridge.UpdateTabSession("gemini.google.com", "tab_response_chain", "1")
+
+	first := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{{Role: "user", Content: "First Responses turn"}}}
+	preparedFirst := app.prepareBridgeRequest(nil, first, "First Responses turn", nil, "")
+	if preparedFirst.NewChat {
+		t.Fatal("first Responses turn on a clean tab should not start an extra chat")
+	}
+	app.recordBridgeTurnSuccess(preparedFirst)
+
+	followUp := models.OpenAIChatRequest{
+		ClientConversationID:           "response:resp_previous",
+		ClientConversationContinuation: true,
+		Messages:                       []models.OpenAIMessage{{Role: "user", Content: "Follow-up with previous_response_id"}},
+	}
+	preparedFollowUp := app.prepareBridgeRequest(nil, followUp, "Follow-up with previous_response_id", nil, "")
+	if preparedFollowUp.NewChat {
+		t.Fatal("previous_response_id explicitly links the turn to the current WorkBuddy chat")
+	}
+}
+
 func TestBridgeAutoNewChatSyncWhenClientStartsFreshConversation(t *testing.T) {
 	tmpDir := t.TempDir()
 	pdfPath := filepath.Join(tmpDir, "spec.pdf")
@@ -1345,7 +1451,7 @@ func TestBridgePollSerializesNewChatFlagAndStatusReportsPacing(t *testing.T) {
 		return m
 	}
 
-	sendChat := func(userText string) map[string]any {
+	sendChat := func(messages []any) map[string]any {
 		pollCh := make(chan map[string]any, 1)
 		go func() {
 			pollCh <- pollOnce()
@@ -1353,7 +1459,7 @@ func TestBridgePollSerializesNewChatFlagAndStatusReportsPacing(t *testing.T) {
 		raw, _ := json.Marshal(map[string]any{
 			"model":    "gemini-4-hydrogen",
 			"stream":   false,
-			"messages": []any{map[string]any{"role": "user", "content": userText}},
+			"messages": messages,
 		})
 		httpReq := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(raw))
 		httpReq.Header.Set("Content-Type", "application/json")
@@ -1365,14 +1471,31 @@ func TestBridgePollSerializesNewChatFlagAndStatusReportsPacing(t *testing.T) {
 		return <-pollCh
 	}
 
-	first := sendChat("First conversation topic")
+	first := sendChat([]any{map[string]any{"role": "user", "content": "First conversation topic"}})
 	if first["new_chat"] == true {
 		t.Errorf("first conversation should not set new_chat=true, got %+v", first)
 	}
 
-	second := sendChat("Brand new conversation topic")
-	if second["new_chat"] != true {
-		t.Errorf("expected /bridge/poll JSON to serialize new_chat=true for fresh conversation, got %+v", second)
+	// Stateless clients send only the latest prompt. Different text by itself
+	// must not force Gemini into a new chat every time.
+	second := sendChat([]any{map[string]any{"role": "user", "content": "Follow-up in the same client chat"}})
+	if second["new_chat"] == true {
+		t.Errorf("one-message follow-up should not set new_chat=true, got %+v", second)
+	}
+
+	// A reset from an established multi-turn transcript to a fresh one-message
+	// request is still recognized as a new client conversation.
+	multiTurn := sendChat([]any{
+		map[string]any{"role": "user", "content": "Earlier question"},
+		map[string]any{"role": "assistant", "content": "Earlier answer"},
+		map[string]any{"role": "user", "content": "Another question in the old chat"},
+	})
+	if multiTurn["new_chat"] == true {
+		t.Errorf("multi-turn continuation should not set new_chat=true, got %+v", multiTurn)
+	}
+	fresh := sendChat([]any{map[string]any{"role": "user", "content": "Brand new conversation topic"}})
+	if fresh["new_chat"] != true {
+		t.Errorf("expected /bridge/poll JSON to serialize new_chat=true for a clear fresh conversation, got %+v", fresh)
 	}
 
 	statusReq := httptest.NewRequest("GET", "/bridge/status", nil)
@@ -1793,13 +1916,14 @@ func TestBridgeChatModeOverridePrecedence(t *testing.T) {
 
 	t.Run("auto heuristic for fresh conversation", func(t *testing.T) {
 		app.Bridge.SetChatMode("auto")
-		// Seed the session with a prior completed turn so IsNewConversation has
-		// something to compare against (it returns false for an empty session).
+		// Seed the session with a completed multi-turn transcript. A single
+		// previous message is intentionally ambiguous with a stateless client.
 		prev := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
 			{Role: "user", Content: "Earlier topic"},
 			{Role: "assistant", Content: "Earlier answer"},
+			{Role: "user", Content: "Follow-up in earlier chat"},
 		}}
-		prevPrepared := app.prepareBridgeRequest(nil, prev, "Earlier topic", nil, "")
+		prevPrepared := app.prepareBridgeRequest(nil, prev, "Follow-up in earlier chat", nil, "")
 		app.recordBridgeTurnSuccess(prevPrepared)
 
 		fresh := models.OpenAIChatRequest{Messages: []models.OpenAIMessage{
