@@ -90,6 +90,7 @@ func (app *App) handleMediaGeneration(w http.ResponseWriter, r *http.Request, ki
 	}
 
 	opt, modelLabel := app.mediaModelOptions(req.Model)
+	opt.Context = r.Context()
 	instruction := mediaInstruction(kind, prompt, req)
 
 	started := time.Now()

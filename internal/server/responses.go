@@ -154,17 +154,17 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Deep-Research", "disabled")
 	}
 
-	prompt, images, err := format.MessagesToPrompt(chatReq)
-	if err == nil {
-		prompt, images = a.attachEnterpriseContext(chatReq.Messages, prompt, images)
-	}
-	if err != nil || strings.TrimSpace(prompt) == "" {
+	rawPrompt, rawImages, err := format.MessagesToPrompt(chatReq)
+	if err != nil || strings.TrimSpace(rawPrompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty input"}})
 		return
 	}
+	mediaInstruction := ""
 	if len(clientMediaTools) > 0 {
-		prompt += format.MediaGenerationInstruction(clientMediaTools)
+		mediaInstruction = format.MediaGenerationInstruction(clientMediaTools)
 	}
+	prompt := rawPrompt + mediaInstruction
+	images := rawImages
 
 	convKey, convHasHistory := openAIConversationInfo(chatReq)
 	gemOpt := gemini.ModelOptions{
@@ -175,6 +175,7 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 		Extra:                  resolved.Extra,
 		ConversationKey:        convKey,
 		ConversationHasHistory: convHasHistory,
+		Context:                r.Context(),
 	}
 	var mediaRaw strings.Builder
 	if len(clientMediaTools) > 0 {
@@ -252,16 +253,20 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 					a.Logf("Browser bridge failed (%v) — retrying responses via direct cookie mode", err)
 					a.Bridge.MarkDegraded(10 * time.Minute)
 					bridgeErr := err
+					dPrompt, dImages, dFull, dBase, dCommit := a.prepareDirectEnterpriseTurn(chatReq, convKey, rawPrompt, rawImages, mediaInstruction)
+					gemOpt.FullPrompt = dFull
+					gemOpt.DeltaBaseSession = dBase
+					gemOpt.OnSessionUsed = dCommit
 					var fileRefs []string
-					if len(images) > 0 {
+					if len(dImages) > 0 {
 						var uErr error
-						fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
+						fileRefs, gemOpt.Files, uErr = a.prepareAttachments(dImages)
 						if uErr != nil {
 							writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
 							return
 						}
 					}
-					text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+					text, err = a.Gem.Generate(dPrompt, gemOpt, fileRefs)
 					if err != nil {
 						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
 						return
@@ -282,6 +287,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Degraded bridge — use direct cookie mode
+			prompt, images, gemOpt.FullPrompt, gemOpt.DeltaBaseSession, gemOpt.OnSessionUsed = a.prepareDirectEnterpriseTurn(
+				chatReq, convKey, rawPrompt, rawImages, mediaInstruction,
+			)
 			var fileRefs []string
 			if len(images) > 0 {
 				fileRefs, gemOpt.Files, err = a.prepareAttachments(images)
@@ -312,6 +320,9 @@ func (a *App) handleResponses(w http.ResponseWriter, r *http.Request) {
 			}})
 			return
 		}
+		prompt, images, gemOpt.FullPrompt, gemOpt.DeltaBaseSession, gemOpt.OnSessionUsed = a.prepareDirectEnterpriseTurn(
+			chatReq, convKey, rawPrompt, rawImages, mediaInstruction,
+		)
 		var fileRefs []string
 		if len(images) > 0 {
 			fileRefs, gemOpt.Files, err = a.prepareAttachments(images)

@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -211,6 +213,13 @@ type discoveryStream struct {
 	failMsg     string
 	emit        func(delta string) error
 	emitErr     error
+	onActivity  func()
+}
+
+func (s *discoveryStream) notifyActivity() {
+	if !s.failed && s.onActivity != nil {
+		s.onActivity()
+	}
 }
 
 func (s *discoveryStream) emitDelta(delta string) error {
@@ -227,6 +236,7 @@ func (s *discoveryStream) incremental(chunkText string, isFinal bool) {
 	if chunkText == "" {
 		return
 	}
+	s.notifyActivity()
 	delta := chunkText
 	if len(s.accumulated) > 0 {
 		if isFinal && chunkText == s.accumulated {
@@ -359,6 +369,7 @@ func (s *discoveryStream) processAnswer(answer map[string]any) {
 		}
 		if sawThought && chunkText == "" {
 			s.thinking = true
+			s.notifyActivity()
 		}
 		if chunkText != "" {
 			s.incremental(chunkText, isFinal)
@@ -426,6 +437,13 @@ func (c *Client) generateViaDiscovery(prompt string, fileIDs []string, session s
 }
 
 func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, session string, requestedModel string, media func(string), emit func(string) error) error {
+	return c.generateViaDiscoveryStreamWithContext(context.Background(), prompt, fileIDs, session, requestedModel, media, emit)
+}
+
+func (c *Client) generateViaDiscoveryStreamWithContext(parentCtx context.Context, prompt string, fileIDs []string, session string, requestedModel string, media func(string), emit func(string) error) error {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
 	tpl := LoadDiscoveryTemplate(c.Cfg.CookieFile)
 	if tpl == nil {
 		return &UpstreamError{
@@ -458,8 +476,13 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 
 	var lastErr error
 	for i, auth := range auths {
-		req, err := http.NewRequest(http.MethodPost, tpl.URL, strings.NewReader(body))
+		if err := parentCtx.Err(); err != nil {
+			return err
+		}
+		reqCtx, touch, stopAttempt := withActivityTimeout(parentCtx, c.Cfg.RequestTimeoutSec)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, tpl.URL, strings.NewReader(body))
 		if err != nil {
+			stopAttempt()
 			return err
 		}
 		for k, v := range tpl.Headers {
@@ -485,12 +508,20 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			stopAttempt()
+			if parentCtx.Err() != nil {
+				return parentCtx.Err()
+			}
 			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 			break
 		}
+		touch()
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			stopAttempt()
+			c.Logf("Discovery Engine streamAssist replay rejected (HTTP %d, auth attempt %d/%d): %s",
+				resp.StatusCode, i+1, len(auths), strings.TrimSpace(string(bodyText)))
 			lastErr = &UpstreamError{
 				Status: resp.StatusCode,
 				Kind:   "http",
@@ -501,6 +532,7 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 		if resp.StatusCode != http.StatusOK {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			stopAttempt()
 			return &UpstreamError{
 				Status: resp.StatusCode,
 				Kind:   "http",
@@ -514,6 +546,7 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				touch()
 				if media != nil {
 					media(string(buf[:n]))
 				}
@@ -522,12 +555,17 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 			if rerr != nil {
 				if rerr != io.EOF {
 					_ = resp.Body.Close()
+					stopAttempt()
+					if parentCtx.Err() != nil {
+						return parentCtx.Err()
+					}
 					return &UpstreamError{Kind: "transport", Msg: rerr.Error()}
 				}
 				break
 			}
 		}
 		_ = resp.Body.Close()
+		stopAttempt()
 
 		if stream.failed {
 			msg := stream.failMsg
@@ -543,6 +581,10 @@ func (c *Client) generateViaDiscoveryStream(prompt string, fileIDs []string, ses
 	}
 	if lastErr == nil {
 		lastErr = &UpstreamError{Status: http.StatusUnauthorized, Kind: "http", Msg: "streamAssist replay has no usable authorization header"}
+	}
+	var ue *UpstreamError
+	if errors.As(lastErr, &ue) && (ue.Status == http.StatusUnauthorized || ue.Status == http.StatusForbidden) && c.OnAuthError != nil {
+		c.OnAuthError(lastErr.Error())
 	}
 	return lastErr
 }
@@ -605,17 +647,30 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	// the client started a new chat). Cookie-authenticated requests need this just
 	// as much as bearer ones — without it the tenant answers each message in a
 	// brand-new conversation.
+	parentCtx := conv.context()
 	convOpts := ModelOptions{
 		ConversationKey:        conv.Key,
 		ConversationHasHistory: conv.HasHistory,
+		Context:                parentCtx,
+	}
+	alreadyResolvedSession := strings.TrimSpace(session) != "" && !strings.HasSuffix(strings.TrimSpace(session), "/-")
+	session = c.reuseOrCreateEnterpriseSession(session, convOpts)
+	if session != "" {
+		if alreadyResolvedSession {
+			c.rememberEnterpriseSession(session, convOpts)
+		} else {
+			c.recordEnterpriseSession(session, convOpts)
+		}
+	}
+	// Safety guard: if prompt was delta-encoded against a specific session, never
+	// send the bare delta into a different or empty session.
+	if conv.FullPrompt != "" && (session == "" || (conv.DeltaBaseSession != "" && !sameEnterpriseSession(session, conv.DeltaBaseSession))) {
+		prompt = conv.FullPrompt
+		conv.FullPrompt = ""
 	}
 	// A prompt the tenant refuses as too large fails the whole turn, so the
 	// ceiling learned from an earlier refusal is applied before sending.
 	prompt = c.fitPrompt(prompt)
-	session = c.reuseOrCreateEnterpriseSession(session, convOpts)
-	if session != "" {
-		c.recordEnterpriseSession(session, convOpts)
-	}
 
 	fileIDsJSON := "[]"
 	if len(fileIDs) > 0 {
@@ -666,11 +721,18 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	body := buildBody()
 
 	var lastErr error
+	authFailed := false
 	sessionDropped := false
 	promptShrinks := 0
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
-		req, err := http.NewRequest(http.MethodPost, endpoint, strings.NewReader(body))
+		if err := parentCtx.Err(); err != nil {
+			return err
+		}
+		attemptStart := time.Now()
+		reqCtx, touch, stopAttempt := withActivityTimeout(parentCtx, c.Cfg.RequestTimeoutSec)
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, strings.NewReader(body))
 		if err != nil {
+			stopAttempt()
 			return err
 		}
 		if usingBearer {
@@ -681,14 +743,27 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			stopAttempt()
+			elapsedMs := time.Since(attemptStart).Milliseconds()
+			if parentCtx.Err() != nil {
+				c.Logf("Direct Discovery Engine streamAssist canceled after %dms (client disconnected)", elapsedMs)
+				return parentCtx.Err()
+			}
+			c.Logf("Direct Discovery Engine streamAssist transport error after %dms: %v", elapsedMs, err)
 			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 			break
 		}
+		touch()
 
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			stopAttempt()
 			c.resetEnterpriseAuth()
+			authFailed = true
+			snippet := summarizeBody(bodyText)
+			c.Logf("Direct Discovery Engine streamAssist rejected (HTTP %d, attempt %d/%d, bearer=%t) — session cookies or widget JWT refused: %s",
+				resp.StatusCode, attempt+1, c.Cfg.RetryAttempts, usingBearer, snippet)
 			lastErr = &UpstreamError{
 				Status: resp.StatusCode,
 				Kind:   "http",
@@ -696,23 +771,41 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 					resp.StatusCode, strings.TrimSpace(string(bodyText))),
 			}
 			if attempt < c.Cfg.RetryAttempts-1 {
-				time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
+				if err := sleepWithContext(parentCtx, time.Duration(c.Cfg.RetryDelaySec)*time.Second); err != nil {
+					return err
+				}
+				if usingBearer {
+					if fresh, fErr := c.enterpriseBearer(); fErr == nil {
+						bearer = fresh
+					}
+				}
 				continue
+			}
+			if c.OnAuthError != nil {
+				c.OnAuthError(lastErr.Error())
 			}
 			return lastErr
 		}
 		if resp.StatusCode != http.StatusOK {
 			bodyText, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 			_ = resp.Body.Close()
+			stopAttempt()
 			// A session the tenant has forgotten (expiry, engine rebuild, another
-			// backend pod) must not fail the turn: drop it, retry once without it,
-			// and let the next request create a fresh one.
+			// backend pod) must not fail the turn: drop it, evict it from the
+			// conversation map so subsequent turns never switch back to it, retry
+			// once without it, and let the next request create a fresh one.
 			if !sessionDropped && sessionJSON != "" && resp.StatusCode == http.StatusNotFound &&
 				sessionNotFound(bodyText) {
 				sessionDropped = true
 				c.Logf("Gemini Enterprise: the tenant no longer knows session %s (HTTP 404) — retrying without a session; a fresh one is created for the next turn",
 					shortSessionName(session))
-				c.clearEnterpriseSession()
+				c.evictEnterpriseSession(session, conv.Key)
+				if conv.FullPrompt != "" {
+					prompt = c.fitPrompt(conv.FullPrompt)
+					conv.FullPrompt = ""
+				}
+				fileIDs = nil
+				fileIDsJSON = "[]"
 				session = ""
 				sessionJSON = ""
 				body = buildBody()
@@ -724,14 +817,21 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			// losing the oldest turns beats losing the whole turn.
 			if resp.StatusCode == http.StatusBadRequest && promptTooLarge(bodyText) {
 				// The tenant counts the session's own history towards the limit, and
-				// it grows by a whole prompt every turn: a session that has been
-				// talking for a while is too large no matter how small this prompt
-				// is. Dropping it keeps the turn (and the full prompt) alive, so it
-				// is tried before cutting the user's content away.
+				// it grows every turn: a session that has been talking for a while
+				// is too large no matter how small this prompt is. Evicting it from
+				// both the active slot and c.enterpriseSessions[conv.Key] keeps the
+				// turn alive AND prevents every later turn from switching back to
+				// the same full session.
 				if !sessionDropped && sessionJSON != "" {
 					sessionDropped = true
 					c.Logf("Direct Discovery Engine refused the prompt as too large (HTTP 400, %d chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt", len(prompt))
-					c.clearEnterpriseSession()
+					c.evictEnterpriseSession(session, conv.Key)
+					if conv.FullPrompt != "" {
+						prompt = c.fitPrompt(conv.FullPrompt)
+						conv.FullPrompt = ""
+					}
+					fileIDs = nil
+					fileIDsJSON = "[]"
 					session = ""
 					sessionJSON = ""
 					body = buildBody()
@@ -765,13 +865,40 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 			}
 		}
 
-		stream := &discoveryStream{emit: emit}
+		var (
+			startOnce    sync.Once
+			startErr     error
+			startErrMu   sync.Mutex
+			triggerStart = func() {
+				if conv.OnStreamStart == nil {
+					return
+				}
+				startOnce.Do(func() {
+					if err := conv.OnStreamStart(); err != nil {
+						startErrMu.Lock()
+						startErr = err
+						startErrMu.Unlock()
+						stopAttempt()
+					}
+				})
+			}
+		)
+		var earlyStartTimer *time.Timer
+		if conv.OnStreamStart != nil {
+			// Commit SSE headers + keepalives after 2s if the upstream 200 stream is
+			// still open and thinking before emitting its first frame; stopped
+			// immediately if the stream finishes early (e.g. instant FAILED JSON).
+			earlyStartTimer = time.AfterFunc(2*time.Second, triggerStart)
+		}
+
+		stream := &discoveryStream{emit: emit, onActivity: triggerStart}
 		parser := &discoveryParser{objAt: -1, onObj: stream.processObject}
 		buf := make([]byte, 32*1024)
 		var rawSniff strings.Builder
 		for {
 			n, rerr := resp.Body.Read(buf)
 			if n > 0 {
+				touch()
 				if rawSniff.Len() < 4096 {
 					rawSniff.Write(buf[:n])
 				}
@@ -781,14 +908,42 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 				parser.feed(string(buf[:n]))
 			}
 			if rerr != nil {
+				if earlyStartTimer != nil {
+					earlyStartTimer.Stop()
+				}
 				if rerr != io.EOF {
 					_ = resp.Body.Close()
+					stopAttempt()
+					startErrMu.Lock()
+					sErr := startErr
+					startErrMu.Unlock()
+					if sErr != nil {
+						return sErr
+					}
+					elapsedMs := time.Since(attemptStart).Milliseconds()
+					if parentCtx.Err() != nil {
+						c.Logf("Direct Discovery Engine streamAssist canceled mid-stream after %dms (client disconnected)", elapsedMs)
+						return parentCtx.Err()
+					}
+					c.Logf("Direct Discovery Engine streamAssist stream read error after %dms: %v", elapsedMs, rerr)
 					return &UpstreamError{Kind: "transport", Msg: rerr.Error()}
 				}
 				break
 			}
 		}
+		if earlyStartTimer != nil {
+			earlyStartTimer.Stop()
+		}
 		_ = resp.Body.Close()
+		stopAttempt()
+
+		startErrMu.Lock()
+		if startErr != nil {
+			err := startErr
+			startErrMu.Unlock()
+			return err
+		}
+		startErrMu.Unlock()
 
 		if stream.failed {
 			msg := stream.failMsg
@@ -807,7 +962,13 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 				Msg:    "streamAssist direct call returned no answer text: " + snippet,
 			}
 		}
+		if stream.emitErr == nil && conv.OnSessionUsed != nil {
+			conv.OnSessionUsed(session)
+		}
 		return stream.emitErr
+	}
+	if authFailed && lastErr != nil && c.OnAuthError != nil {
+		c.OnAuthError(lastErr.Error())
 	}
 	if lastErr == nil {
 		lastErr = &UpstreamError{Status: http.StatusInternalServerError, Kind: "http", Msg: "streamAssist direct call failed with no error"}

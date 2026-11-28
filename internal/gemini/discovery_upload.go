@@ -952,16 +952,37 @@ func (c *Client) enterpriseGenerate(prompt string, opt ModelOptions) (string, er
 }
 
 func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit func(string) error) error {
-	prompt, fileIDs, session, err := c.prepareEnterpriseAttachments(prompt, opt.Files)
-	if err != nil {
-		return err
+	var (
+		fileIDs []string
+		session string
+		err     error
+	)
+	if len(opt.Files) > 0 {
+		// Resolve this conversation's own assistant session before uploading
+		// context files, so a new chat or post-eviction turn never uploads into
+		// another chat's cached session.
+		session = c.reuseOrCreateEnterpriseSession("", opt)
+		if session != "" {
+			c.recordEnterpriseSession(session, opt)
+		}
+		var uploadSession string
+		prompt, fileIDs, uploadSession, err = c.prepareEnterpriseAttachments(prompt, opt.Files)
+		if err != nil {
+			return err
+		}
+		if session == "" && uploadSession != "" {
+			session = uploadSession
+			c.recordEnterpriseSession(session, opt)
+		}
+	} else {
+		session = c.reuseOrCreateEnterpriseSession("", opt)
+		if session != "" {
+			c.recordEnterpriseSession(session, opt)
+		}
 	}
-	// A captured template carries the app's session id with the id replaced by
-	// "-", which the tenant reads as "new conversation". Resolve a real one so
-	// the tab's thread and the replayed request agree.
-	session = c.reuseOrCreateEnterpriseSession(session, opt)
-	if session != "" {
-		c.recordEnterpriseSession(session, opt)
+	if opt.FullPrompt != "" && (session == "" || (opt.DeltaBaseSession != "" && !sameEnterpriseSession(session, opt.DeltaBaseSession))) {
+		prompt = opt.FullPrompt
+		opt.FullPrompt = ""
 	}
 
 	_, bearerErr := c.enterpriseBearer()
@@ -973,9 +994,15 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 	// fails and another transport is configured.
 	if LoadDiscoveryTemplate(c.Cfg.CookieFile) != nil {
 		c.Logf("Enterprise: replaying captured Discovery Engine template (files=%d)", len(fileIDs))
-		tplErr := c.generateViaDiscoveryStream(prompt, fileIDs, session, opt.ModelName, opt.MediaSink, emit)
+		tplErr := c.generateViaDiscoveryStreamWithContext(opt.context(), prompt, fileIDs, session, opt.ModelName, opt.MediaSink, emit)
 		if tplErr == nil {
+			if opt.OnSessionUsed != nil {
+				opt.OnSessionUsed(session)
+			}
 			return nil
+		}
+		if opt.context().Err() != nil {
+			return opt.context().Err()
 		}
 		if !hasBearer && !hasEndpoint {
 			return tplErr
@@ -993,8 +1020,13 @@ func (c *Client) enterpriseGenerateStream(prompt string, opt ModelOptions, emit 
 				len(fileIDs), hasBearer, shortSessionName(session), opt.ModelName, modelID, modelSource)
 		}
 		return c.generateViaDiscoveryDirectStream(prompt, fileIDs, session, ConversationInfo{
-			Key:        opt.ConversationKey,
-			HasHistory: opt.ConversationHasHistory,
+			Key:              opt.ConversationKey,
+			HasHistory:       opt.ConversationHasHistory,
+			Context:          opt.Context,
+			FullPrompt:       opt.FullPrompt,
+			DeltaBaseSession: opt.DeltaBaseSession,
+			OnStreamStart:    opt.OnStreamStart,
+			OnSessionUsed:    opt.OnSessionUsed,
 		}, opt.ModelName, opt.MediaSink, emit)
 	}
 

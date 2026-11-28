@@ -2,6 +2,7 @@ package gemini
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -63,12 +64,47 @@ type ModelOptions struct {
 	// text pipeline drops binary parts by design; this is the only way media
 	// survives it.
 	MediaSink func(chunk string)
+	// Context cancels the in-flight upstream request when the caller (e.g. an
+	// HTTP client that timed out and retried) disconnects, preventing 300s
+	// orphaned streamAssist calls from piling up against the same session.
+	Context context.Context
+	// FullPrompt carries the complete formatted transcript when prompt was
+	// delta-encoded against DeltaBaseSession. If the session is dropped or
+	// rotated mid-turn, the retry promotes FullPrompt so no history is lost.
+	FullPrompt       string
+	DeltaBaseSession string
+	// OnStreamStart, when set, is called once the upstream stream is accepted so
+	// the HTTP handler can commit SSE headers and start keepalive pings while a
+	// slow thinking model reasons.
+	OnStreamStart func() error
+	// OnSessionUsed, when set, receives the Discovery Engine session resource
+	// that actually served a successful Enterprise turn ("" if sessionless).
+	OnSessionUsed func(session string)
+}
+
+func (o ModelOptions) context() context.Context {
+	if o.Context != nil {
+		return o.Context
+	}
+	return context.Background()
 }
 
 // ConversationInfo identifies the client chat a request belongs to.
 type ConversationInfo struct {
-	Key        string
-	HasHistory bool
+	Key              string
+	HasHistory       bool
+	Context          context.Context
+	FullPrompt       string
+	DeltaBaseSession string
+	OnStreamStart    func() error
+	OnSessionUsed    func(session string)
+}
+
+func (ci ConversationInfo) context() context.Context {
+	if ci.Context != nil {
+		return ci.Context
+	}
+	return context.Background()
 }
 
 type Client struct {
@@ -110,6 +146,7 @@ type Client struct {
 	learnedPromptCeiling     int
 	promptMu                 sync.Mutex
 	enterpriseSessions       map[string]string
+	enterpriseSessionDeltas  map[string]enterpriseSessionDelta
 	enterpriseSessionKey     string
 	enterprisePendingKey     string
 	enterpriseLastHadHistory bool
@@ -143,6 +180,9 @@ func NewClient(cfg config.Config) *Client {
 		transport := &http.Transport{
 			DisableCompression: true,
 		}
+		if cfg.RequestTimeoutSec > 0 {
+			transport.ResponseHeaderTimeout = time.Duration(cfg.RequestTimeoutSec) * time.Second
+		}
 
 		if cfg.Proxy != "" {
 			if proxyURL, err := url.Parse(cfg.Proxy); err == nil {
@@ -152,9 +192,14 @@ func NewClient(cfg config.Config) *Client {
 			transport.Proxy = http.ProxyFromEnvironment
 		}
 
+		// Do not set http.Client.Timeout: Go treats Client.Timeout as a rigid
+		// wall-clock deadline from Do() until resp.Body hits EOF, which kills
+		// active deep-thinking streams (e.g. gemini-4-neon streaming thought
+		// frames) at 300s mid-answer. Instead, ResponseHeaderTimeout + per-read
+		// activity timeouts (withActivityTimeout) abort dead/stalled connections
+		// after RequestTimeoutSec of silence while letting active streams finish.
 		req = &http.Client{
 			Transport: transport,
-			Timeout:   time.Duration(cfg.RequestTimeoutSec) * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -410,22 +455,34 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 		headers.Set(HeaderJspb90, "[0,0,0]")
 	}
 
+	parentCtx := opt.context()
 	blRefreshed := false
 	var lastErr error
 
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
-		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+		if err := parentCtx.Err(); err != nil {
+			return "", err
+		}
+		reqCtx, touch, stopAttempt := withActivityTimeout(parentCtx, c.Cfg.RequestTimeoutSec)
+		req, err := http.NewRequestWithContext(reqCtx, "POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
+			stopAttempt()
 			return "", err
 		}
 		req.Header = headers.Clone()
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			stopAttempt()
+			if parentCtx.Err() != nil {
+				return "", parentCtx.Err()
+			}
 			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 		} else {
+			touch()
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				stopAttempt()
 				// 405 = BL expired. Refresh once and retry without consuming an attempt.
 				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
 					blRefreshed = true
@@ -444,9 +501,13 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 					break
 				}
 			} else {
-				rawBytes, err := io.ReadAll(resp.Body)
+				rawBytes, err := io.ReadAll(touchReader{r: resp.Body, touch: touch})
 				_ = resp.Body.Close()
+				stopAttempt()
 				if err != nil {
+					if parentCtx.Err() != nil {
+						return "", parentCtx.Err()
+					}
 					lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 				} else {
 					if opt.MediaSink != nil {
@@ -464,7 +525,9 @@ func (c *Client) Generate(prompt string, opt ModelOptions, fileRefs []string) (s
 
 		if attempt < c.Cfg.RetryAttempts-1 {
 			c.Logf("Retry %d/%d: %v", attempt+1, c.Cfg.RetryAttempts, lastErr)
-			time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
+			if err := sleepWithContext(parentCtx, time.Duration(c.Cfg.RetryDelaySec)*time.Second); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -517,25 +580,37 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 		headers.Set(HeaderJspb90, "[0,0,0]")
 	}
 
+	parentCtx := opt.context()
 	blRefreshed := false
 	parser := NewStreamParser()
 	var lastErr error
 
 	for attempt := 0; attempt < c.Cfg.RetryAttempts; attempt++ {
+		if err := parentCtx.Err(); err != nil {
+			return err
+		}
 		parser.ResetBuffer()
 
-		req, err := http.NewRequest("POST", reqURL, strings.NewReader(bodyStr))
+		reqCtx, touch, stopAttempt := withActivityTimeout(parentCtx, c.Cfg.RequestTimeoutSec)
+		req, err := http.NewRequestWithContext(reqCtx, "POST", reqURL, strings.NewReader(bodyStr))
 		if err != nil {
+			stopAttempt()
 			return err
 		}
 		req.Header = headers.Clone()
 
 		resp, err := c.HTTP.Do(req)
 		if err != nil {
+			stopAttempt()
+			if parentCtx.Err() != nil {
+				return parentCtx.Err()
+			}
 			lastErr = &UpstreamError{Kind: "transport", Msg: err.Error()}
 		} else {
+			touch()
 			if err := c.triageStatus(resp); err != nil {
 				_ = resp.Body.Close()
+				stopAttempt()
 				// 405 = BL expired. Refresh once and retry without consuming an attempt.
 				if !blRefreshed && resp.StatusCode == http.StatusMethodNotAllowed {
 					blRefreshed = true
@@ -552,10 +627,14 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 					break
 				}
 			} else {
-				err = c.streamAttempt(resp.Body, parser, emit)
+				err = c.streamAttempt(touchReader{r: resp.Body, touch: touch}, parser, emit)
 				_ = resp.Body.Close()
+				stopAttempt()
 				if err == nil {
 					return nil
+				}
+				if parentCtx.Err() != nil {
+					return parentCtx.Err()
 				}
 				if isClientDisconnect(err) {
 					return err
@@ -566,7 +645,9 @@ func (c *Client) GenerateStream(prompt string, opt ModelOptions, fileRefs []stri
 
 		if attempt < c.Cfg.RetryAttempts-1 {
 			c.Logf("Stream retry %d/%d: %v", attempt+1, c.Cfg.RetryAttempts, lastErr)
-			time.Sleep(time.Duration(c.Cfg.RetryDelaySec) * time.Second)
+			if err := sleepWithContext(parentCtx, time.Duration(c.Cfg.RetryDelaySec)*time.Second); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -616,4 +697,77 @@ func isClientDisconnect(err error) bool {
 		return false
 	}
 	return true
+}
+
+type touchReader struct {
+	r     io.Reader
+	touch func()
+}
+
+func (tr touchReader) Read(p []byte) (int, error) {
+	n, err := tr.r.Read(p)
+	if n > 0 && tr.touch != nil {
+		tr.touch()
+	}
+	return n, err
+}
+
+// withActivityTimeout derives a request context that cancels when either parent
+// cancels (client disconnect) OR no network progress occurs for timeoutSec.
+// Calling touch() on response headers and on every body read keeps long-running
+// thinking streams (e.g. gemini-4-neon) alive past 300s while still aborting
+// genuinely stalled upstream connections after timeoutSec of silence.
+func withActivityTimeout(parent context.Context, timeoutSec int) (context.Context, func(), context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	if timeoutSec <= 0 {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, func() {}, cancel
+	}
+	idle := time.Duration(timeoutSec) * time.Second
+	maxTotal := 4 * idle
+	if idle >= 30*time.Second && maxTotal < 30*time.Minute {
+		maxTotal = 30 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(parent, maxTotal)
+	var mu sync.Mutex
+	stopped := false
+	timer := time.AfterFunc(idle, cancel)
+	touch := func() {
+		mu.Lock()
+		if !stopped && ctx.Err() == nil {
+			timer.Reset(idle)
+		}
+		mu.Unlock()
+	}
+	stop := func() {
+		mu.Lock()
+		stopped = true
+		timer.Stop()
+		mu.Unlock()
+		cancel()
+	}
+	return ctx, touch, stop
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		if ctx != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+	if ctx == nil {
+		time.Sleep(d)
+		return nil
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }

@@ -102,6 +102,7 @@ func (a *App) handleGoogleGenerate(w http.ResponseWriter, r *http.Request) {
 		Files:                  rawFiles,
 		ConversationKey:        convKey,
 		ConversationHasHistory: convHasHistory,
+		Context:                r.Context(),
 	}
 	var mediaRaw strings.Builder
 	if len(clientMediaTools) > 0 {

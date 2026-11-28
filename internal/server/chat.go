@@ -134,20 +134,17 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		a.Logf("Client offered its own media tool(s) %v — removed from this request so Gemini renders the media itself (no client credits spent)", clientMediaTools)
 	}
 
-	prompt, images, err := format.MessagesToPrompt(req)
-	if err == nil {
-		// Gemini Enterprise: attach referenced files / spill oversized prompt text
-		// so the replayed request stays small instead of re-sending file content
-		// every turn.
-		prompt, images = a.attachEnterpriseContext(req.Messages, prompt, images)
-	}
-	if err != nil || strings.TrimSpace(prompt) == "" {
+	rawPrompt, rawImages, err := format.MessagesToPrompt(req)
+	if err != nil || strings.TrimSpace(rawPrompt) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "empty prompt"}})
 		return
 	}
+	mediaInstruction := ""
 	if len(clientMediaTools) > 0 {
-		prompt += format.MediaGenerationInstruction(clientMediaTools)
+		mediaInstruction = format.MediaGenerationInstruction(clientMediaTools)
 	}
+	prompt := rawPrompt + mediaInstruction
+	images := rawImages
 
 	convKey, convHasHistory := openAIConversationInfo(req)
 	gemOpt := gemini.ModelOptions{
@@ -158,6 +155,7 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		Extra:                  resolved.Extra,
 		ConversationKey:        convKey,
 		ConversationHasHistory: convHasHistory,
+		Context:                r.Context(),
 	}
 
 	// Media only exists in the raw payload, and only a request that asked for
@@ -483,16 +481,20 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				a.Logf("Browser bridge failed before streaming (%v) — retrying via direct cookie mode", emitErr)
 				a.Bridge.MarkDegraded(10 * time.Minute)
 				fullText.Reset()
+				dPrompt, dImages, dFull, dBase, dCommit := a.prepareDirectEnterpriseTurn(req, convKey, rawPrompt, rawImages, mediaInstruction)
+				gemOpt.FullPrompt = dFull
+				gemOpt.DeltaBaseSession = dBase
+				gemOpt.OnSessionUsed = dCommit
 				var fileRefs []string
-				if len(images) > 0 {
+				if len(dImages) > 0 {
 					var uErr error
-					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
+					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(dImages)
 					if uErr != nil {
 						emitErr = uErr
 					}
 				}
 				if emitErr == nil {
-					emitErr = a.Gem.GenerateStream(prompt, gemOpt, fileRefs, emitDelta)
+					emitErr = a.Gem.GenerateStream(dPrompt, gemOpt, fileRefs, emitDelta)
 					if emitErr == nil {
 						servedByDirect = true
 					}
@@ -680,16 +682,20 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 				a.Logf("Browser bridge failed (%v) — retrying via direct cookie mode", err)
 				a.Bridge.MarkDegraded(10 * time.Minute)
 				bridgeErr := err
+				dPrompt, dImages, dFull, dBase, dCommit := a.prepareDirectEnterpriseTurn(req, convKey, rawPrompt, rawImages, mediaInstruction)
+				gemOpt.FullPrompt = dFull
+				gemOpt.DeltaBaseSession = dBase
+				gemOpt.OnSessionUsed = dCommit
 				var fileRefs []string
-				if len(images) > 0 {
+				if len(dImages) > 0 {
 					var uErr error
-					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(images)
+					fileRefs, gemOpt.Files, uErr = a.prepareAttachments(dImages)
 					if uErr != nil {
 						writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, uErr)}})
 						return
 					}
 				}
-				text, err = a.Gem.Generate(prompt, gemOpt, fileRefs)
+				text, err = a.Gem.Generate(dPrompt, gemOpt, fileRefs)
 				if err != nil {
 					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("bridge error: %v (direct fallback: %v)", bridgeErr, err)}})
 					return
@@ -764,7 +770,12 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Direct Gemini API mode: consumer origins upload through content-push,
-	// Gemini Enterprise attaches the files to the assistant session instead.
+	// Gemini Enterprise attaches the files to the assistant session instead and
+	// delta-encodes multi-turn conversations against the owned session.
+	prompt, images, gemOpt.FullPrompt, gemOpt.DeltaBaseSession, gemOpt.OnSessionUsed = a.prepareDirectEnterpriseTurn(
+		req, convKey, rawPrompt, rawImages, mediaInstruction,
+	)
+
 	var fileRefs []string
 	if len(images) > 0 {
 		fileRefs, gemOpt.Files, err = a.prepareAttachments(images)
@@ -775,30 +786,108 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.Stream && (len(req.Tools) == 0 || isToolNone) {
-		if !startSSE(w) {
-			return
+	if req.Stream {
+		var (
+			startMu       sync.Mutex
+			streamStarted bool
+			stopKeepalive chan struct{}
+			doneKeepalive chan struct{}
+			sseMu         sync.Mutex
+		)
+		safeWriteSSE := func(data any) error {
+			sseMu.Lock()
+			defer sseMu.Unlock()
+			return writeSSEData(w, data)
+		}
+		safeWriteDone := func() error {
+			sseMu.Lock()
+			defer sseMu.Unlock()
+			return writeSSEDone(w)
 		}
 
-		// Emit first chunk with role to match OpenAI streaming protocol.
-		firstChunk := models.OpenAIChatResponse{
-			ID:      cid,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   resolved.Name,
-			Choices: []models.OpenAIChoice{
-				{
-					Index: 0,
-					Delta: &models.OpenAIDelta{
-						Role: "assistant",
+		ensureSSEStarted := func() error {
+			startMu.Lock()
+			defer startMu.Unlock()
+			if streamStarted {
+				return nil
+			}
+			if r.Context().Err() != nil {
+				return r.Context().Err()
+			}
+			if !startSSE(w) {
+				return errors.New("streaming unsupported")
+			}
+			streamStarted = true
+
+			firstChunk := models.OpenAIChatResponse{
+				ID:      cid,
+				Object:  "chat.completion.chunk",
+				Created: time.Now().Unix(),
+				Model:   resolved.Name,
+				Choices: []models.OpenAIChoice{
+					{
+						Index: 0,
+						Delta: &models.OpenAIDelta{
+							Role: "assistant",
+						},
+						FinishReason: nil,
 					},
-					FinishReason: nil,
 				},
-			},
-		}
-		_ = writeSSEData(w, firstChunk)
+			}
+			_ = safeWriteSSE(firstChunk)
 
-		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, func(delta string) error {
+			// Keepalive ticker flushes empty delta chunks ({}) every 5s while slow
+			// thinking models (e.g. gemini-4-neon) reason, preventing 60s client
+			// idle timeouts and retry storms on tool-enabled turns.
+			stopKeepalive = make(chan struct{})
+			doneKeepalive = make(chan struct{})
+			keepaliveTicker := time.NewTicker(5 * time.Second)
+			go func() {
+				defer close(doneKeepalive)
+				defer keepaliveTicker.Stop()
+				for {
+					select {
+					case <-keepaliveTicker.C:
+						pingChunk := models.OpenAIChatResponse{
+							ID:      cid,
+							Object:  "chat.completion.chunk",
+							Created: time.Now().Unix(),
+							Model:   resolved.Name,
+							Choices: []models.OpenAIChoice{
+								{
+									Index: 0,
+									Delta: &models.OpenAIDelta{},
+								},
+							},
+						}
+						_ = safeWriteSSE(pingChunk)
+					case <-stopKeepalive:
+						return
+					case <-r.Context().Done():
+						return
+					}
+				}
+			}()
+			return nil
+		}
+
+		gemOpt.OnStreamStart = ensureSSEStarted
+
+		var fullText strings.Builder
+		var bufferedTail strings.Builder
+		hasTools := len(req.Tools) > 0 && !isToolNone
+		isBufferingToolCall := false
+		pending := ""
+		streamedAny := false
+
+		emitContent := func(text string) error {
+			if text == "" {
+				return nil
+			}
+			if err := ensureSSEStarted(); err != nil {
+				return err
+			}
+			streamedAny = true
 			chunk := models.OpenAIChatResponse{
 				ID:      cid,
 				Object:  "chat.completion.chunk",
@@ -808,35 +897,186 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					{
 						Index: 0,
 						Delta: &models.OpenAIDelta{
-							Content: delta,
+							Content: text,
 						},
 						FinishReason: nil,
 					},
 				},
 			}
-			return writeSSEData(w, chunk)
-		})
+			return safeWriteSSE(chunk)
+		}
 
+		emitDelta := func(delta string) error {
+			fullText.WriteString(delta)
+
+			if !hasTools {
+				return emitContent(delta)
+			}
+
+			if isBufferingToolCall {
+				bufferedTail.WriteString(delta)
+				return nil
+			}
+
+			pending += delta
+
+			if idx := findToolFenceStart(pending); idx != -1 {
+				isBufferingToolCall = true
+				bufferedTail.WriteString(pending[idx:])
+				if idx > 0 {
+					leading := pending[:idx]
+					pending = ""
+					return emitContent(leading)
+				}
+				pending = ""
+				return ensureSSEStarted()
+			}
+
+			hold := partialToolFenceSuffixLen(pending)
+			if len(pending) > hold {
+				toEmit := pending[:len(pending)-hold]
+				pending = pending[len(pending)-hold:]
+				return emitContent(toEmit)
+			}
+			return ensureSSEStarted()
+		}
+
+		emitErr := a.Gem.GenerateStream(prompt, gemOpt, fileRefs, emitDelta)
 		if emitErr == nil {
-			// Media cannot be streamed as text deltas, so it arrives as one final
-			// content chunk right before the stop chunk.
-			if suffix := a.chatMediaSuffix(mediaRaw.String(), resolved.Name); suffix != "" {
-				mediaChunk := models.OpenAIChatResponse{
+			_ = ensureSSEStarted()
+		}
+
+		startMu.Lock()
+		started := streamStarted
+		startMu.Unlock()
+		if started {
+			close(stopKeepalive)
+			<-doneKeepalive
+		}
+
+		if emitErr != nil {
+			if !started {
+				a.Logf("Chat stream error: %v", emitErr)
+				if r.Context().Err() == nil {
+					writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"message": fmt.Sprintf("upstream error: %v", emitErr)}})
+				}
+				return
+			}
+			a.Logf("Chat stream error: %v", emitErr)
+			if r.Context().Err() == nil {
+				if !streamedAny {
+					_ = emitContent(fmt.Sprintf("[Upstream Error] %v", emitErr))
+				}
+				stopReason := "stop"
+				endChunk := models.OpenAIChatResponse{
 					ID:      cid,
 					Object:  "chat.completion.chunk",
 					Created: time.Now().Unix(),
 					Model:   resolved.Name,
 					Choices: []models.OpenAIChoice{
 						{
-							Index: 0,
-							Delta: &models.OpenAIDelta{
-								Content: suffix,
-							},
-							FinishReason: nil,
+							Index:        0,
+							Delta:        &models.OpenAIDelta{},
+							FinishReason: &stopReason,
 						},
 					},
 				}
-				_ = writeSSEData(w, mediaChunk)
+				_ = safeWriteSSE(endChunk)
+				_ = safeWriteDone()
+			}
+			return
+		}
+
+		mediaSuffix := a.chatMediaSuffix(mediaRaw.String(), resolved.Name)
+		if hasTools {
+			if isBufferingToolCall {
+				_, toolCalls := format.ParseToolCallsWithContext(fullText.String(), req.Tools, req.Messages)
+				if len(toolCalls) > 0 {
+					if mediaSuffix != "" {
+						_ = emitContent(mediaSuffix)
+					}
+					tcChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index: 0,
+								Delta: &models.OpenAIDelta{
+									ToolCalls: indexToolCalls(toolCalls),
+								},
+								FinishReason: nil,
+							},
+						},
+					}
+					_ = safeWriteSSE(tcChunk)
+
+					stopReason := "tool_calls"
+					endChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index:        0,
+								Delta:        &models.OpenAIDelta{},
+								FinishReason: &stopReason,
+							},
+						},
+					}
+					_ = safeWriteSSE(endChunk)
+				} else {
+					if tail := bufferedTail.String(); tail != "" {
+						_ = emitContent(tail)
+					}
+					if mediaSuffix != "" {
+						_ = emitContent(mediaSuffix)
+					}
+					stopReason := "stop"
+					endChunk := models.OpenAIChatResponse{
+						ID:      cid,
+						Object:  "chat.completion.chunk",
+						Created: time.Now().Unix(),
+						Model:   resolved.Name,
+						Choices: []models.OpenAIChoice{
+							{
+								Index:        0,
+								Delta:        &models.OpenAIDelta{},
+								FinishReason: &stopReason,
+							},
+						},
+					}
+					_ = safeWriteSSE(endChunk)
+				}
+			} else {
+				if pending != "" {
+					_ = emitContent(pending)
+					pending = ""
+				}
+				if mediaSuffix != "" {
+					_ = emitContent(mediaSuffix)
+				}
+				stopReason := "stop"
+				endChunk := models.OpenAIChatResponse{
+					ID:      cid,
+					Object:  "chat.completion.chunk",
+					Created: time.Now().Unix(),
+					Model:   resolved.Name,
+					Choices: []models.OpenAIChoice{
+						{
+							Index:        0,
+							Delta:        &models.OpenAIDelta{},
+							FinishReason: &stopReason,
+						},
+					},
+				}
+				_ = safeWriteSSE(endChunk)
+			}
+		} else {
+			if mediaSuffix != "" {
+				_ = emitContent(mediaSuffix)
 			}
 			stopReason := "stop"
 			endChunk := models.OpenAIChatResponse{
@@ -852,11 +1092,9 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 					},
 				},
 			}
-			_ = writeSSEData(w, endChunk)
-			_ = writeSSEDone(w)
-		} else {
-			a.Logf("Chat stream error: %v", emitErr)
+			_ = safeWriteSSE(endChunk)
 		}
+		_ = safeWriteDone()
 		return
 	}
 
@@ -889,71 +1127,27 @@ func (a *App) handleChat(w http.ResponseWriter, r *http.Request) {
 		finish = "tool_calls"
 	}
 
-	if req.Stream {
-		if !startSSE(w) {
-			return
-		}
-		delta := &models.OpenAIDelta{
-			Role: "assistant",
-		}
-		if text != "" {
-			delta.Content = text
-		}
-		if len(toolCalls) > 0 {
-			delta.ToolCalls = indexToolCalls(toolCalls)
-		}
-		chunk := models.OpenAIChatResponse{
-			ID:      cid,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   resolved.Name,
-			Choices: []models.OpenAIChoice{
-				{
-					Index:        0,
-					Delta:        delta,
-					FinishReason: nil,
-				},
+	promptTokens := len(prompt) / 4
+	completionTokens := len(text) / 4
+	resp := models.OpenAIChatResponse{
+		ID:      cid,
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   resolved.Name,
+		Choices: []models.OpenAIChoice{
+			{
+				Index:        0,
+				Message:      &msg,
+				FinishReason: &finish,
 			},
-		}
-		_ = writeSSEData(w, chunk)
-		endChunk := models.OpenAIChatResponse{
-			ID:      cid,
-			Object:  "chat.completion.chunk",
-			Created: time.Now().Unix(),
-			Model:   resolved.Name,
-			Choices: []models.OpenAIChoice{
-				{
-					Index:        0,
-					Delta:        &models.OpenAIDelta{},
-					FinishReason: &finish,
-				},
-			},
-		}
-		_ = writeSSEData(w, endChunk)
-		_ = writeSSEDone(w)
-	} else {
-		promptTokens := len(prompt) / 4
-		completionTokens := len(text) / 4
-		resp := models.OpenAIChatResponse{
-			ID:      cid,
-			Object:  "chat.completion",
-			Created: time.Now().Unix(),
-			Model:   resolved.Name,
-			Choices: []models.OpenAIChoice{
-				{
-					Index:        0,
-					Message:      &msg,
-					FinishReason: &finish,
-				},
-			},
-			Usage: &models.OpenAIUsage{
-				PromptTokens:     promptTokens,
-				CompletionTokens: completionTokens,
-				TotalTokens:      promptTokens + completionTokens,
-			},
-		}
-		writeJSON(w, http.StatusOK, resp)
+		},
+		Usage: &models.OpenAIUsage{
+			PromptTokens:     promptTokens,
+			CompletionTokens: completionTokens,
+			TotalTokens:      promptTokens + completionTokens,
+		},
 	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // keepBridgeForSpillover decides whether an oversized prompt should stay on the
