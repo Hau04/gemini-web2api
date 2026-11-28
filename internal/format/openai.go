@@ -1139,9 +1139,9 @@ func MessagesToDeltaPromptWithNames(deltaMessages []models.OpenAIMessage, toolCh
 }
 
 var (
-	reToolCall           = regexp.MustCompile("(?s)\\x60\\x60\\x60(?:tool_calls?|function_call)[ \\t]*\\r?\\n(.*?)\\s*\\x60\\x60\\x60")
+	reToolCallOpen       = regexp.MustCompile("\\x60\\x60\\x60(?:tool_calls?|function_call)[ \\t]*\\r?\\n")
 	reXMLToolCall        = regexp.MustCompile(`(?is)<tool_call>\s*(.*?)\s*</tool_call>`)
-	reJSONToolCall       = regexp.MustCompile("(?s)\\x60\\x60\\x60json[ \\t]*\\r?\\n(.*?)\\s*\\x60\\x60\\x60")
+	reJSONToolCallOpen   = regexp.MustCompile("\\x60\\x60\\x60json[ \\t]*\\r?\\n")
 	reTrailingJSONCommas = regexp.MustCompile(`,\s*([}\]])`)
 )
 
@@ -1481,6 +1481,119 @@ func ParseToolCalls(text string) (string, []models.OpenAIToolCall) {
 	return ParseToolCallsWithAllowed(text, nil)
 }
 
+const fenceBackticks = "\x60\x60\x60"
+
+// findClosingFenceOutsideJSONString scans a fenced JSON tool-call body for the
+// closing triple-backtick fence while ignoring triple backticks inside JSON
+// string literals (e.g. Write/Edit payloads containing markdown code blocks).
+func findClosingFenceOutsideJSONString(s string) (closeStart, closeEnd int, ok bool) {
+	inString := false
+	escaped := false
+	depth := 0
+	fallbackStart := -1
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"':
+			inString = true
+		case '{', '[':
+			depth++
+		case '}', ']':
+			if depth > 0 {
+				depth--
+			}
+		case '\x60':
+			if strings.HasPrefix(s[i:], fenceBackticks) {
+				if depth == 0 {
+					return i, i + len(fenceBackticks), true
+				}
+				if fallbackStart == -1 {
+					fallbackStart = i
+				}
+			}
+		}
+	}
+
+	if fallbackStart != -1 {
+		return fallbackStart, fallbackStart + len(fenceBackticks), true
+	}
+	return 0, 0, false
+}
+
+func extractFencedBlocks(text string, openRe *regexp.Regexp, opts toolParseOpts) (string, []models.OpenAIToolCall) {
+	var toolCalls []models.OpenAIToolCall
+	var cleanParts []string
+	lastEnd := 0
+	pos := 0
+	foundAny := false
+
+	for pos < len(text) {
+		loc := openRe.FindStringIndex(text[pos:])
+		if loc == nil {
+			break
+		}
+		openStart := pos + loc[0]
+		bodyStart := pos + loc[1]
+		relCloseStart, relCloseEnd, closed := findClosingFenceOutsideJSONString(text[bodyStart:])
+		if !closed {
+			if !opts.requireAllowed {
+				if eofCalls := decodeToolCallPayload(text[bodyStart:], opts); len(eofCalls) > 0 {
+					foundAny = true
+					cleanParts = append(cleanParts, text[lastEnd:openStart])
+					lastEnd = len(text)
+					toolCalls = append(toolCalls, eofCalls...)
+					break
+				}
+			}
+			pos = bodyStart
+			continue
+		}
+
+		foundAny = true
+		bodyEnd := bodyStart + relCloseStart
+		blockEnd := bodyStart + relCloseEnd
+		blockCalls := decodeToolCallPayload(text[bodyStart:bodyEnd], opts)
+		if len(blockCalls) == 0 {
+			if opts.requireAllowed {
+				pos = blockEnd
+				continue
+			}
+			cleanParts = append(cleanParts, text[lastEnd:openStart])
+			lastEnd = blockEnd
+			pos = blockEnd
+			continue
+		}
+		cleanParts = append(cleanParts, text[lastEnd:openStart])
+		lastEnd = blockEnd
+		toolCalls = append(toolCalls, blockCalls...)
+		pos = blockEnd
+	}
+
+	if !foundAny || (len(toolCalls) == 0 && opts.requireAllowed) {
+		return text, nil
+	}
+
+	cleanParts = append(cleanParts, text[lastEnd:])
+	clean := strings.TrimSpace(strings.Join(cleanParts, ""))
+	return clean, toolCalls
+}
+
 func parseToolCallsInternal(text string, allowedTools map[string]bool, deferCfg DeferredToolConfig, deferredNames map[string]bool) (string, []models.OpenAIToolCall) {
 	explicitOpts := toolParseOpts{
 		requireAllowed: false,
@@ -1489,7 +1602,7 @@ func parseToolCallsInternal(text string, allowedTools map[string]bool, deferCfg 
 		deferredNames:  deferredNames,
 	}
 
-	clean, calls := extractBlocksWithRegex(text, reToolCall, explicitOpts)
+	clean, calls := extractFencedBlocks(text, reToolCallOpen, explicitOpts)
 	if len(calls) > 0 {
 		return clean, calls
 	}
@@ -1502,7 +1615,7 @@ func parseToolCallsInternal(text string, allowedTools map[string]bool, deferCfg 
 	if len(allowedTools) > 0 {
 		jsonOpts := explicitOpts
 		jsonOpts.requireAllowed = true
-		cleanJSON, jsonCalls := extractBlocksWithRegex(text, reJSONToolCall, jsonOpts)
+		cleanJSON, jsonCalls := extractFencedBlocks(text, reJSONToolCallOpen, jsonOpts)
 		if len(jsonCalls) > 0 {
 			return cleanJSON, jsonCalls
 		}
