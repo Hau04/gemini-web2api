@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -259,15 +260,13 @@ func (c *Client) sessionAction(opt ModelOptions) sessionAction {
 	switch {
 	case opt.ConversationHasHistory && key != "":
 		// A real conversation: it owns a session, and only that session is right.
-		if owned, ok := c.enterpriseSessions[key]; ok {
+		if owned, ok := c.enterpriseSessions[key]; ok && owned != "" {
 			if owned != c.enterpriseSession {
 				c.Logf("Enterprise: switching back to the session owned by conversation %s", key)
 				c.enterpriseSession = owned
 			}
 			c.enterpriseSessionKey = key
-		} else if c.enterpriseSession == "" {
-			action = sessionActionNewChat
-		} else if c.enterprisePendingKey == key {
+		} else if c.enterprisePendingKey == key && c.enterpriseSession != "" {
 			// First turn of this chat was the lone message that created the
 			// cached session — adopt it instead of opening another thread.
 			if c.enterpriseSessions == nil {
@@ -276,7 +275,7 @@ func (c *Client) sessionAction(opt ModelOptions) sessionAction {
 			c.enterpriseSessions[key] = c.enterpriseSession
 			c.enterpriseSessionKey = key
 			c.enterprisePendingKey = ""
-		} else if c.enterpriseSessionKey != "" && c.enterpriseSessionKey != key {
+		} else {
 			action = sessionActionNewChat
 		}
 	case !opt.ConversationHasHistory:
@@ -295,8 +294,8 @@ func (c *Client) sessionAction(opt ModelOptions) sessionAction {
 	return action
 }
 
-// recordEnterpriseSession logs and remembers the session chosen for a request.
-func (c *Client) recordEnterpriseSession(session string, opt ModelOptions) {
+// rememberEnterpriseSession updates the conversation -> session map without logging.
+func (c *Client) rememberEnterpriseSession(session string, opt ModelOptions) {
 	key := strings.TrimSpace(opt.ConversationKey)
 	c.enterpriseAuthMu.Lock()
 	if c.enterpriseSessions == nil {
@@ -310,7 +309,12 @@ func (c *Client) recordEnterpriseSession(session string, opt ModelOptions) {
 		}
 	}
 	c.enterpriseAuthMu.Unlock()
+}
 
+// recordEnterpriseSession logs and remembers the session chosen for a request.
+func (c *Client) recordEnterpriseSession(session string, opt ModelOptions) {
+	c.rememberEnterpriseSession(session, opt)
+	key := strings.TrimSpace(opt.ConversationKey)
 	if key == "" {
 		c.Logf("Enterprise: continuing in assistant session %s (reused for every turn of this conversation)", shortSessionName(session))
 		return
@@ -318,13 +322,154 @@ func (c *Client) recordEnterpriseSession(session string, opt ModelOptions) {
 	c.Logf("Enterprise: continuing in assistant session %s for conversation %s", shortSessionName(session), key)
 }
 
-// clearEnterpriseSession forgets the cached assistant session. The tenant can
-// drop a session at any time (expiry, engine rebuild, a different backend pod),
-// and a stale id must never fail an otherwise healthy request.
+// clearEnterpriseSession forgets the active cached assistant session slot when
+// switching to a new chat, while keeping per-conversation mappings for older
+// chats so resuming an earlier conversation can still switch back to its thread.
 func (c *Client) clearEnterpriseSession() {
 	c.enterpriseAuthMu.Lock()
 	c.enterpriseSession = ""
 	c.enterpriseAuthMu.Unlock()
+}
+
+func sameEnterpriseSession(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || shortSessionName(a) == shortSessionName(b)
+}
+
+// evictEnterpriseSession permanently drops an unusable Discovery Engine session
+// (e.g. HTTP 404 session not found, or HTTP 400 PROMPT_TOO_LARGE from accumulated
+// server-side session history) from the active slot, every conversation mapping
+// that owned it, per-session delta fingerprints, and session-scoped upload cache.
+// Without removing c.enterpriseSessions[convKey], the very next turn of that
+// conversation logs "switching back to the session owned by conversation ..."
+// and re-attaches the poisoned session in an infinite HTTP 400 loop.
+func (c *Client) evictEnterpriseSession(deadSession, convKey string) {
+	dead := strings.TrimSpace(deadSession)
+	key := strings.TrimSpace(convKey)
+
+	c.enterpriseAuthMu.Lock()
+	if dead == "" || sameEnterpriseSession(c.enterpriseSession, dead) {
+		c.enterpriseSession = ""
+	}
+	for k, v := range c.enterpriseSessions {
+		if (key != "" && k == key) || (dead != "" && sameEnterpriseSession(v, dead)) {
+			delete(c.enterpriseSessions, k)
+			if c.enterpriseSessionKey == k {
+				c.enterpriseSessionKey = ""
+			}
+		}
+	}
+	if key != "" && c.enterprisePendingKey == key {
+		c.enterprisePendingKey = ""
+	}
+	if dead != "" && c.enterpriseSessionDeltas != nil {
+		delete(c.enterpriseSessionDeltas, shortSessionName(dead))
+	}
+	c.enterpriseAuthMu.Unlock()
+
+	if dead != "" {
+		c.uploadMu.Lock()
+		for k, entry := range c.uploadCache {
+			if sameEnterpriseSession(entry.session, dead) || strings.HasSuffix(k, "\x00"+dead) {
+				delete(c.uploadCache, k)
+			}
+		}
+		c.uploadMu.Unlock()
+	}
+}
+
+type enterpriseSessionDelta struct {
+	fingerprints []string
+	toolNames    map[string]bool
+}
+
+// OwnedEnterpriseSession returns the Discovery Engine session currently bound to
+// convKey (or "" if none), without mutating session routing state.
+func (c *Client) OwnedEnterpriseSession(convKey string) string {
+	key := strings.TrimSpace(convKey)
+	if key == "" {
+		return ""
+	}
+	c.enterpriseAuthMu.Lock()
+	defer c.enterpriseAuthMu.Unlock()
+	return c.enterpriseSessions[key]
+}
+
+// RecordEnterpriseSessionDelta stores the committed message fingerprints and
+// declared tool names held by a Discovery Engine session after a successful turn,
+// enabling subsequent turns in the same session to send only newly appended turns
+// instead of re-inlining the entire transcript on every turn.
+func (c *Client) RecordEnterpriseSessionDelta(session string, fingerprints []string, toolNames map[string]bool) {
+	s := strings.TrimSpace(session)
+	if s == "" || strings.HasSuffix(s, "/-") || len(fingerprints) == 0 {
+		return
+	}
+	fpsCopy := make([]string, len(fingerprints))
+	copy(fpsCopy, fingerprints)
+	toolsCopy := make(map[string]bool, len(toolNames))
+	for k, v := range toolNames {
+		if v {
+			toolsCopy[k] = true
+		}
+	}
+	c.enterpriseAuthMu.Lock()
+	if c.enterpriseSessionDeltas == nil {
+		c.enterpriseSessionDeltas = make(map[string]enterpriseSessionDelta)
+	}
+	c.enterpriseSessionDeltas[shortSessionName(s)] = enterpriseSessionDelta{
+		fingerprints: fpsCopy,
+		toolNames:    toolsCopy,
+	}
+	c.enterpriseAuthMu.Unlock()
+}
+
+// MatchEnterpriseSessionDelta checks whether session already holds a leading
+// prefix of fingerprints (including purely additive mid-chat tool unlocks).
+func (c *Client) MatchEnterpriseSessionDelta(session string, fingerprints []string, currentTools map[string]bool) (matchedPrefix int, addedTools []string) {
+	s := strings.TrimSpace(session)
+	if s == "" || strings.HasSuffix(s, "/-") {
+		return 0, nil
+	}
+	c.enterpriseAuthMu.Lock()
+	defer c.enterpriseAuthMu.Unlock()
+	state, ok := c.enterpriseSessionDeltas[shortSessionName(s)]
+	if !ok {
+		return 0, nil
+	}
+	prev := state.fingerprints
+	if len(prev) == 0 || len(fingerprints) <= len(prev) {
+		return 0, nil
+	}
+	for i := 1; i < len(prev); i++ {
+		if prev[i] != fingerprints[i] {
+			return 0, nil
+		}
+	}
+	if prev[0] == fingerprints[0] {
+		return len(prev), nil
+	}
+	if len(state.toolNames) == 0 || len(currentTools) <= len(state.toolNames) {
+		return 0, nil
+	}
+	for oldName := range state.toolNames {
+		if !currentTools[oldName] {
+			return 0, nil
+		}
+	}
+	for newName := range currentTools {
+		if !state.toolNames[newName] {
+			addedTools = append(addedTools, newName)
+		}
+	}
+	if len(addedTools) == 0 {
+		return 0, nil
+	}
+	sort.Strings(addedTools)
+	return len(prev), addedTools
 }
 
 // shortSessionName keeps session logs to one readable line.

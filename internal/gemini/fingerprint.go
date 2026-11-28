@@ -60,9 +60,20 @@ func getTLSClient(profileName string, timeoutSec int) (*tlsClientAdapter, error)
 		return adapter, nil
 	}
 
+	effectiveTimeoutSec := timeoutSec
+	if effectiveTimeoutSec >= 300 {
+		// Per-request activity timeouts (withActivityTimeout) enforce the idle cap;
+		// raise tls-client's wall-clock ceiling so active multi-minute thinking
+		// streams are not cut off at 300s mid-response.
+		effectiveTimeoutSec = effectiveTimeoutSec * 4
+		if effectiveTimeoutSec < 1800 {
+			effectiveTimeoutSec = 1800
+		}
+	}
+
 	options := []http_client.HttpClientOption{
 		http_client.WithClientProfile(resolveProfile(profileName)),
-		http_client.WithTimeoutSeconds(timeoutSec),
+		http_client.WithTimeoutSeconds(effectiveTimeoutSec),
 		http_client.WithNotFollowRedirects(),
 	}
 
@@ -77,6 +88,9 @@ func getTLSClient(profileName string, timeoutSec int) (*tlsClientAdapter, error)
 }
 
 func (a *tlsClientAdapter) Do(req *http.Request) (*http.Response, error) {
+	if err := req.Context().Err(); err != nil {
+		return nil, err
+	}
 	var bodyBytes []byte
 	if req.Body != nil {
 		var err error
@@ -88,7 +102,7 @@ func (a *tlsClientAdapter) Do(req *http.Request) (*http.Response, error) {
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 
-	freq, err := fhttp.NewRequest(req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
+	freq, err := fhttp.NewRequestWithContext(req.Context(), req.Method, req.URL.String(), bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, err
 	}
