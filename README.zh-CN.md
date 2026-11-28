@@ -1,4 +1,4 @@
-<!-- markdown-translator:38f14a416678b63795c58ff9041fc8761d1e138864beaf7a59854853f86ec386 -->
+<!-- markdown-translator:970878840a7249d834bf61a728186dbb88958a487e802d710316cb4563e85218 -->
 # Gemini-web2api
 
 <p align="center">
@@ -210,165 +210,168 @@ gemini
 
 ## WorkBuddy / MCP 兼容性
 
-面向会驱动工具、连接器、技能与 MCP 服务器的代理运行时（WorkBuddy、Claude 风格 agent、OpenAI SDK）：
+专为驱动工具、连接器、技能和 MCP 服务器的代理运行时而构建（WorkBuddy、Claude 式代理、OpenAI SDK）：
 
-| 能力 | 行为 |
+|特色 |行为 |
 | --- | --- |
-| `GET /v1/models` | 每个别名都带 `capabilities`（`tools`、`connectors`、`mcp`、`vision`、`attachments`、`json_mode`、`streaming`）、`context_window`、`premium`、`research_prone`，客户端可在启用功能前先做能力判断 |
-| `GET /v1/models/{id}` | 单模型查询（200/404），代理运行时用来校验配置的模型 id |
-| `parallel_tool_calls: false` | 在提示词中强制：每轮只能输出**一个** `tool_call` 块 |
-| 重复/无名工具 | MCP 与连接器合并后按名称去重；`{"type":"web_search"}` 这类没有函数名的内置声明会被跳过，不会污染提示词 |
-| MCP 工具名 | `mcp__server__tool`、`server.tool` 等带命名空间的名称原样透传 —— 它们由你的客户端执行，不会被 Gemini 接管 |
-| 技能 | 支持纯 `system` 长指令（技能本质就是指令包）；`/v1/responses` 与 `/v1/chat/completions` 同样完整支持 |
+|`GET /v1/models`|每个别名都带有`capabilities`(`tools`,`connectors`,`mcp`,`vision`,`attachments`,`json_mode`,`streaming`),`context_window`,`premium`和`research_prone`标志，以便客户端可以在启用功能之前进行过滤 |
+|`GET /v1/models/{id}`|代理运行时使用单模型探针 (200/404) 来验证配置的 ID |
+|`parallel_tool_calls: false`|提示中强制执行：正好一`tool_call`每回合块|
+|重复/无名工具|合并的 MCP + 连接器集按名称进行重复数据删除；内置声明，例如`{"type":"web_search"}`（无函数名称）被跳过，而不是泄漏无名条目 |
+| MCP 工具名称 |命名空间名称 (`mcp__server__tool`,`server.tool`）原封不动地传递——它们是由你的客户执行的，而不是由 Gemini |
+|技能 |长的`system`-仅支持提示（技能只是指令包）；`/v1/responses`并完全支持`/v1/chat/completions`|
 
-### 高级模型不会掉进 Deep Research
+### 优质模型永远不会陷入深度研究
 
-Neon、Hydrogen、Carbon、Argon 被标记为 `research_prone`：Gemini 界面很容易把它们切到 Deep Research，而那个模式只读公开网页、**无法调用你的工具、连接器或 MCP**。开启 `prevent_deep_research`（默认 `true`）后，带工具的请求：
+氖气、氢、碳和氩被标记`research_prone`，因为 Gemini UI 很乐意将他们推入深度研究——一种仅读取公共网络的模式，**无法运行您的工具、连接器或 MCP 服务器**。和`prevent_deep_research`（默认`true`）对这些模型之一的启用工具的请求：
 
-- 丢弃上游研究/浏览类工具（`google_search`、`web_search`、`web_search_preview`、`deep_research`、`url_context`、`browse` 等），保留你真正的工具；
-- 在 `# Tool Use` 段里注入 `EXECUTION MODE`：Deep Research 与内置搜索被禁用，关于本机、仓库、文件、应用的事实必须来自 `tool_call`，缺数据就先发工具调用而不是去研究；
-- 响应头返回 `X-Deep-Research: disabled`，日志输出 `Execution-mode guard applied for premium model "gemini-4-neon" …`。
+* 删除上游研究/浏览工具（`google_search`,`web_search`,`web_search_preview`,`deep_research`,`url_context`,`browse`，...）同时保留你真正的工具；
+* 折叠一个`EXECUTION MODE`线进入`# Tool Use`序言：深度研究/内置搜索已禁用，有关机器、存储库、文件或应用程序的事实必须来自`tool_call`，并且丢失的数据必须通过工具获取而不是研究；
+* 回答与`X-Deep-Research: disabled`和日志`Execution-mode guard applied for premium model "gemini-4-neon" …`.
 
 ```jsonc
 { "prevent_deep_research": true, "tool_model": "gemini-3.8-flash" }
 ```
 
-若想让所有带工具的请求都走更稳定、更便宜的工具调用模型，`tool_model` 依然优先生效。
+`tool_model`当您希望支持工具的请求在更便宜、可靠的工具调用程序上运行时，无论客户要求什么模型，仍然会获胜。
 
-## 真实企业版日志中的两种失败如何排查
+## 对真实企业日志中的确切故障进行故障排除
 
-**`context-file upload rejected (HTTP 400): One or more required fields are missing.`** —— widget 的 `widgetAddContextFile` 需要 `configId`；既没有捕获的上传模板、也没有 `discovery_engine_config_id` 时，服务器只能推导出 URL，推不出字段。现在不再浪费这次请求，而是直接报出修复方式：
+**`context-file upload rejected (HTTP 400): One or more required fields are missing.`**— 小部件的`widgetAddContextFile`需要一个`configId`，并且没有捕获的上传模板或`discovery_engine_config_id`服务器只能导出 URL，而不能导出字段。`gemini-web2api`不再消耗往返行程：它预先拒绝
 
 ```
 cannot attach "code_context.txt": the Discovery Engine widget configId is unknown and the widget rejects uploads without it —
-send one message in the Gemini Enterprise tab with the extension enabled …, or set "discovery_engine_config_id"
+send one message in the Gemini Enterprise tab with the extension enabled (the request is captured automatically), or set "discovery_engine_config_id"
 ```
 
-启动横幅也会如实显示，而不是给出一个看起来可用的回退。真的收到 400 时，错误里会列出实际发送的字段（`sent fields: …`），缺哪个一目了然。
+初创公司的横幅也说了同样的事情，而不是承诺后备方案。当 400 确实返回时，错误现在会列出实际发送的字段（`sent fields: addContextFileRequest{fileContents, fileName, mimeType}, additionalParams, configId`），因此缺失的字段是可见的而不是猜测的。
 
-**`modelId=<none>` /「还是 Auto」** —— `discovery_engine_models` 为空，什么都没发送。两条路：
+**`modelId=<none>`/“仍然回答为自动”**—`discovery_engine_models`是空的，所以没有发送任何内容。两种出路：
 
-1. **自动：** 在开启扩展的情况下，到 Gemini Enterprise 标签页里随便发一条消息。它自己的 `widgetStreamAssist` 请求会被捕获，租户真实的 `assistGenerationConfig.modelId`（以及 `configId`、`session`）会被复用，日志变成
-   `Enterprise: calling the Discovery Engine widgetStreamAssist API (…, requested="gemini-4-hydrogen", modelId="gemini-2.5-pro", source=captured)`，
-   `/v1/model-info` 显示 `"source": "captured"`。
-2. **显式：** 直接做别名映射，精确可控。
+1. **自动的：**&#x5728;启用扩展的情况下，在 Gemini Enterprise 选项卡中发送一条消息。它自己的`widgetStreamAssist`请求被捕获，租户的真实信息`assistGenerationConfig.modelId`（加`configId`和`session`) 然后被重用——日志变成`Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, requested="gemini-4-hydrogen", modelId="gemini-2.5-pro", source=captured)`和`/v1/model-info`报告`"source": "captured"`.
+2. **明确：**&#x6620;射别名（请参阅上面的部分）以进行精确控制。
 
-`source=captured` 的含义是「已经在发送租户认可的模型，但那是标签页当时选中的那个」；想要固定某个模型就配置映射。之前日志打印 `model="gemini-4-hydrogen"` 会让人以为别名被发送了 —— 实际上从来没有。
+`source=captured`意味着“现在正在发送租户有效的模型，但它是选项卡选择的任何模型”——如果您想要特定的映射，请设置一个映射。之前打印的日志`model="gemini-4-hydrogen"`，这意味着别名已发送到上游；从来没有。
 
-### 诊断接口的鉴权
+### 验证诊断端点
 
-`/v1/*` 受 `api_keys` 保护，以下任意一种写法都可以（`invalid api key` 的响应体现在会直接告诉你怎么传）：
+`/v1/*`受保护`api_keys`。这些形式中的任何一种都有效——`invalid api key`现在在响应正文中告诉您：
 
 ```bash
-KEY=配置里的密钥
-curl -H "Authorization: Bearer $KEY" "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen"
-curl -H "x-api-key: $KEY"            "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen"
+KEY=your-key-from-config
+curl -H "Authorization: Bearer $KEY" http://localhost:8081/v1/model-info?model=gemini-4-hydrogen
+curl -H "x-api-key: $KEY"            http://localhost:8081/v1/model-info?model=gemini-4-hydrogen
 curl "http://localhost:8081/v1/model-info?model=gemini-4-hydrogen&key=$KEY"
 ```
 
-### 自动发现租户模型 id（不用翻 DevTools）
+### 发现租户模型 ID（无需 DevTools）
 
-直连模式要报出模型，就必须知道租户 id。现在服务器不再靠猜，而是**直接问租户**：发一个最小的 `widgetStreamAssist`，把请求的别名当作 `assistGenerationConfig.modelId` 发过去。被接受就验证成功、按别名缓存到 `enterprise_models.json`，之后一直使用：
-
-```
-Gemini Enterprise: tenant accepted model id "gemini-4-hydrogen" for "gemini-4-hydrogen" — cached in enterprise_models.json
-```
-
-被拒绝则本次进程内不再重试该别名，请求继续（不带 modelId，走租户默认）而不是报错：
+如果直接模式应该命名模型但不知道租户 ID，`gemini-web2api`现在**询问租户而不​​是猜测**: 一个最小的`widgetStreamAssist`调用携带请求的别名作为`assistGenerationConfig.modelId`。如果租户接受，则会验证 ID，并将每个别名缓存在`enterprise_models.json`，并从那时起使用：
 
 ```
-Gemini Enterprise: tenant does not accept "gemini-4-neon" as a model id (HTTP 400) … — falling back to the tenant's auto/default model
+Gemini Enterprise: tenant accepted model id "gemini-4-hydrogen" for "gemini-4-hydrogen" — cached in enterprise_models.json, direct mode will now select it
 ```
 
-开关是 `discovery_engine_probe_models`（默认 `true`）；也可以手动探测并看到上游原话：
+如果租户拒绝，则在此过程中不会再次探测别名，并且请求将在没有模型 ID（租户默认值）的情况下继续，而不是失败：
+
+```
+Gemini Enterprise: tenant does not accept "gemini-4-neon" as a model id (the tenant rejected model id "gemini-4-neon" (HTTP 400) …) — falling back to the tenant's auto/default model
+```
+
+控制它与`discovery_engine_probe_models`（默认`true`），或者显式运行探针并查看确切的上游答案：
 
 ```bash
 curl -X POST localhost:8081/v1/model-probe \
   -H 'Content-Type: application/json' \
   -d '{"model":"gemini-4-hydrogen","candidate":"gemini-4-hydrogen"}'
+# {"ok":true,"model":"gemini-4-hydrogen","model_id":"gemini-4-hydrogen","source":"learned",…}
 ```
 
-逐个换候选 id（如 `"candidate":"gemini-2.5-flash"`）直到被接受，每次成功都会被记住。解析顺序：`discovery_engine_models` → 直接使用租户 id → `discovery_engine_default_model_id` → **learned（探测验证）** → 标签页捕获的 id → 租户默认。
+一次尝试一位候选人（`"candidate":"gemini-2.5-flash"`) 直至其中一项被接受；每一次成功都会被铭记。决议顺序为：`discovery_engine_models`→ 租户 ID 直通 →`discovery_engine_default_model_id`→**已学习（探针验证）**→ 从选项卡捕获 → 租户默认值。
 
-### 让下拉框真正生效的路由规则
+### 使选择器具有权威性的路由规则
 
-企业版里只有两条路能拿到你指定的模型：
+在 Gemini Enterprise 源上，有两种方法可以获得您所需的模型：
 
-1. **直连模式** —— 在 widget 请求里带 `assistGenerationConfig.modelId`。前提是知道租户 id（`discovery_engine_models` 映射、直接使用租户 id、配置的默认值，或从标签页捕获请求里学到的 id）。
-2. **桥模式** —— 扩展在标签页下拉框里点选。只要下拉框里有该模型就一定生效。
+1. **直接模式**—`assistGenerationConfig.modelId`在小部件请求中。仅当租户 ID 已知时（a`discovery_engine_models`映射、直通租户 ID、配置的默认值或从选项卡捕获的请求中获知的 ID）。
+2. **桥接模式**— 扩展程序单击选项卡选择器中的模型。这始终适用于选择器实际显示的模型。
 
-所以路由现在会**看模型**：直连模式报不出你请求的模型时，请求改走桥，而不是被租户的 auto 模型悄悄回答 —— 这正是「我选了 Hydrogen，还是 Auto」的根因：
+所以路由现在是模型感知的：**如果直接模式无法命名所请求的车型，则该请求将通过桥接器，而不是由租户的汽车模型默默地应答。**&#x8FD9;就是曾经产生“我选择了氢气，它仍然显示自动”的情况：
 
 ```
-Keeping the browser bridge: direct mode has no tenant model id for "gemini-4-hydrogen" …
+Keeping the browser bridge: direct mode has no tenant model id for "gemini-4-hydrogen",
+so only the tab's model picker can select it (map discovery_engine_models to make direct mode honour it)
 ```
 
-响应头带 `X-Model-Route: bridge-picker`，`/v1/model-info` 显示 `"source": "bridge-picker"`、`selection_live: true`。
+响应携带`X-Model-Route: bridge-picker`， 和`/v1/model-info`报告`"source": "bridge-picker"`和`selection_live: true`.
 
-两点注意：
+有两个值得了解的后果：
 
-- **标签页必须保持打开且未休眠。** Chrome 的内存节省会把后台标签页冻结，冻结即视为断开，桥不可用 → 回退直连 → 租户 auto。日志会明确写出，`/bridge/status` 里 `frozen: true`。
-- **已映射的别名完全不依赖标签页。** 一旦 `discovery_engine_models` 里有了 id，直连模式即可服务请求（附件 `files=N` 也依赖这条）。
+* **该选项卡必须保持打开和唤醒状态。**&#x43;hrome 的内存保护程序会冻结后台选项卡；冻结的选项卡被报告为已断开连接，桥接器不可用，并且转弯回退到直接模式 → 租户自动。日志明确指出（`MODEL SELECTION WARNING: … no usable browser tab …`）， 和`/bridge/status`节目`frozen: true`.
+* **映射的别名永远不会触及该选项卡。**&#x4E00;次`discovery_engine_models`具有 id，直接模式根本不需要浏览器即可处理请求 - 这也是附件的原因（`files=N`） 可能的。
 
-## 「我选了 Hydrogen，为什么还是 Auto 回答」—— 模型选择诊断
+## “我选择了 Hydrogen，但它回答为 Auto” — 诊断模型选择
 
-实际回答的模型由三处决定，每一处都可能静默回退。`GET /v1/model-info?model=gemini-4-hydrogen` 会直接告诉你当前是哪种情况：
+根据路线的不同，在三个不同的地方决定了回答的模型，并且每个模型都可以默默地后退。`GET /v1/model-info?model=gemini-4-hydrogen`报告目前适用的一项：
 
 ```jsonc
 {
   "requested": "gemini-4-hydrogen",
+  "resolved": { "name": "gemini-4-hydrogen", "mode": 8, "think": 4, "fallback": false },
   "origin": "discovery_engine",
   "upstream": { "model_id": "", "source": "tenant-default", "selection_live": false },
+  "transport": ["bridge", "direct"],
   "discovery_engine_models": {},
-  "warnings": ["Gemini Enterprise model selection is INACTIVE: discovery_engine_models is empty …"]
+  "warnings": ["Gemini Enterprise model selection is INACTIVE: discovery_engine_models is empty, so every request is answered by the tenant's auto/default model and \"gemini-4-hydrogen\" is ignored. …"]
 }
 ```
 
-`upstream.source` 的含义：
+`upstream.source`准确地告诉您发生了什么：
 
-| `source` | 含义 |
+|`source`|意义|
 | --- | --- |
-| `mapping` | 命中 `discovery_engine_models`，租户会用映射后的模型回答 |
-| `passthrough` | 客户端直接指定了租户模型 id（`gemini-2.5-pro`） |
-| `configured-default` | 别名未映射，使用了 `discovery_engine_default_model_id` |
-| `tenant-default` | **什么都没选 —— 由租户决定，通常就是「Auto」** |
-| `alias` | 消费版：别名本身就决定路由 |
-| `bridge-picker` | 企业版没有租户模型 id：请求走浏览器桥，由标签页的下拉框选择模型 |
-| `captured` | 企业版没有映射：复用从标签页捕获请求中得到的租户 `modelId` |
+|`mapping`|`discovery_engine_models`匹配 — 租户用映射模型回答 |
+|`passthrough`|客户直接要求提供租户 ID（`gemini-2.5-pro`) |
+|`configured-default`|别名未映射，`discovery_engine_default_model_id`二手 |
+|`tenant-default`|**没有选择任何内容 - 租户决定（通常是“自动”）**|
+|`alias`|消费者来源：别名本身路由模型 |
+|`bridge-picker`|没有租户 ID 的企业：请求通过浏览器桥，该桥在选项卡的选择器中选择模型 |
+|`captured`|没有映射的企业：租户`modelId`从选项卡捕获的请求获悉被重用 |
+|`(tab picker)`（警告）|需要模型选择器，但没有连接选项卡 - 转向回落到租户的汽车模型 |
 
-每个聊天响应都会在响应头里给出同样的结论（模型自己说它是什么并不可靠，那只是生成文本）：
+每个聊天回复在标题中都带有相同的结论，因此您永远不必相信答案文本（`Gemini`回复中的自我描述是生成的散文，而不是路由报告）：
 
 ```
 X-Resolved-Model: gemini-4-hydrogen
-X-Upstream-Model: tenant-default
-X-Upstream-Model-Source: tenant-default
+X-Upstream-Model: tenant-default          # or the real tenant model id
+X-Upstream-Model-Source: tenant-default   # mapping | passthrough | configured-default | alias
 X-Model-Selection: ignored-by-tenant      # live | ignored-by-tenant
 ```
 
-**企业版修复方式：** 把别名映射到租户真正提供的模型 id（可在标签页自身 `widgetStreamAssist` 请求的 `assistGenerationConfig.modelId` 里看到）：
+**针对企业租户的修复：**&#x522B;名必须映射到租户实际提供的模型 ID。从选项卡本身读取`widgetStreamAssist`要求 （`assistGenerationConfig.modelId`）并配置：
 
 ```jsonc
 { "discovery_engine_models": { "gemini-4-hydrogen": "<tenant model id>", "gemini-4-neon": "<tenant model id>" } }
 ```
 
-如果租户的模型列表里根本没有 Hydrogen/Neon，任何映射都变不出来 —— 请把它映射到租户提供的相近模型（例如它的 4 Argon 条目）。
+如果租户的选择器根本没有列出氢/氖，则没有映射可以发明它 - 将别名映射到租户提供的最接近的模型（例如其 4 Argon 条目），或使用那里存在的模型 ID。
 
-**Bridge 模式：** 扩展在标签页下拉框里选择后会把结果回传。模型不在下拉列表时，不再静默变成 Auto，而是：
+**桥接模式：**&#x6269;展程序单击选项卡模型下拉列表中的条目，然后报告结果。当选择器中缺少请求的模型时，您现在得到的不是静默的自动应答：
 
 ```
-MODEL SELECTION WARNING: the extension could not select "gemini-4-hydrogen" in the tab (picker currently shows "Auto") …
+MODEL SELECTION WARNING: the extension could not select "gemini-4-hydrogen" in the tab (picker currently shows "Auto") — this turn and later turns are answered by whatever the tab has open …
 ```
 
-`/bridge/status` 也会多出 `model_selection: { requested, applied, ok }`，随时可查。
+和`/bridge/status`长出一个`model_selection: { requested, applied, ok }`块，因此最后一次切换尝试始终是可检查的。
 
 ## 可用型号
 
 |型号|描述 |输出|
 | -------------------------------- | ------------------------------------------------------------------ | ---------------- |
+|`gemini-4-neon`|适用于复杂工作的最新前沿模型（需要 Enterprise/Pro） |**~20k+ 字符**|
+|`neon`,`gemini-4-neon-thinking`| Gemini-4-neon 的别名 |**~20k+ 字符**|
 |`gemini-4-argon`|复杂任务的前沿模型（需要 Pro）|**~20k+ 字符**|
 |`argon`,`gemini-4`| Gemini-4-argon 的别名 |**~20k+ 字符**|
-|`gemini-4-neon`|最新前沿模型（需企业版/Pro）|**~20k+ 字符**|
-|`neon`、`gemini-4-neon-thinking`| gemini-4-neon 的别名 |**~20k+ 字符**|
 |`gemini-4-hydrogen`|高速前沿执行模型|**~20k+ 字符**|
 |`hydrogen`| Gemini-4-氢的别名 |**~20k+ 字符**|
 |`gemini-3.8-flash`|最新全能机型（Gemini 3.8 Flash）|约 12k 个字符 |
@@ -378,6 +381,7 @@ MODEL SELECTION WARNING: the extension could not select "gemini-4-hydrogen" in t
 |`gemini-3.5-flash-thinking`|延伸思维，最长产出 |**约 20,000 个字符**|
 |`gemini-3.5-flash-thinking-lite`|适应性思维深度|约 15,000 个字符 |
 |`gemini-3.1-pro`|高级数学和代码（需要 Pro cookie）|约 12k 个字符 |
+|`gemini-2.5-pro`|双子座2.5 Pro |约 12k 个字符 |
 |`gemini-auto`|汽车选型|变化 |
 |`gemini-flash-lite`|最快的答案，轻量级 | 〜10k 个字符 |
 
@@ -395,59 +399,61 @@ gemini-4-argon@think=4              # Low (default for standard models)
 
 在**桥接模式**，每个请求要么在打开的 Gemini 选项卡中启动新的聊天，要么附加到当前打开的聊天中。控制它的三种方法（按优先顺序排列）：
 
-1. **每个请求的型号后缀**— 追加`@new`（或者`@fresh`/`@newchat`）强制进行新的聊天，`@continue`（或者`@cont`）以继续附加到打开的聊天中。结合`@think=N`以任意顺序：
+1. **每个请求的型号后缀**— 追加`@new`（或者`@fresh`/`@newchat`）强制进行新的聊天，`@continue`（或者`@cont`）以继续附加到打开的聊天中。适用于**任何**型号名称或别名，并与`@think=N`以任意顺序：
    ```text
    gemini-4-hydrogen@new                # this request starts a brand-new chat
-   gemini-4-hydrogen@think=0@continue   # deep thinking, keep the open chat (incl. Gemini memory)
+   gemini-4-carbon@continue             # keep the open chat (incl. Gemini memory)
+   gemini-4-carbon@think=0@continue     # deep thinking, keep the open chat
+   carbon@new                           # aliases work too
    ```
 2. **扩展弹出“聊天模式”选择器**—*自动（推荐）*/*总是有新的聊天*/*继续打开聊天*。选择被推送到服务器（`POST /bridge/chatmode`）并持续存在直到发生改变。和*继续打开聊天*，首先单击 Gemini 历史记录侧栏中的任何旧聊天 - API 轮流然后继续添加到该对话。
-3. **自动启发式（默认）**— 当客户端历史从多轮对话明确回到一条全新的用户消息时，启动新的浏览器聊天。若客户端提供稳定的聊天 ID，则以 ID 为准：同一个 ID 继续当前 Gemini 聊天，不同 ID 会新建干净的聊天。
+3. **自动启发式（默认）**— 从多轮客户端记录到新的单消息请求的清晰过渡启动了新的浏览器聊天。当客户端提供稳定的对话 ID 时，将使用该 ID：相同的 ID 继续现有的 Gemini 聊天，而不同的 ID 则开始干净的聊天。
 
-代理识别 `conversation_id`、`chat_id`、`thread_id`、`session_id`（也支持放在 `metadata` 中）、对应的 `X-...-ID` 请求头，以及 Responses API 的 `previous_response_id` 链。一个 WorkBuddy 聊天的每一轮必须使用同一个 ID；新聊天则必须换 ID。如果客户端每次请求只发送一条用户消息且不提供稳定 ID，就无法区分后续消息和新聊天。自动模式会优先保持连续性，避免每条输入都新开 Gemini 聊天；此时可在新聊天时使用 *总是新聊天* / `@new`，或让客户端发送聊天 ID。`@continue` 或 *继续当前聊天* 会禁用自动重置。客户端发送了历史时，如果标签页上下文不匹配，代理会重新发送完整历史。
+代理识别`conversation_id`,`chat_id`,`thread_id`， 和`session_id`（也在`metadata`），对应的`X-...-ID`标头和响应 API`previous_response_id`链。每次 WorkBuddy 聊天时 ID 必须保持不变，并在用户开始新聊天时更改。如果客户端每个请求仅发送一条用户消息并且不提供稳定的 ID，则无法区分后续聊天和新聊天；自动有利于连续性，而不是根据提示打开一个 Gemini 聊天。在这种情况下，使用*总是有新的聊天*/`@new`用于故意重置，或配置客户端发送其对话 ID。`@continue`或者*继续打开聊天*禁用自动重置。当客户端发送历史记录时，只要选项卡没有匹配的上下文，代理就会完整地重播它。
 
-#### 直连模式同样的问题 —— 每个进程共用一个会话
+#### 直接模式也有同样的问题——每个客户聊天一个会话
 
-没有浏览器标签页时，对话连续性由 Discovery Engine 的 **session** 决定。`/v1/model-info` 加一行日志就能确认：
+没有浏览器选项卡，连续性就存在于发现引擎中**会议**.`/v1/model-info`再加上一条日志行可以告诉您哪一个正在发挥作用：
 
 ```
 Enterprise: continuing in assistant session 8f1c (reused for every turn of this conversation)
 Enterprise: calling the Discovery Engine widgetStreamAssist API (files=0, bearer=false, session=8f1c, requested="gemini-4-hydrogen", modelId="gemini-4-hydrogen", source=learned)
 ```
 
-**每个客户端聊天一个会话。** 如果客户端提供稳定的聊天 ID，代理会用它作为会话键；否则退回到第一条用户消息和对话历史：
+**每个客户聊天一次会话。**&#x5F53;客户端提供稳定的会话ID时，代理将其用作会话密钥；否则它会回退到第一条用户消息和记录历史记录：
 
-- 使用相同 ID 继续聊天 → 继续使用同一个会话，记忆连续；
-- **使用不同 ID 新开聊天 → 创建全新会话**，不会继承上一个线程的记忆；
-- 没有 ID 时，从多轮历史重置为单条消息仍是旧版回退信号，但对无状态客户端来说可能有歧义；
-- 使用原来的 ID 回到更早的聊天 → 重新使用它自己的会话，而不是最近那个；
-- 一直只发单条消息、无历史且无 ID 的客户端 → 保持同一个会话，因为无法区分新聊天和后续消息。
+* 使用相同的 ID 继续聊天 → 相同的会话，因此线程保留其内存；
+* **使用更改后的 ID 打开新聊天→新会话**，因此它永远不会继承前一个线程的内存；
+* 如果没有 ID，从多轮转录到单消息请求的重置仍然是传统的回退信号，但对于无状态客户端来说可能不明确；
+* 使用其 ID 恢复较早的聊天→再次该聊天自己的会话，而不是最近的会话；
+* 只发送一条没有历史记录或 ID 的消息的客户端会保留一个会话，因为没有任何东西可以区分新聊天和后续聊天。
 
 ```
 Enterprise: continuing in assistant session 8f1c for conversation 4c1a9ba2
 Enterprise: switching back to the session owned by conversation 4c1a9ba2
 ```
 
-以前是每个进程一个会话（`widgetCreateSession`），所有聊天共享它。重启、或 cookie/JWT 重置会开新会话 —— 上下文不会丢（客户端会重发历史），但租户那边的线程是新的（昨天的附件 fileId 也已经失效）。若租户拒绝创建会话，日志会明确说出来：
+会话曾经是每个进程一个（`widgetCreateSession`）由每个聊天共享。重新启动或 cookie/JWT 重置会启动一个新的记录 - 记录不会丢失，因为您的客户端重新发送其历史记录，但租户的线程是新的（并且昨天上传的文件 ID 消失了）。如果租户拒绝创建会话，您会得到相反的症状，在日志中详细说明：
 
 ```
 Gemini Enterprise: could not create an assistant session (HTTP 403 …) — the tenant will show every request as a new conversation
 ```
 
-租户那边也可能把会话弄丢（过期、引擎重建、换到另一个后端实例）：
+会话也可能在租户端消失——过期、引擎重建、另一个后端 Pod：
 
 ```
 HTTP 404 Session with name "projects/…/sessions/10740851950609687161" does not exist.
 ```
 
-以前这会让整轮请求失败。现在会丢掉该会话、不带会话重试一次，并给下一轮创建新会话：
+这曾经导致整个回合失败。现在会话被删除，请求在没有会话的情况下重试一次，并为下一轮创建一个新会话：
 
 ```
 Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 404) — retrying without a session; a fresh one is created for the next turn
 ```
 
-如果 404 与会话无关（endpoint 写错、configId 不对），依然会正常报错 —— 这个兜底刻意做得很窄。
+404 就是*不是*关于会话（错误的端点，错误的 configId）仍然正常失败 - 恢复是故意缩小的。
 
-想固定某个会话，在 `config.json` 里设 `"discovery_engine_session": "collections/…/sessions/…"`。
+固定特定对话`"discovery_engine_session": "collections/…/sessions/…"`在`config.json`.
 
 ### 模型检查头
 
@@ -462,26 +468,28 @@ Gemini Enterprise: the tenant no longer knows session 1074085195060968716 (HTTP 
 
 当使用帐户 cookie 进行身份验证时，代理会动态查询 Gemini 的`otAQ7b`启动期间进行 RPC 以发现可用模型和帐户层容量。它附加所需的上游路由标头（`x-goog-ext-525001261-jspb`）匹配 Web 应用程序行为，允许 Gemini 4 Argon 等模型正确路由。
 
+发现的模型已匹配**按显示名称**（例如`gemini-4-carbon`→ 发现的“4 Carbon”条目），因此帐户选择器中的每个模型都有自己的真实上游 ID - 氩/碳/氢不再共享一个静态标头。在**桥接模式**该扩展程序会在 Web 模型下拉列表中选择确切的条目（包括版本化条目，例如`3.8 Flash`与`3.5 Flash`和`2.5 Pro`).
+
 ### 2. 视觉/多模式上传
 
 与忽略图像的 Python 版本不同，此 Go 端口主动拦截`image_url`有效负载（base64 编码和外部 HTTP URL）。
 它启动后台 Scotty 可恢复上传会话，将 base64 图像转换为 Google 内部 WIZ blob，并将 WIZ 图像引用直接传递给 Gemini。
 只需发送 OpenAI 标准多模式有效负载，它就会起作用！
 
-### 3. 图片与视频生成
+### 3. 图像和视频生成
 
-Gemini web 能生成图片（Nano Banana）和视频（Veo），但它返回的是**媒体本体**而不是聊天文本 —— 文本管线会丢弃二进制部分，所以对图片模型走 `/v1/chat/completions` 只会得到一段描述。下面两个接口走媒体通道，并以 OpenAI 风格返回：
+Gemini web 可以生成图像 (Nano Banana) 和视频 (Veo)，但将它们返回为*媒体*，而不是聊天文本 - 文本管道会丢弃二进制部分，因此一个简单的`/v1/chat/completions`调用图像模型可以获得描述。这两个端点驱动媒体路径并将结果返回到 OpenAI 形状的信封中：
 
 ```bash
-# 图片：默认返回 URL，也可以要 base64
+# image → URL (default) or inline base64
 curl http://localhost:8081/v1/images/generations \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"model":"gemini-4-hydrogen","prompt":"木桌上的红色立方体，影棚光","response_format":"b64_json"}'
+  -d '{"model":"gemini-4-hydrogen","prompt":"a red cube on a wooden table, studio light","response_format":"b64_json"}'
 
-# 视频（Veo 生成要几分钟，必要时调大 request_timeout_sec）
+# video (Veo generation takes minutes — raise request_timeout_sec if needed)
 curl http://localhost:8081/v1/videos/generations \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -d '{"prompt":"日落时海浪拍打礁石","aspect_ratio":"16:9","duration_seconds":8}'
+  -d '{"prompt":"a wave crashing on rocks at sunset","aspect_ratio":"16:9","duration_seconds":8}'
 ```
 
 ```json
@@ -489,104 +497,104 @@ curl http://localhost:8081/v1/videos/generations \
  "data":[{"kind":"image","mime_type":"image/png","url":"https://lh3.googleusercontent.com/gg/…","b64_json":"iVBORw0KGgo…"}]}
 ```
 
-工作方式：
+工作原理：
 
-- 提示词会被包装，让 Gemini 调用自己的媒体工具直接产出成品（若无法生成，则回一个明确的 `IMAGE GENERATION UNAVAILABLE` 标记，而不是一篇看起来合理的作文）。
-- 媒体**按内容识别**：data URI、base64 JSON 字符串里的文件头魔数（PNG/JPEG/GIF/WebP/MP4/WebM）、以及 Google 域名下的资源 URL —— 因此同一个提取器对消费版 `StreamGenerate`、Discovery Engine `streamAssist` 和纯文本通道都有效。绝不编造：没有媒体就返回 `502`，并把模型自己的原话放在 `error.text` 里。
-- `response_format: "b64_json"` 会把字节内联返回；只会从 Google 资源域名下载（模型输出里扒出来的 URL 不会被当成任意服务器端请求）。
-- 图片/视频模型名（`nano-banana`、`veo-3` …）不在聊天模型注册表里，未知名字会带着默认传输参数直接发给上游，由租户自己的模型 id 规则裁定（这些名字同样可用 `/v1/model-probe`）。
+* 提示已被包装，因此 Gemini 使用自己的媒体工具并使用渲染的资产（或明确的`IMAGE GENERATION UNAVAILABLE`标记而不是一篇看似合理的文章）。
+* 媒体被认可**按内容**— 数据 URI、base64 JSON 字符串（PNG/JPEG/GIF/WebP/MP4/WebM）内的文件头魔法以及 Google 主机上的资产 URL — 因此相同的提取器适用于消费者`StreamGenerate`, 发现引擎`streamAssist`，和纯文本传输类似。一切都不是捏造的：没有资产就意味着`502`用模特自己的话来说`error.text`.
+* `response_format: "b64_json"`内联字节；仅从 Google 资产主机获取（从模型输出中抓取的 URL 永远不会成为任意服务器端请求）。
+* 图像/视频模型名称（`nano-banana`,`veo-3`，...）不是注册表中的聊天模型，因此未知名称会使用默认传输设置转发到上游，并由租户自己的模型 ID 规则解析（`/v1/model-probe`仍然适用于那些）。
 
-#### 客户端自带图片工具时（WorkBuddy 扣积分问题）
+#### 如果客户有自己的图像工具（WorkBuddy 积分）
 
-WorkBuddy 自带 `generate_image` / `create_video` 这类工具。模型一旦为它们输出 `tool_call`，就是**客户端**在出图并扣自己的积分 —— Gemini 根本没机会画。
+工作伙伴船舶`generate_image`/`create_video`风格的工具。当模型发出`tool_call`对于其中之一，**客户**渲染媒体并花费自己的积分——双子座永远无法渲染它。
 
-所以代理会在模型看到之前把这些工具摘掉，并告诉模型用自己的媒体工具出图：
+因此，代理在模型看到这些工具之前从请求中删除它们，并告诉模型使用自己的媒体工具进行渲染：
 
-- 在**每个**入口都生效：`/v1/chat/completions`、`/v1/responses`（WorkBuddy 智能体实际使用的接口）以及 `/v1beta/models/{model}:generateContent` —— 只覆盖其中一个，工具在别的入口仍然会被使用
-- 匹配名单：`generate_image`、`image_generation`、`create_image`、`text_to_image`、`nano_banana`、`imagen`、`generate_video`、`create_video`、`text_to_video`、`veo`，以及 WorkBuddy 的 `ImageGen`，还有 camelCase / `-` / `_` 变体和 MCP 命名空间形式
-- 响应头 `X-Media-Tools-Intercepted: generate_image`，日志 `Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
-- 每次媒体请求都会记录结果，不留歧义：`MEDIA: "gemini-4-hydrogen" answered with 1 asset(s)` 对比 `MEDIA: "gemini-4-hydrogen" answered with text but no image/video in the payload — the tenant/model did not render it`
-- 生成结果拼在回复末尾：内联字节为 `![generated image](data:image/png;base64,…)`（上限 8 MB），链接为 `![generated image](https://…)`，视频为 `[generated video](…)`
+* 强制执行于**每一个**入口点：`/v1/chat/completions`,`/v1/responses`（WorkBuddy 代理使用的表面）和`/v1beta/models/{model}:generateContent`- 仅覆盖其中之一，使该工具在其他工具上发挥作用
+* 名称匹配（`generate_image`,`image_generation`,`create_image`,`text_to_image`,`nano_banana`,`imagen`,`generate_video`,`create_video`,`text_to_video`,`veo`和工作伙伴的`ImageGen`，加上驼峰命名法/`-`/`_`变体和 MCP 命名空间形式）
+* 响应头`X-Media-Tools-Intercepted: generate_image`和日志行`Client offered its own media tool(s) [generate_image] — removed from this request so Gemini renders the media itself (no client credits spent)`
+* 每个媒体请求都会记录其结果，因此答案绝不会含糊：`MEDIA: "gemini-4-hydrogen" answered with 1 asset(s)`相对`MEDIA: "gemini-4-hydrogen" answered with text but no image/video in the payload — the tenant/model did not render it`
+* 渲染的资源返回并附加到回复中：`![generated image](data:image/png;base64,…)`对于内联字节（上限为 8 MB）或`![generated image](https://…)`对于链接，`[generated video](…)`用于视频
 
-其他行为不受影响：普通工具（文件、shell、连接器）保持可用；`tool_choice` 指向被摘掉的工具时回落到 `auto`；没有提供媒体工具的请求完全不做任何捕获。
+其他一切都保持正常工作：普通工具（文件、外壳、连接器）保持不变，`tool_choice`名为已删除工具的名称会回落到`auto`，并且不提供任何媒体工具的请求根本不会捕获任何内容。
 
-若日志里**没有**出现 `Client offered its own media tool(s)`，说明客户端根本没调用本 API 就自己出图了 —— 那个开关在 WorkBuddy 的设置里，不在这里。
+如果日志显示**不** `Client offered its own media tool(s)`行用于图像提示，客户端在根本不调用此 API 的情况下生成它 - 该开关位于 WorkBuddy 的设置中，而不是在这里。
 
-### 4. 附件上传被拒某个字段时
+### 4. 拒绝字段的附件上传
 
-有些租户会返回 `HTTP 400 Invalid JSON payload received. Unknown name "session" at 'add_context_file_request': Cannot find field.`。既然 widget 明确点名了它不认的字段，上传就丢掉该字段重发同一请求，并在进程内记住被接受的字段组合 —— 不会再因为一个可选字段被拒，就把 20 KB 的提示词每轮内联一次：
+部分租客回答`HTTP 400 Invalid JSON payload received. Unknown name "session" at 'add_context_file_request': Cannot find field.`小部件命名了它拒绝的确切字段，因此上传会删除该字段，重试相同的请求，并记住该过程接受的形状 - 不再因为一个可选字段被拒绝而每次都内联 20 KB 提示：
 
 ```
 Gemini Enterprise: the widget does not accept "session" in addContextFileRequest — retrying without it
 Enterprise context file "code_context.txt" uploaded as text/plain (20 KB, fileId=… session=…)
 ```
 
-若重试仍失败，附件照旧内联进提示词，并在日志里说明原因。
+如果重试仍然失败，附件会像以前一样内联，并且日志会说明原因。
 
-### 5. 让模型真正读到你的指令
+### 5. 模型实际可以读取的指令
 
-上下文文件只有在该租户的解析器把内容交给模型时才可读 —— 目前观察到的租户并不会，模型会反过来抱怨你的指令文件：
+仅当租户的文件读取器将其主体交给模型时，上下文文件才是可读的 - 到目前为止所看到的租户上还没有，并且模型会回答您自己的指令文件：
 
-> *"我无法查看你最新的一条回复，因为本会话的上下文文件（`code_context.txt`）超出了内联显示上限……请新开一个对话。"*
+> *“我无法查看您的最新回复，因为此对话的上下文文件 (`code_context.txt`) 已超出内联显示限制...请打开新聊天。”*
 
-这句回复的含义是：指令只在那个文件里，别处没有。所以 `enterprise_mirror_text_inline`（默认 **true**）让每个文本附件**两条路都走**：既作为上下文文件上传给租户，也写进模型必然会读到的 prompt 里。
+该答复意味着说明位于文件中，而不是其他地方。所以`enterprise_mirror_text_inline`（默认**真的**) 使每个文本附件都可以旅行**两个都**方式：作为租户的上下文文件上传，并写入模型肯定会读取的提示中。
 
 ```
 Enterprise attachments: 1 uploaded as context files, 1 inlined (1 of them also written into the prompt so the model can read them)
 ```
 
-同理，开启镜像时超长 prompt 不再被切出去塞进 `code_context.txt`：一个只指向不可读文件的 prompt 等于没有指令。如果你的租户确实会把文件内容交给模型，可以设 `"enterprise_mirror_text_inline": false` 恢复旧行为（prompt 小、内容都在附件里）。
+出于同样的原因，超大提示不再溢出到`code_context.txt`当镜像打开时：仅指向不可读文件的提示没有留下任何说明。放`"enterprise_mirror_text_inline": false`如果您的租户确实提供文件正文，则恢复旧行为（小提示，附件中的所有内容）。
 
-二进制附件（图片、PDF）永远不会被镜像 —— 它们的字节无法作为文本内联，仍依赖上传通道。
+二进制附件（图像、PDF）永远不会被镜像——它们的字节不能作为文本内联，因此它们仍然依赖于上传传输。
 
-把指令留在 prompt 里也有上限：Discovery Engine 会用 `INVALID_ARGUMENT / PROMPT_TOO_LARGE` 拒绝过大的 prompt，而各租户的上限并不相同。代理会自己学：第一次超限的那一轮会用「省略最旧对话」重试，之后每一轮都在发送前裁剪：
+保持指令内联有其自身的上限：Discovery Engine 拒绝过大的提示`INVALID_ARGUMENT / PROMPT_TOO_LARGE`，并且每个租户的上限有所不同。代理会学习它——重试第一个过大的转弯，并忽略最旧的转弯，并且在发送之前每个后面的转弯都会被修剪：
 
 ```
 Direct Discovery Engine rejected the prompt as too large (305089 chars) — retrying with the oldest turns omitted (228816 chars)
 Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to stay under the upstream limit
 ```
 
-裁剪保留头部（系统提示、指令、附件说明）与尾部（最近几轮、当前问题），中间替换成一行说明，让模型知道自己看到的历史不完整；当前问题永远不会被截断。设置 `"enterprise_max_prompt_chars"` 可以跳过「失败一次才知道」的那一轮。
+修剪保留头部（系统提示、说明、附加文件序言）和尾部（最近的回合、当前问题），用一行通知替换中间，以便模型知道历史记录是部分的，并且永远不会剪切当前问题。放`"enterprise_max_prompt_chars"`跳过单次从失败中学习的往返过程。
 
-两条规则避免把对话裁到窒息：
+有两条规则可以防止对话被破坏：
 
-- **先换会话，再裁 prompt。** 会话自身的历史也计入租户的上限，并且每轮都增加一整个 prompt，所以长会话最终无论 prompt 多小都会被拒。遇到这种拒绝时，先清掉会话、用**未裁剪**的同一 prompt 重试 —— 客户端本来就会重发历史：
+* **在修剪提示之前会话会被删除。**&#x4F1A;话自身的历史记录计入租户的限制，并且每次都会增加整个提示，因此长时间运行的会话最终会拒绝每个请求，无论提示有多小。如果拒绝，会话将被清除，并重试相同的（未修剪的）提示 - 客户端无论如何都会重新发送其历史记录：
 
   ```
   Direct Discovery Engine refused the prompt as too large (HTTP 400, 286688 chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt
   ```
 
-- **低于 8 KB 的拒绝不被学习。** 小 prompt 被拒显然不是因为大小，所以它不会下调记住的上限 —— 早先版本正是这样一路把上限压到 247 字符、每轮必败。这类拒绝会被如实报出来：
+* **低于 8 KB 什么也学不到。**&#x62D2;绝小提示与提示大小无关，因此它永远不会降低记住的上限 - 这就是早期版本如何将自己减少到 247 个字符的提示并每次都失败。相反，会报告这样的拒绝：
 
   ```
   Direct Discovery Engine refused a 247-char prompt as too large and it cannot be the prompt size — check the tenant's own limits (session history, attachments, model) rather than the request
   ```
 
-### 6. 租户工具、MCP 连接器与 toolsSpec
+### 6. 租户工具、MCP 连接器和工具规格
 
-Gemini Enterprise 运行的是**助手（assistant）**自带的工具 —— 包括 MCP 连接器导入的 actions —— 而不是代理声明的工具。`StreamAssistRequest.ToolsSpec` 里根本没有任意工具的注册表字段，它只有 Vertex AI Search、网页检索、图像、视频这几项。所以当模型说「我没有 REA 工具」时，答案在租户侧，不在 `/v1/chat/completions`：
+Gemini Enterprise 运行的工具**助手**拥有（包括从 MCP 连接器导入的操作），而不是代理声明的工具。`StreamAssistRequest.ToolsSpec`根本没有任意工具的注册表：它包含 Vertex AI 搜索、网络接地、图像和视频规范。因此，当模型说“我没有 REA 工具”时，答案就在租户中，而不是在租户中`/v1/chat/completions`:
 
-- MCP data store 必须是 **Active**，并关联到 widget `configId` 指向的同一个应用；
-- 导入的 **actions** 必须在 data store 上启用（默认是关闭的）；
-- 一个对话只能看到它开始时就有的 actions —— 新启用的需要用**新对话**。
+* MCP 数据存储必须是**积极的**并链接到同一个应用程序的小部件`configId`指向；
+* 它是进口的**行动**必须在数据存储上启用（它们开始禁用）；
+* 聊天只能看到它开始时的操作 - a*新聊天*选择新启用的。
 
-代理能控制的是它请求的 `toolsSpec`，并且每轮都会记录：
+代理所控制的是`toolsSpec`它要求并每次都会记录下来：
 
 ```
 Enterprise: toolsSpec from default: {"toolRegistry":"default_tool_registry"}
 ```
 
-三种设置方式：
+三种设置方法：
 
-| `discovery_engine_tools_spec` | 效果 |
+|`discovery_engine_tools_spec`|效果|
 |---|---|
-| 不设置 | 用抓包模板里的 toolsSpec，没有则用上面的默认值 |
-| `"none"` | 完全不发送该字段 —— 由助手自身配置决定 |
-| 一个 JSON 对象 | 原样发送；把真实应用在启用 actions 后发的值粘进来 |
+|取消设置 |来自捕获模板的toolsSpec，否则捕获上面的默认值 |
+|`"none"`|该字段被完全省略——助手自己的配置决定 |
+|一个 JSON 对象 |逐字发送；粘贴真实应用程序在其操作开启后发送的内容 |
 
-建议先试 `"none"` 做 A/B：如果「固定一个 toolRegistry」正是让自定义 actions 消失的原因，去掉该字段它们就会回来 —— 日志会告诉你用的是哪种形态。
+`"none"`A/B 测试是否值得首先尝试：如果固定工具注册表隐藏了租户的自定义操作，则省略该字段会将它们带回来 - 并且日志行会告诉您使用了哪种形状。
 
-prompt 侧也补了一句：宿主侧工具（MCP actions、文档生成）属于另一组合法工具，避免模型只看到声明的客户端工具就断定自己没有别的能力。
+在提示方面，工具序言现在表示主机端工具（MCP 操作、文档生成器）是一个允许的、单独的集合，因此仅看到声明的客户端工具的模型并不能断定它没有其他工具。
 
 ### 7. TLS 模拟（绕过 WAF）
 
@@ -672,8 +680,10 @@ https://gemini.google.com/u/1/app/...
 使用 Live Web Bridge 运行时，`gemini-web2api`包括针对重复代理工具循环和 Google 频率禁令的内置保护：
 
 * **直接文件、PDF 和长代码上传**：开放人工智能`file`/`input_file`/`document`/`image_url`零件会直接上传到您打开的 Gemini 选项卡中（无需 cookie）。对于直接`localhost`代理请求（例如 WorkBuddy）、引用的本地 PDF、Office 文档、图像和**长源代码文件（`>= bridge_large_code_upload_bytes`，默认 12 KB)**&#x4F1A;逐字自动附加（最多 25 MB，每转最多 5 个文件），并且仅在磁盘上编辑时自动刷新。
-* **超大提示/工具结果溢出（`bridge_spillover_chars: 18000`)**：提示或巨大`read_file`超过 18 KB 的工具输出会自动上传为`.txt`附件而不是被猛击到网络输入框中，从而防止 UI 截断和重复重新读取。
+* **超大提示/工具结果溢出（`bridge_spillover_chars: 18000`)**：提示或巨大`read_file`超过 18 KB 的工具输出会自动上传为`.txt`附件而不是被猛击到网络输入框中，从而防止 UI 截断和重复重新读取。**当会话 cookie 同步且正常时，过大的提示会完全跳过浏览器**并通过直接 cookie 模式提供服务（完整的提示符内联到批处理执行主体中 - 没有浏览器文件上传，这会在某些 Gemini Enterprise 前端上停止）。仅最新用户消息引用本地文件的请求**实际上存在于服务器磁盘上**留在桥上，以便可以附加文件 - 仅在提示中提及路径（就像编码代理经常做的那样）永远不会将请求固定到桥上。
 * **Delta 转弯上下文 (`bridge_delta_context: true`)**：同一打开的 Gemini 选项卡中的后续轮次仅发送新附加的用户/工具消息，而不是每次都重新粘贴完整的对话历史记录和工具架构（刷新或新聊天时自动重置）。
+* **冻结/卡住选项卡故障转移 (`bridge_no_content_timeout_sec: 120`)**：如果 Chrome 在中途冻结选项卡（内存保护程序），则正在进行的请求将立即中止并通过直接 cookie 模式重试，而不是挂起直到客户端超时。只产生保活（无内容）时间超过此限制的回合也会进行故障转移；主动生成的选项卡 (`"generating"`阶段）永远不会被这个上限切断。设置为`0`禁用。
+* **无人认领的请求故障转移（`bridge_pickup_timeout_sec: 45`)**：如果此窗口内的任何浏览器选项卡均未拾取排队的请求 - 停滞的扩展轮询循环或睡眠的 Chrome MV3 服务工作线程的签名（选项卡心跳但从不轮询） - 请求会快速失败并通过直接 cookie 模式重试。一旦选项卡声明请求，该计时器就会将其交给无内容看门狗。设置为`0`禁用。
 * **自适应反禁令起搏和 429 断路器**：结合基础冷却时间（`bridge_min_interval_ms: 2500`），随机的类人抖动（`bridge_jitter_ms: 1500`），在繁重的编码循环期间渐进式突发扩展，滚动的 10 分钟窗口上限（`bridge_max_per_10min: 18`），以及自动指数冷却断路器（返回 HTTP`429`+`Retry-After`）如果 Google 发出速率限制信号。
 
 所有选项都可以调整`config.json`:
@@ -686,7 +696,9 @@ https://gemini.google.com/u/1/app/...
   "bridge_auto_upload_local_files": true,
   "bridge_large_code_upload_bytes": 12288,
   "bridge_spillover_chars": 18000,
-  "bridge_delta_context": true
+  "bridge_delta_context": true,
+  "bridge_no_content_timeout_sec": 120,
+  "bridge_pickup_timeout_sec": 45
 }
 ```
 
@@ -709,69 +721,80 @@ https://gemini.google.com/u/1/app/...
 
 什么时候`base_url`是定制的，`gemini-web2api`自动切换其`Origin`,`Referer`,`SAPISIDHASH`计算和 RPC 端点以匹配您的企业域。
 
-**企业版模型选择：** Gemini Enterprise 默认使用助手自身配置的模型，除非请求里带 `assistGenerationConfig.modelId`。现在服务器会发送它，客户端指定 `gemini-4-hydrogen` 就不会再被静默降级为租户的「auto」：
+**浏览器同步会话（cookie 模式）：**&#x58;SRF 令牌是特定于来源的。当扩展程序同步 cookie 时，它​​还会报告其从中获取的选项卡的来源；服务器将其保存到 cookie 文件中，并将其用于所有直接 cookie 模式请求（发现 + 生成 + 页面令牌获取 + BL 刷新） - 它优先于`base_url`。所以如果你曾经打开过`gemini.google.com`配置后`vertexaisearch.cloud.google.com`，服务器遵循选项卡，而不是过时的配置。这`GET /bridge/cookies`状态现在报告两者`synced_origin`和`configured_base_url`;不匹配（`configured=gemini.google.com`+`synced=vertexaisearch...`）正是每个批处理上的上游 HTTP 400 的含义 - 从右侧选项卡同步或修复`base_url`.
+
+**Bard RPC 自动检测：**&#x4E00;些 Gemini Enterprise 部署根本不为 Bard Web RPC 提供服务（批量执行回答 HTTP 404 — 该应用程序使用 Discovery Engine`streamAssist`应用程序编程接口）。服务器在第一个探测器上检测到这一点，并将其锁定（`BardUnsupported`），并通过**浏览器桥**— 那里的工作路径 — 而不是重试直接模式进入 502。当 cookie 同步从不同的源到达时，锁存器会重置（并且发现重新探测退避也会随之重置）；同源周期性同步保持锁存。 404 类错误永远不会重试，并且`Generate`/`GenerateStream`在闩锁上快速失败，无需花费上游尝试。当标签消失时**和**直接模式无法使用，API 回答`503 bridge_offline`并显示一条消息，告诉您在 Chrome 中打开 Gemini。
+
+**Discovery Engine重播（企业直接模式）：**&#x6269;展程序的网络钩子捕获应用程序自己的网络钩子`streamAssist`每当选项卡生成时，请求（URL，标题，正文），将提交的提示拼接出来`__W2A_PROMPT__`标记，并将模板推送到`POST /bridge/reqtemplate`（保留在 cookie 文件旁边）。在锁定的 Enterprise 源上，服务器会使用新的 cookie 和新的提示重播该模板 - 因此`/v1/chat/completions`作品**浏览器关闭时**。模板携带捕获的`Authorization`（通常是 SAPISIDHASH）；如果它已过期，服务器会使用新计算的 SAPISIDHASH 值进行重试，如果失败，则会告诉您通过打开的选项卡发送一条提示来刷新模板。检查状态`GET /bridge/reqtemplate`.
+
+**企业选型：**&#x47;emini Enterprise 使用其助手配置的型号进行应答，除非请求携带`assistGenerationConfig.modelId`.`gemini-web2api`现在发送它，所以客户要求`gemini-4-hydrogen`不再默默降级为租户的“auto”：
 
 ```jsonc
 {
   "discovery_engine_models": { "gemini-4-hydrogen": "gemini-2.5-flash", "argon": "gemini-2.5-pro" },
-  "discovery_engine_default_model_id": ""
+  "discovery_engine_default_model_id": ""   // optional fallback for unmapped names
 }
 ```
 
-值必须是租户接受的模型 id（可在标签页自身 `widgetStreamAssist` 请求的 `assistGenerationConfig.modelId` 里看到）。本身就像上游 id 的名字（`gemini-2.5-pro`、`gemini-3-pro`）会原样传递；`argon`/`hydrogen`/`carbon` 这类本地别名不会透传（租户不认识）。重放捕获模板时同样会改写模板里写死的 modelId。
+值必须是您的租户接受的模型 ID（查看`assistGenerationConfig.modelId`在选项卡自己的`widgetStreamAssist`要求）。已经看起来像上游 ID 的名称（`gemini-2.5-pro`,`gemini-3-pro`) 未受影响地通过；本地别名（`argon`/`hydrogen`/`carbon`）永远不会被通过，因为租户不认识它们。捕获的模板重播得到相同的处理：重写到模板中的 modelId。
 
-**企业版超长提示词不再走浏览器 `.txt` 溢出：** 该机制是为了绕过消费版输入框限制；Discovery Engine 的提示词直接内联在 `streamAssist` 的 JSON 里，因此超长请求现在直接走直连模式，不必等标签页（之前会出现 `context canceled` + 502）。只有直连完全不可用时才会退回桥接。
+**Enterprise 上的超大提示会跳过浏览器溢出：**&#x8FD9;`.txt`溢出的存在是为了躲避消费者 Gemini Web 编辑器的限制。在 Discovery Engine 源上，提示被内联到`streamAssist`JSON 主体，因此超大请求现在直接进入直接模式，而不是等待实时选项卡（这就是产生的结果）`Bridge request failed before stream start: context canceled`+ 502）。当直接模式根本没有传输时，仍然使用桥接器。
 
-**Widget JWT 鉴权（解决企业版 502 的关键）：** `vertexaisearch.cloud.google.com` 上的 Discovery Engine widget 接口（`widgetStreamAssist` / `widgetCreateSession` / `widgetAddContextFile`）**不接受**消费版的 `SAPISIDHASH` 头，而是使用短期 HS256 JWT：
+**Widget JWT auth（这就是修复 Enterprise 502s 的方法）：**&#x53D1;现引擎小部件端点（`widgetStreamAssist`,`widgetCreateSession`,`widgetAddContextFile`） 在`vertexaisearch.cloud.google.com`部署做**不是**接受消费者`SAPISIDHASH`标头。该应用程序创建了一个短暂的 HS256 JWT：
 
-1. 带 Cookie 请求 `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>` → `{"xsrfToken":"<base64url HMAC 密钥>","keyId":"<kid>"}`
-2. 用该密钥签发 `{"iss":<origin>,"aud":"https://content-us-discoveryengine.googleapis.com","sub":"csesidx/<id>","iat","exp":+300,"nbf"}`，header 带 `kid`
-3. 先 `widgetCreateSession`，再 `widgetStreamAssist`，请求头为 `Authorization: Bearer <jwt>`、`Origin/Referer: <企业版 origin>`，body 带 `additionalParams: {"token":"-","origin":"ORIGIN_UNSPECIFIED"}`
+1. `GET https://vertexaisearch.cloud.google.com/auth/getoxsrf?csesidx=<id>`和你的饼干 →`{"xsrfToken":"<base64url HMAC key>","keyId":"<kid>"}`
+2. 符号`{"iss":<origin>,"aud":"https://content-us-discoveryengine.googleapis.com","sub":"csesidx/<id>","iat","exp":+300,"nbf"}`用那把钥匙，`kid`在标题中
+3. 称呼`https://content-<location>-discoveryengine.googleapis.com/v1alpha/locations/<location>/widgetCreateSession`， 然后`.../widgetStreamAssist`和`Authorization: Bearer <jwt>`,`Origin/Referer: <your enterprise origin>`和`additionalParams: {"token":"-","origin":"ORIGIN_UNSPECIFIED"}`
 
-只要服务器知道 **`csesidx`**（企业版标签页 URL 里的会话/配置序号），以上流程全自动：扩展在同步 Cookie 时会顺带采集 `?csesidx=…`，也可以手动配置 `discovery_engine_csesidx`。还需要 `discovery_engine_config_id`（应用发出的 widget `configId`，在标签页里上传一次文件即可被捕获）。`discovery_engine_location`（默认 `us`，或从 endpoint 推导）决定区域 widget 域名。
+`gemini-web2api`一旦它知道了，所有这些都会自动完&#x6210;**`csesidx`**（Gemini Enterprise 选项卡 URL 中的对话/配置序列 ID）。扩展程序在 cookie 同步期间收集它（`?csesidx=…`），所以普通的cookie同步就足够了；否则设置`discovery_engine_csesidx`.`discovery_engine_config_id`也是必需的——它是小部件`configId`应用程序发送（当您在选项卡中附加文件时自动捕获）。`discovery_engine_location`（默认`us`，或从您的端点派生）选择区域小部件主机。
 
-未采集到 `csesidx` 时会退回旧的 `?key=` + Cookie 方式 —— 这正是多数租户返回 `502` / `no answer text` 的路径。启动日志会打印当前使用的通道（`Widget auth: widget JWT (csesidx=…)` 或 `cookie fallback`）。
+没有一个`csesidx`服务器回退到旧的 cookie 验证`?key=`端点，这正是答案的路径`502`/`no answer text`在大多数租户上 - 启动横幅报告正在使用哪种传输（`Widget auth: widget JWT (csesidx=…)`与`cookie fallback`).
 
-**编辑长代码文件，不再反复读取：** 当提示词引用了达到或超过 `enterprise_auto_attach_min_bytes`（默认复用 `bridge_large_code_upload_bytes`，8 KB）的源码文件时，文件会作为附件上传，提示词里只放一份简短清单：
+**编辑长代码文件而不使用获取循环：**&#x5F53;提示引用位于或以上的源文件时`enterprise_auto_attach_min_bytes`（默认：`bridge_large_code_upload_bytes`，8 KB），文件已附加，提示会显示简短的清单而不是正文：
 
 ```
 # Attached workspace files (already loaded — do not re-read)
 - /work/app/handlers.ts — 1,842 lines, 78 KB — attached as context file "handlers.ts"
-These attachments are the current on-disk version as of this request. Do not call read_file ... re-attached
-automatically on the next turn, so no verification read is needed.
+These attachments are the current on-disk version as of this request. Do not call read_file, grep or shell cat to
+fetch their contents again ... Make the change with your edit/write tool using a targeted patch (str_replace /
+line range) — the updated file is re-attached automatically on the next turn, so no verification read is needed.
 ```
 
-这样往返成本的两半都被消掉：模型不必再花一轮去 `read_file`，也不必把整个文件内容当作工具参数回吐（这是最贵的输出）。WorkBuddy 写入补丁后，**下一次**请求会重新从磁盘读取并把新版本作为新附件上传，模型无需验证性重读即可看到自己的修改。上传按内容哈希缓存：每个文件*版本*上传一次，每轮零上传。
+这消除了往返成本的两半：模型从不花费一圈`read_file`-ing 文件，并且它永远不必将整个文件作为工具参数（昂贵的输出）回显。 WorkBuddy 编写补丁后，**下一个**请求从磁盘重新读取文件并将新字节作为新版本附加，因此模型可以看到自己的编辑而无需验证读取。上传内容进行哈希缓存：每个文件一次上传*版本*，每转为零。
 
-需要说清楚的边界：附件是只读上下文，真正的写入仍由 WorkBuddy 的写工具完成 —— 但那个方向是免费的，内容从模型流向你的磁盘，不会回流到 Gemini。
+诚实范围：附件是只读上下文。实际的编辑仍然通过 WorkBuddy 自己的写入工具进行，但该方向是自由的，因为内容从模型移动到磁盘，永远不会回到 Gemini。
 
-**图片是怎么被读到的：** `widgetAddContextFile` 就是 Gemini Enterprise 应用在输入框粘贴图片时自己发出的调用 —— 字节进入助手会话，`streamAssist` 通过 `fileId` 引用，多模态助手直接读图（视觉 token），而不是只拿到一个文件名。服务器按真实 MIME 原样上传图片（`image/png`、`image/jpeg` 等），绝不会把图片转成文本：`IsTextLike()` 对图片类型返回 false，所以图片不会被悄悄内联成乱码。日志可直接验证：`Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`。
+**图像的实际读取方式：** `widgetAddContextFile`当您将图片粘贴到其编辑器中时，Gemini Enterprise 应用程序会进行相同的调用 - 字节落在助手会话中，并且`streamAssist`引用它们`fileId`，因此多模式助手读取图像本身（视觉标记），而不是文件名。`gemini-web2api`使用真实的 MIME 类型逐字节上传图像（`image/png`,`image/jpeg`，...）并且从不将它们转换为文本：`IsTextLike()`对于图像类型返回 false，因此图像永远不能作为垃圾默默内联。上传日志证明了形状：`Enterprise context file "diagram.png" uploaded as image/png (240 KB, fileId=…)`.
 
-图片来源有三种：OpenAI `image_url` 片段（data URL 或远程 URL，先抓取再上传）、Google `inlineData` 片段、以及提示词里引用的本地路径（`.png/.jpg/.jpeg/.webp/.gif/.bmp` 会被自动附加）。若租户拒绝上传，请求会给出可操作的报错，而不是丢弃图片。
+图像通过以下三种途径之一到达：OpenAI`image_url`部分（数据 URL 或远程 URL，获取然后上传），Google`inlineData`部分以及提示中引用的本地路径（`.png/.jpg/.jpeg/.webp/.gif/.bmp`是自动附加的）。如果租户拒绝上传，请求将失败并出现可操作错误，而不是删除图像。
 
-**防封号的附件策略（大文件、图片、PDF/Office）：** 企业版把提示词内联在 `streamAssist` 请求体里，所以编码代理每轮重复发送文件内容正是触发限流/封号的原因。只要上传通道可用，服务器现在会把这些内容移出提示词、改成上下文文件附件：
+**反封禁附件策略（大文件、图片、PDF/Office）：**&#x5728; Enterprise 上，提示已内联到`streamAssist`body，因此每次重新发送文件内容的代理正是触发速率限制的原因。通过可用的上传传输，服务器现在将该内容移动到上下文文件附件中：
 
-- 最新一条用户消息里按路径引用的文件（PDF、Word、PowerPoint、图片、较长的源码）会从磁盘读取并作为附件上传，模型可直接读取，图片也能识别；
-- 超长提示词或其中的大段代码会被拆进一个 `.txt` 附件，提示词只留简短说明；
-- 上传结果按内容哈希缓存（`discovery_engine_upload_cache_sec`），同一文件只上传一次，之后复用 `fileId`。
+* 文件从磁盘读取并附加按路径（PDF、Word、PowerPoint、图像、长源文件）引用的最新用户消息 - 模型以本机方式读取它们，包括图像；
+* 一个过大的提示，或者其中的大的围栏代码块，被溢出到一个`.txt`附件并通过临时通知更换；
+* 上传内容通过内容哈希进行缓存（`discovery_engine_upload_cache_sec`），所以同一个文件被上传一次，然后被引用`fileId`在稍后的回合中。
 
 ```jsonc
 {
-  "enterprise_auto_attach_local_files": true,
-  "enterprise_auto_attach_min_bytes": 0,
-  "enterprise_attach_large_prompt": true
+  "enterprise_auto_attach_local_files": true,   // attach referenced local files
+  "enterprise_auto_attach_min_bytes": 0,        // 0 = reuse bridge_large_code_upload_bytes
+  "enterprise_attach_large_prompt": true        // spill oversized prompts into a .txt
 }
 ```
 
-没有上传通道（没有捕获模板、没有 `discovery_engine_upload_endpoint`、没有 widget `csesidx`）时这两个开关自动失效，内容仍内联，不会被静默丢弃。可用日志 `Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")` 验证，`files=0` 表示没有附件。
+两个交换机都是无操作的，没有上传传输（没有捕获的模板，没有`discovery_engine_upload_endpoint`，没有小部件`csesidx`)：在这种情况下，内容保持内联，因此不会默默地删除任何内容。使用日志行验证`Enterprise: calling the Discovery Engine widgetStreamAssist API (files=1, bearer=true, model="…")`—`files=0`意味着没有附加任何东西。
 
-**关闭浏览器后仍可使用附件（企业版）：** 消费版 Gemini Web 通过 `content-push.googleapis.com` 上传附件并在 Bard RPC 载荷中引用；Gemini Enterprise 没有这条链路，它把文件挂到**助手会话**上（`widgetAddContextFile` → `fileId`，随后 `streamAssist` 带上 `fileIds` + `session`）。因此纯 Cookie 模式以前会直接报 `this Gemini Enterprise origin needs the browser bridge for image attachments`。现在有三条路径：
+**关闭浏览器时的文件附件（企业版）：**&#x6D88;费者 Gemini Web 通过以下方式上传附件`content-push.googleapis.com`管道并从 Bard RPC 有效负载引用它们。 Gemini Enterprise 没有这样的管道 - 该应用程序将文件附加到*助理会议*反而 （`widgetAddContextFile`→`fileId`， 然后`streamAssist`和`fileIds`+`session`),所以用cookie模式来应答`this Gemini Enterprise origin needs the browser bridge for image attachments`。这个差距已经弥合了：
 
-1. **一次性捕获（推荐，零配置）**：加载扩展后，在企业版标签页里手动上传一个文件。net-hook 会记录这次上传请求，扩展把文件名 / MIME / Base64 内容替换为 `__W2A_FILE_NAME__` / `__W2A_FILE_MIME__` / `__W2A_FILE_B64__` 占位符后推送到 `POST /bridge/uploadtemplate`，并保存在 Cookie 文件旁的 `discovery_upload_template.json`。此后服务器用最新 Cookie 重放该请求来上传**所有**附件，浏览器可以一直关闭。用 `GET /bridge/uploadtemplate` 查看状态。
-2. **直接配置端点**：没有捕获模板时，把 `discovery_engine_upload_endpoint` 设为标签页 DevTools 里的 `widgetAddContextFile` URL；若留空，服务器会把 `discovery_engine_endpoint` 中的 `widgetStreamAssist` 自动替换为 `widgetAddContextFile`。`discovery_engine_session`（如 `collections/default_collection/engines/my-engine/sessions/-`）和 `discovery_engine_config_id` 可固定会话与 Widget 配置，否则从捕获的请求体里读取。
-3. **文本内联兜底**：完全没有上传通道时，纯文本类附件（代码、JSON、CSV、Markdown、日志，单个 ≤200 KB、总计 ≤400 KB）会带 `--- Attached file: … ---` 标记内联进提示词，编码代理仍能读到文件内容；图片 / PDF / Office 等二进制附件会返回明确错误，而不是被静默丢弃。
+1. **捕获一次（推荐，零配置）。**&#x52A0;载扩展后，在 Gemini Enterprise 选项卡中附加一个文件。 net-hook 记录上传请求，桥接器推送其模板化副本（文件名、MIME 类型和 Base64 内容替换为`__W2A_FILE_NAME__`/`__W2A_FILE_MIME__`/`__W2A_FILE_B64__`） 到`POST /bridge/uploadtemplate`;它被持久化为`discovery_upload_template.json`在 cookie 文件旁边。从那时起，服务器将使用新的 cookie 重播该请求**每一个**附件 — 浏览器可以保持关闭状态。检查一下`GET /bridge/uploadtemplate`(`{"have_template":true,...}`).
+2. **配置端点。**&#x5982;果没有捕获的模板，请设置`discovery_engine_upload_endpoint`到`widgetAddContextFile`该选项卡的 DevTools Network 选项卡中的 URL。如果省略，服务器通过交换来派生它`widgetStreamAssist`→`widgetAddContextFile`在`discovery_engine_endpoint`.`discovery_engine_session`（例如`collections/default_collection/engines/my-engine/sessions/-`） 和`discovery_engine_config_id`固定会话/小部件配置；否则，两者都会从捕获的请求主体中读取。
+3. **文本后备。**&#x5982;果没有可用的上传路径，则类似文本的附件（代码、JSON、CSV、Markdown、日志 - 每个最多 200 KB / 每个请求 400 KB）将内嵌到提示中并明确显示`--- Attached file: … ---`标记，因此编码代理仍然可以看到他们的文件。二进制附件（图像、PDF、Office 文档）返回可操作的错误，而不是静默删除。
 
-上传的文件与重放的 `streamAssist` 处于同一会话，后续对话会保留文件上下文。相同内容只会上传**一次**：同一请求内的重复文件共用一个 `fileId`，上传结果按内容哈希缓存 `discovery_engine_upload_cache_sec` 秒（默认 1800，设为 `0` 关闭），因此编码代理每轮重复发送同一批仓库文件时不再走上传；同时最多并行上传 4 个文件。
+上传的文件位于重播使用的同一会话中，因此后续轮流保留文件上下文。上传相同的字节**一次**：请求内的重复项共享一个`fileId`，并且上传内容通过内容哈希进行缓存`discovery_engine_upload_cache_sec`（默认1800，`0`禁用），因此每次重新发送相同存储库文件的代理循环会完全跳过上传往返过程。最多并行上传 4 个文件。
+
+**保持选项卡处于活动状态：**&#x8BE5;扩展标记了每个 Gemini 选项卡`autoDiscardable: false`因此 Chrome 的内存保护程序永远不会丢弃它 - 丢弃的选项卡会默默地杀死网桥轮询/心跳循环。它还报告它发现已被丢弃的选项卡（在每个 cookie 同步期间并通过 30 秒的活动监视器对选项卡的轮询循环进行 ping 操作），并且内容脚本在页面卸载时报告其自身的死亡。在企业部署中，该选项卡是服务器到 Gemini 的唯一路径：在 Chrome 中保持打开状态。
+
+**选项卡消失时的实际错误：**&#x4E00;旦选项卡实际声明了排队的工作，流式响应才会提交到 HTTP 200。如果没有在时间内收到请求`bridge_pickup_timeout_sec`（默认45秒），API应答`503 bridge_offline`一条消息告诉您打开/重新加载 Gemini 选项卡 - 而不是客户端呈现为卡住或空白完成的空 200 流。
 
 ### WorkBuddy / AI 编码代理集成
 
@@ -795,9 +818,9 @@ automatically on the next turn, so no verification read is needed.
 ]
 ```
 
-#### 让 Argon 在代理工具调用时表现得像 Hydrogen
+#### 使氩气像氢气一样进行代理工具调用
 
-部分 Gemini 4 模型（尤其是 **Argon**）会优先使用 Gemini 内置的 **Deep Research / 网页工具**，忽略注入的 `# Tool Use` 提示，导致 WorkBuddy 收不到可本地执行的 `tool_call`。**Hydrogen** 则能稳定输出预期格式：
+一些 Gemini 4 型号（特别是**氩气**）更喜欢Gemini的内置**深入研究/网络工具**并忽略注入的`# Tool Use`提示，因此 WorkBuddy 永远不会收到`tool_call`在本地执行。**氢**可靠地发出预期的块：
 
 ````text
 ```tool_call
@@ -805,7 +828,7 @@ automatically on the next turn, so no verification read is needed.
 ```
 ````
 
-如果希望在 WorkBuddy 中保留 `gemini-4-argon` 模型 ID，但让带工具的回合实际走 Hydrogen，可在 `config.json` 中设置：
+如果你想保留`gemini-4-argon`在 WorkBuddy 中配置，但启用工具的轮流实际上在 Hydrogen 上运行，设置`tool_model`在`config.json`:
 
 ```json
 {
@@ -813,17 +836,17 @@ automatically on the next turn, so no verification read is needed.
 }
 ```
 
-只有声明了工具（且未设置 `tool_choice: "none"`）的请求会被重定向，普通聊天请求仍使用原模型。请求后缀 `@new`、`@continue`、`@think=N` 会被保留。触发重定向时会返回 `X-Tool-Model-Override: true` 响应头并打印日志；`X-Resolved-Model` 显示实际使用的模型。
+仅请求声明工具（并且不使用`tool_choice: "none"`) 被重定向；正常的聊天请求仍然使用请求的模型。每个请求的后缀，例如`@new`,`@continue`和`@think=N`被保留。响应头`X-Tool-Model-Override: true`以及服务器日志行显示覆盖何时被触发；`X-Resolved-Model`报告实际使用的模型。
 
-也可以不修改配置文件，直接用启动参数或环境变量：
+也可以在不编辑文件的情况下应用该设置：
 
 ```bash
 ./gemini-web2api --tool-model gemini-4-hydrogen
-# 或
+# or
 GEMINI_TOOL_MODEL=gemini-4-hydrogen ./gemini-web2api
 ```
 
-工具提示中也会明确要求：本地文件、shell 命令、GitHub 仓库和邮件必须通过输出 `tool_call` 块交给本地客户端执行，禁止用 Gemini 内置的网页搜索 / Deep Research 来回答。
+注入的工具提示还告诉模型必须通过发出来处理本地文件、shell 命令、GitHub 存储库和电子邮件`tool_call`块，并明确禁止使用 Gemini 的内置网络搜索或深度研究来回答它们。
 
 ## 配置
 
@@ -893,8 +916,8 @@ gemini-web2api.exe
 ## 局限性
 
 * **不是真正的 Pro/Ultra**：没有付费订阅 cookie，`gemini-3.1-pro`路由到相同的 Flash 模型。 “Pro”标签是 UI 首选项，而不是后端模型开关。
-* **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。Gemini Enterprise 的会话是每个进程一个且不落盘，所以「第二天继续同一个聊天」依赖客户端重新发送历史（昨天的附件需要重新上传）。
-* **媒体取决于账号权限**：`/v1/images/generations` 与 `/v1/videos/generations` 只能返回登录账号的 Gemini web 有权生成的媒体；没有图片/视频权限的租户会用文字作答，接口会如实报告这一点，而不是返回占位图。
+* **仅单圈**：每个请求都是一个独立的对话。通过在提示中包含先前的消息来模拟多轮上下文。 Gemini Enterprise 会话是每个进程一个且不会持久，因此第二天继续聊天依赖于客户端重新发送其历史记录（并且必须重新附加昨天的任何附件）。
+* **媒体取决于帐户**:`/v1/images/generations`和`/v1/videos/generations`只能返回登录帐户的 Gemini web 允许生成的内容。没有图像/视频访问权限的租户使用文本进行应答，端点会准确报告该情况，而不是返回占位符。
 * **速率限制**：Google 可能会限制高频请求。服务器会自动重试，但持续的大量使用可能会被阻止。
 
 ## 执照
