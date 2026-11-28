@@ -51,6 +51,14 @@ func (s *cookieSyncState) recordSync() {
 	s.lastAuthErrorAt = time.Time{}
 }
 
+func (s *cookieSyncState) reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSync = time.Time{}
+	s.lastAuthError = ""
+	s.lastAuthErrorAt = time.Time{}
+}
+
 func (s *cookieSyncState) snapshot() (lastSync time.Time, authErr string, authErrAt time.Time) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

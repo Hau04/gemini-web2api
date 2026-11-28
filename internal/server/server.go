@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,14 +15,19 @@ import (
 )
 
 type App struct {
+	AccountID  string
 	Cfg        config.Config
 	Gem        *gemini.Client
 	Tokens     *multimodal.TokenCache
 	Bridge     *bridge.Hub
 	CookieSync *cookieSyncState
+	Accounts   *AccountManager
 	HTTPClient *http.Client
 	Logf       func(format string, args ...any)
 	Version    string
+
+	coreOnce sync.Once
+	core     http.Handler
 
 	// modelState is the last model-selection outcome reported by the extension.
 	modelStateMu sync.Mutex
@@ -53,6 +59,12 @@ func createHTTPClient(cfg config.Config) *http.Client {
 }
 
 func New(cfg config.Config, version string) *App {
+	app := newAccountApp(cfg, version, DefaultAccountID)
+	app.Accounts = newAccountManager(app, resolveAccountsDir(app.Cfg))
+	return app
+}
+
+func newAccountApp(cfg config.Config, version, accountID string) *App {
 	// Default the cookie file so browser-pushed session cookies (extension auto
 	// sync) and the manual "Download cookie.json" workflow work out of the box.
 	if cfg.CookieFile == "" {
@@ -60,9 +72,13 @@ func New(cfg config.Config, version string) *App {
 	}
 	gemClient := gemini.NewClient(cfg)
 
+	prefix := ""
+	if accountID != "" && accountID != DefaultAccountID {
+		prefix = "[" + accountID + "] "
+	}
 	logFn := func(format string, args ...any) {
 		if cfg.LogRequests {
-			log.Printf(format, args...)
+			log.Printf(prefix+format, args...)
 		}
 	}
 
@@ -81,6 +97,7 @@ func New(cfg config.Config, version string) *App {
 	}
 
 	app := &App{
+		AccountID:  accountID,
 		Cfg:        cfg,
 		Gem:        gemClient,
 		Tokens:     multimodal.NewTokenCache(cfg, gemClient.Cookies, httpClient),
@@ -95,9 +112,7 @@ func New(cfg config.Config, version string) *App {
 	return app
 }
 
-func (a *App) Handler() http.Handler {
-	mux := http.NewServeMux()
-
+func (a *App) registerAccountRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{$}", a.handleHealth)
 	mux.HandleFunc("GET /v1/models", a.handleModels)
 	mux.HandleFunc("GET /v1/models/{id}", a.handleModelGet)
@@ -125,9 +140,95 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /bridge/reqtemplate", a.handleBridgeReqTemplate)
 	mux.HandleFunc("POST /bridge/uploadtemplate", a.handleBridgeUploadTemplate)
 	mux.HandleFunc("GET /bridge/uploadtemplate", a.handleBridgeUploadTemplate)
+}
 
-	handler := a.withAuthAndLogging(mux)
-	handler = a.withCORS(handler)
+func (a *App) coreHandler() http.Handler {
+	a.coreOnce.Do(func() {
+		mux := http.NewServeMux()
+		a.registerAccountRoutes(mux)
+		a.core = a.withAuthAndLogging(mux)
+	})
+	return a.core
+}
 
-	return handler
+func (a *App) Handler() http.Handler {
+	mux := http.NewServeMux()
+	a.registerAccountRoutes(mux)
+
+	// Account Management GUI and REST API
+	mux.HandleFunc("GET /ui", a.handleAccountUI)
+	mux.HandleFunc("GET /ui/", a.handleAccountUI)
+	mux.HandleFunc("GET /api/accounts", a.handleAccountsList)
+	mux.HandleFunc("POST /api/accounts", a.handleAccountsCreate)
+	mux.HandleFunc("GET /api/accounts/{id}", a.handleAccountGet)
+	mux.HandleFunc("DELETE /api/accounts/{id}", a.handleAccountDelete)
+	mux.HandleFunc("PUT /api/accounts/{id}/cookies", a.handleAccountCookiesUpdate)
+	mux.HandleFunc("POST /api/accounts/{id}/cookies", a.handleAccountCookiesUpdate)
+	mux.HandleFunc("DELETE /api/accounts/{id}/cookies", a.handleAccountCookiesClear)
+
+	rootHandler := a.withAuthAndLogging(mux)
+
+	router := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1. Path-based account isolation: /a/{account_id}/v1/... or /a/{account_id}/bridge/...
+		if accountID, remainder, ok := splitAccountPath(r.URL.Path); ok {
+			if a.Accounts == nil {
+				writeJSON(w, http.StatusNotFound, map[string]any{
+					"error": map[string]any{
+						"message": "account management is not enabled",
+						"type":    "invalid_request_error",
+						"code":    "account_not_found",
+					},
+				})
+				return
+			}
+			targetApp, normID, found := a.Accounts.Resolve(accountID)
+			if !found {
+				writeJSON(w, http.StatusNotFound, map[string]any{
+					"error": map[string]any{
+						"message": "account \"" + accountID + "\" not found — create it at /ui or POST /api/accounts",
+						"type":    "invalid_request_error",
+						"code":    "account_not_found",
+					},
+				})
+				return
+			}
+			r2 := r.Clone(r.Context())
+			u2 := *r.URL
+			u2.Path = remainder
+			u2.RawPath = ""
+			r2.URL = &u2
+			w.Header().Set("X-Gemini-Account", normID)
+			targetApp.coreHandler().ServeHTTP(w, r2)
+			return
+		}
+
+		// 2. Optional header/query selector on unprefixed API/bridge routes.
+		if a.Accounts != nil && (strings.HasPrefix(r.URL.Path, "/v1") || strings.HasPrefix(r.URL.Path, "/bridge/")) {
+			sel := strings.TrimSpace(r.Header.Get("X-Gemini-Account"))
+			if sel == "" {
+				sel = strings.TrimSpace(r.URL.Query().Get("account"))
+			}
+			if sel != "" {
+				targetApp, normID, found := a.Accounts.Resolve(sel)
+				if !found {
+					writeJSON(w, http.StatusNotFound, map[string]any{
+						"error": map[string]any{
+							"message": "account \"" + sel + "\" not found — create it at /ui or POST /api/accounts",
+							"type":    "invalid_request_error",
+							"code":    "account_not_found",
+						},
+					})
+					return
+				}
+				w.Header().Set("X-Gemini-Account", normID)
+				targetApp.coreHandler().ServeHTTP(w, r)
+				return
+			}
+			w.Header().Set("X-Gemini-Account", DefaultAccountID)
+		}
+
+		rootHandler.ServeHTTP(w, r)
+	})
+
+	return a.withCORS(router)
 }

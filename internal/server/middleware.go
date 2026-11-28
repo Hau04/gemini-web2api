@@ -90,7 +90,7 @@ func authorizeBridge(r *http.Request, bridgeToken string) bool {
 func (a *App) withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "*")
 
 		if r.Method == "OPTIONS" {
@@ -133,6 +133,17 @@ func (a *App) withAuthAndLogging(next http.Handler) http.Handler {
 				"error": map[string]any{
 					"message": "invalid or missing bridge token (set bridge_token in config.json and the same token in the extension settings)",
 					"type":    "bridge_auth",
+				},
+			})
+			a.logRequest(r, lrw.statusCode, time.Since(start))
+			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/api/") && !authorizeAdmin(r, a.Cfg) {
+			writeJSON(lrw, http.StatusUnauthorized, map[string]any{
+				"error": map[string]any{
+					"message": "unauthorized — provide X-Bridge-Token or Authorization: Bearer <key>",
+					"type":    "admin_auth",
 				},
 			})
 			a.logRequest(r, lrw.statusCode, time.Since(start))

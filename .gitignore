@@ -26,5 +26,6 @@ gemini-web2api
 # Auth credentials
 gemini-auth.json
 .bridge_pacing_state.json
+accounts/
 
 .ignore/

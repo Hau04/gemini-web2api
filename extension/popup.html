@@ -174,14 +174,17 @@
     </div>
   </div>
 
-  <div class="section-title">Server Connection (Remote / NAS)</div>
+  <div class="section-title">Server Connection & Account</div>
   <div class="bridge-controls">
     <input type="text" id="serverUrlInput" placeholder="http://localhost:8081 or https://gemini.example.com"
+      style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 6px; margin-bottom: 6px;">
+    <input type="text" id="accountIdInput" placeholder="Account ID (optional, e.g. work — empty = default)"
       style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 6px; margin-bottom: 6px;">
     <input type="password" id="bridgeTokenInput" placeholder="Bridge token (optional, must match server bridge_token)"
       style="width: 100%; box-sizing: border-box; padding: 6px 8px; font-size: 12px; border: 1px solid #d1d5db; border-radius: 6px;">
     <div class="btn-row">
       <button id="saveSettingsBtn" class="primary">💾 Save & Sync Now</button>
+      <button id="openAccountsBtn" class="secondary">👥 Account Manager</button>
     </div>
   </div>
 

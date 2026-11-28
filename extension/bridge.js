@@ -8,6 +8,8 @@
   "use strict";
 
   const DEFAULT_BRIDGE_URL = "http://localhost:8081";
+  let RAW_SERVER_URL = DEFAULT_BRIDGE_URL;
+  let ACCOUNT_ID = "";
   let BRIDGE_URL = DEFAULT_BRIDGE_URL;
   let BRIDGE_TOKEN = "";
 
@@ -26,17 +28,31 @@
     return u;
   }
 
-  // Load configurable server address + bridge token (set from the extension popup)
+  function recomputeBridgeUrl() {
+    const base = normalizeServerUrl(RAW_SERVER_URL);
+    const acc = String(ACCOUNT_ID || "").trim().toLowerCase();
+    if (!acc || acc === "default" || /\/a\/[^/]+$/i.test(base)) {
+      BRIDGE_URL = base;
+    } else {
+      BRIDGE_URL = `${base}/a/${encodeURIComponent(acc)}`;
+    }
+  }
+
+  // Load configurable server address + bridge token + account id (set from the extension popup)
   if (typeof chrome !== "undefined" && chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(["serverUrl", "bridgeToken"], (res) => {
-      if (res && res.serverUrl) BRIDGE_URL = normalizeServerUrl(res.serverUrl);
+    chrome.storage.local.get(["serverUrl", "bridgeToken", "accountId"], (res) => {
+      if (res && res.serverUrl) RAW_SERVER_URL = res.serverUrl;
+      if (res && res.accountId) ACCOUNT_ID = String(res.accountId);
       if (res && res.bridgeToken) BRIDGE_TOKEN = String(res.bridgeToken);
+      recomputeBridgeUrl();
     });
     if (chrome.storage.onChanged) {
       chrome.storage.onChanged.addListener((changes, area) => {
         if (area !== "local") return;
-        if (changes.serverUrl) BRIDGE_URL = normalizeServerUrl(changes.serverUrl.newValue);
+        if (changes.serverUrl) RAW_SERVER_URL = changes.serverUrl.newValue || DEFAULT_BRIDGE_URL;
+        if (changes.accountId) ACCOUNT_ID = String(changes.accountId.newValue || "");
         if (changes.bridgeToken) BRIDGE_TOKEN = String(changes.bridgeToken.newValue || "");
+        recomputeBridgeUrl();
       });
     }
   }

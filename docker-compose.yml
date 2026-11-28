@@ -9,4 +9,7 @@ services:
       # Persistent cookie storage: the browser extension auto-syncs session
       # cookies here (POST /bridge/cookies); survives container restarts.
       - ./data:/app/data
+      # Persistent isolated multi-account storage (when cookie_file is default /app/cookie.json;
+      # if cookie_file is /app/data/cookie.json, accounts are stored under /app/data/accounts).
+      - ./accounts:/app/accounts
     restart: unless-stopped

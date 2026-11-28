@@ -40,6 +40,18 @@ func NewCookieCache(file string) *CookieCache {
 	return &CookieCache{file: file}
 }
 
+// Reset clears any in-memory cached cookie data so a subsequent Load reads fresh
+// state from disk (or observes a deleted cookie file immediately).
+func (c *CookieCache) Reset() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mtime = time.Time{}
+	c.info = CookieInfo{}
+}
+
 func (c *CookieCache) Load() (CookieInfo, error) {
 	if c.file == "" {
 		return CookieInfo{}, nil

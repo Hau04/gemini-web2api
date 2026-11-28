@@ -37,6 +37,7 @@ func main() {
 	portFlag := flag.Int("port", 0, "Server port")
 	configFlag := flag.String("config", "", "Config file path")
 	cookieFlag := flag.String("cookie-file", "", "Cookie file path")
+	accountsDirFlag := flag.String("accounts-dir", "", "Directory storing isolated per-account data (default: <cookie-dir>/accounts)")
 	proxyFlag := flag.String("proxy", "", "HTTP proxy URL")
 	impersonateFlag := flag.String("impersonate", "", "TLS impersonation profile")
 	baseURLFlag := flag.String("base-url", "", "Upstream Gemini base URL (e.g. https://gemini.google.com or https://vertexaisearch.cloud.google.com)")
@@ -68,6 +69,9 @@ func main() {
 	}
 	if *cookieFlag != "" {
 		cfg.CookieFile = *cookieFlag
+	}
+	if *accountsDirFlag != "" {
+		cfg.AccountsDir = *accountsDirFlag
 	}
 	if *proxyFlag != "" {
 		cfg.Proxy = *proxyFlag
@@ -142,6 +146,10 @@ func main() {
 	fmt.Printf("gemini-web2api %s\n", currentVersion)
 	fmt.Printf("  Listening:   http://%s:%d\n", cfg.Host, cfg.Port)
 	fmt.Printf("  Base URL:    http://localhost:%d/v1\n", cfg.Port)
+	fmt.Printf("  Account GUI: http://localhost:%d/ui\n", cfg.Port)
+	if app.Accounts != nil && app.Accounts.Count() > 0 {
+		fmt.Printf("  Accounts:    default + %d isolated account(s) (use /a/<id>/v1)\n", app.Accounts.Count())
+	}
 	fmt.Printf("  Upstream:    %s\n", cfg.BaseURL)
 	fmt.Printf("  Models:      %s\n", strings.Join(modelKeys, ", "))
 	fmt.Printf("  Cookie:      %s\n", cookieStatus)

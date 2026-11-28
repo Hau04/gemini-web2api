@@ -16,11 +16,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   const cookieSyncText = document.getElementById("cookieSyncText");
   const cookieSyncDetail = document.getElementById("cookieSyncDetail");
   const serverUrlInput = document.getElementById("serverUrlInput");
+  const accountIdInput = document.getElementById("accountIdInput");
   const bridgeTokenInput = document.getElementById("bridgeTokenInput");
   const saveSettingsBtn = document.getElementById("saveSettingsBtn");
+  const openAccountsBtn = document.getElementById("openAccountsBtn");
 
+  let rawServerUrl = "http://localhost:8081";
+  let accountId = "";
   let serverUrl = "http://localhost:8081";
   let bridgeToken = "";
+
+  function normalizeRootUrl(raw) {
+    let u = String(raw || "").trim() || "http://localhost:8081";
+    if (!/^https?:\/\//i.test(u)) u = "http://" + u;
+    return u.replace(/\/+$/, "").replace(/\/v1$/i, "");
+  }
+
+  function computeEffectiveUrl(raw, acc) {
+    const base = normalizeRootUrl(raw);
+    const id = String(acc || "").trim().toLowerCase();
+    if (!id || id === "default" || /\/a\/[^/]+$/i.test(base)) return base;
+    return `${base}/a/${encodeURIComponent(id)}`;
+  }
 
   function bridgeHeaders(extra) {
     const h = Object.assign({}, extra || {});
@@ -65,18 +82,23 @@ document.addEventListener("DOMContentLoaded", async () => {
     await pushChatModeToServer(mode);
   });
 
-  // Load saved server address + token (awaited so all status fetches below use them)
+  // Load saved server address + account id + token (awaited so all status fetches below use them)
   if (chrome.storage && chrome.storage.local) {
     await new Promise((resolve) => {
-      chrome.storage.local.get(["serverUrl", "bridgeToken", "chatMode"], (res) => {
+      chrome.storage.local.get(["serverUrl", "bridgeToken", "accountId", "chatMode"], (res) => {
         if (res && res.serverUrl) {
-          serverUrl = res.serverUrl;
+          rawServerUrl = res.serverUrl;
           serverUrlInput.value = res.serverUrl;
+        }
+        if (res && res.accountId) {
+          accountId = res.accountId;
+          if (accountIdInput) accountIdInput.value = res.accountId;
         }
         if (res && res.bridgeToken) {
           bridgeToken = res.bridgeToken;
           bridgeTokenInput.value = res.bridgeToken;
         }
+        serverUrl = computeEffectiveUrl(rawServerUrl, accountId);
         applyChatModeUI(res && res.chatMode);
         resolve();
       });
@@ -85,10 +107,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   loadCookieSyncStatus();
 
   saveSettingsBtn.addEventListener("click", async () => {
-    serverUrl = serverUrlInput.value.trim() || "http://localhost:8081";
+    rawServerUrl = serverUrlInput.value.trim() || "http://localhost:8081";
+    accountId = accountIdInput ? accountIdInput.value.trim().toLowerCase() : "";
+    serverUrl = computeEffectiveUrl(rawServerUrl, accountId);
     bridgeToken = bridgeTokenInput.value.trim();
     if (chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ serverUrl, bridgeToken });
+      chrome.storage.local.set({ serverUrl: rawServerUrl, accountId, bridgeToken });
     }
     saveSettingsBtn.textContent = "Saved! Syncing...";
     // Tell the background service worker to push cookies to the (new) server now.
@@ -96,6 +120,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     await loadCookieSyncStatus();
     setTimeout(() => { saveSettingsBtn.textContent = "💾 Save & Sync Now"; }, 2000);
   });
+
+  if (openAccountsBtn) {
+    openAccountsBtn.addEventListener("click", () => {
+      const root = normalizeRootUrl(serverUrlInput.value.trim() || rawServerUrl).replace(/\/a\/[^/]+$/i, "");
+      chrome.tabs.create({ url: `${root}/ui` });
+    });
+  }
 
   // Fetch cookie-sync health from the server (shows frozen/degraded/session-expired).
   async function loadCookieSyncStatus() {
