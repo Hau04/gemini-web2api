@@ -68,6 +68,28 @@ curl http://localhost:8081/v1/chat/completions \
   -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"你好！"}]}'
 ```
 
+## 支持的模型
+
+可随时请求 `GET /v1/models` 获取实时列表，或直接使用以下模型名称：
+
+| 模型 ID | 别名 | 说明 |
+| :--- | :--- | :--- |
+| `gemini-4-neon` | `neon`, `gemini-4-neon-thinking` | 前沿旗舰模型（Gemini 4 Neon） |
+| `gemini-4-hydrogen` | `hydrogen` | 高速前沿执行模型（Gemini 4 Hydrogen） |
+| `gemini-4-argon` | `argon`, `gemini-4` | 复杂任务旗舰模型（Gemini 4 Argon） |
+| `gemini-4-carbon` | `carbon` | 前沿模型（Gemini 4 Carbon） |
+| `gemini-3.8-flash` | — | 最新全能 Flash 模型 |
+| `gemini-3.7-flash` | — | 全能 Flash 模型 |
+| `gemini-3.6-flash` | `gemini-3.5-flash` | 默认全能 Flash 模型 |
+| `gemini-3.5-flash-thinking` | — | 深度思考模式（超长输出 ~20k 字符） |
+| `gemini-3.5-flash-thinking-lite` | — | 动态自适应思考模型 |
+| `gemini-3.1-pro` | `gemini-3.1-pro-enhanced` | Pro 模型（需要登录 Cookie） |
+| `gemini-2.5-pro` | — | Gemini 2.5 Pro |
+| `gemini-flash-lite` | — | 轻量高速模型 |
+| `gemini-auto` | — | 自动选择模型 |
+
+**可选后缀：** 支持拼接 `@think=0..4`（`0` 最深，`4` 最浅）、`@new` 或 `@continue`（例如 `gemini-4-hydrogen@think=0@new`）。
+
 ## 常用配置（`config.json`）
 
 | 配置项 | 说明 |
