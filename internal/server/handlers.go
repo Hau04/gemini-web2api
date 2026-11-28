@@ -34,8 +34,10 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 			"model_probe":           true,
 			"image_generation":      true,
 			"video_generation":      true,
+			"multi_account":         true,
 		},
 		"status":  "ok",
+		"account": a.AccountID,
 		"version": a.Version,
 		"models":  modelNames,
 	})

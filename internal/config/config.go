@@ -23,6 +23,7 @@ type Config struct {
 	ToolModel                  string   `json:"tool_model"`
 	LogRequests                bool     `json:"log_requests"`
 	CookieFile                 string   `json:"cookie_file"`
+	AccountsDir                string   `json:"accounts_dir"`
 	Proxy                      string   `json:"proxy"`
 	APIKeys                    []string `json:"api_keys"`
 	Impersonate                string   `json:"impersonate"`
@@ -133,6 +134,7 @@ func Default() Config {
 		ToolModel:                      "",
 		LogRequests:                    true,
 		CookieFile:                     "",
+		AccountsDir:                    "",
 		Proxy:                          "",
 		APIKeys:                        []string{},
 		Impersonate:                    "",
@@ -199,6 +201,7 @@ func Load(path string) (Config, error) {
 		ToolModel                      *string           `json:"tool_model"`
 		LogRequests                    *bool             `json:"log_requests"`
 		CookieFile                     *string           `json:"cookie_file"`
+		AccountsDir                    *string           `json:"accounts_dir"`
 		Proxy                          *string           `json:"proxy"`
 		APIKeys                        *[]string         `json:"api_keys"`
 		Impersonate                    *string           `json:"impersonate"`
@@ -278,6 +281,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.CookieFile != nil {
 		cfg.CookieFile = *aux.CookieFile
+	}
+	if aux.AccountsDir != nil {
+		cfg.AccountsDir = *aux.AccountsDir
 	}
 	if aux.Proxy != nil {
 		cfg.Proxy = *aux.Proxy

@@ -45,6 +45,14 @@ function normalizeServerUrl(raw) {
   return u;
 }
 
+function resolveBridgeBaseUrl(rawUrl, accountId) {
+  const base = normalizeServerUrl(rawUrl);
+  const acc = String(accountId || "").trim().toLowerCase();
+  if (!acc || acc === "default") return base;
+  if (/\/a\/[^/]+$/i.test(base)) return base;
+  return `${base}/a/${encodeURIComponent(acc)}`;
+}
+
 function buildBridgeHeaders(token, extra) {
   const h = Object.assign({}, extra || {});
   if (token) h["X-Bridge-Token"] = token;
@@ -53,14 +61,14 @@ function buildBridgeHeaders(token, extra) {
 
 // Export pure helpers for Node.js unit tests
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { normalizeServerUrl, buildBridgeHeaders };
+  module.exports = { normalizeServerUrl, resolveBridgeBaseUrl, buildBridgeHeaders };
 }
 
 async function getBridgeConfig() {
   try {
-    const res = await chrome.storage.local.get(["serverUrl", "bridgeToken"]);
+    const res = await chrome.storage.local.get(["serverUrl", "bridgeToken", "accountId"]);
     return {
-      url: normalizeServerUrl(res.serverUrl),
+      url: resolveBridgeBaseUrl(res.serverUrl, res.accountId),
       token: String(res.bridgeToken || "").trim()
     };
   } catch (e) {

@@ -1,0 +1,648 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gemini Web2API — Account Manager</title>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --surface-muted: #f1f5f9;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --green-bg: #ecfdf5;
+      --green-fg: #065f46;
+      --green-bd: #a7f3d0;
+      --amber-bg: #fffbeb;
+      --amber-fg: #92400e;
+      --amber-bd: #fde68a;
+      --red-bg: #fef2f2;
+      --red-fg: #991b1b;
+      --red-bd: #fecaca;
+      --radius: 10px;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f172a;
+        --surface: #1e293b;
+        --surface-muted: #0f172a;
+        --border: #334155;
+        --text: #f1f5f9;
+        --text-muted: #94a3b8;
+        --primary: #3b82f6;
+        --primary-hover: #2563eb;
+        --green-bg: #064e3b;
+        --green-fg: #a7f3d0;
+        --green-bd: #065f46;
+        --amber-bg: #451a03;
+        --amber-fg: #fde68a;
+        --amber-bd: #78350f;
+        --red-bg: #450a0a;
+        --red-fg: #fecaca;
+        --red-bd: #7f1d1d;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container { max-width: 1120px; margin: 0 auto; padding: 24px 20px 48px; }
+    header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .title-group h1 { margin: 0; font-size: 22px; display: flex; align-items: center; gap: 10px; }
+    .version-pill {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+    .subtitle { margin: 4px 0 0; font-size: 13px; color: var(--text-muted); }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    button {
+      font: inherit;
+      font-size: 13px;
+      font-weight: 500;
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+    }
+    button:hover:not(:disabled) { background: var(--surface-muted); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    button.primary { background: var(--primary); color: #fff; border-color: var(--primary); }
+    button.primary:hover:not(:disabled) { background: var(--primary-hover); }
+    button.danger { background: var(--red-bg); color: var(--red-fg); border-color: var(--red-bd); }
+    button.sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-bottom: 20px;
+    }
+    .stat-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 16px;
+    }
+    .stat-label { font-size: 12px; color: var(--text-muted); }
+    .stat-value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+
+    .auth-banner {
+      display: none;
+      background: var(--amber-bg);
+      color: var(--amber-fg);
+      border: 1px solid var(--amber-bd);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-bottom: 20px;
+    }
+    .auth-banner.show { display: block; }
+    .auth-row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
+    .auth-row input { flex: 1; min-width: 220px; }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: var(--text);
+      color: var(--bg);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 1000;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(460px, 1fr));
+      gap: 16px;
+    }
+    @media (max-width: 540px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    .acc-name { font-size: 16px; font-weight: 600; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .acc-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      color: var(--text-muted);
+      background: var(--surface-muted);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    .badge {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 10px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      white-space: nowrap;
+    }
+    .badge.ready { background: var(--green-bg); color: var(--green-fg); border-color: var(--green-bd); }
+    .badge.missing { background: var(--amber-bg); color: var(--amber-fg); border-color: var(--amber-bd); }
+    .badge.expired { background: var(--red-bg); color: var(--red-fg); border-color: var(--red-bd); }
+
+    .error-box {
+      background: var(--red-bg);
+      color: var(--red-fg);
+      border: 1px solid var(--red-bd);
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-size: 12px;
+      word-break: break-word;
+    }
+
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 6px;
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+    }
+    .chip.ok { color: var(--green-fg); background: var(--green-bg); border-color: var(--green-bd); }
+
+    .links-box {
+      background: var(--surface-muted);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .link-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      font-size: 12px;
+    }
+    .link-label { color: var(--text-muted); min-width: 105px; flex-shrink: 0; }
+    .link-url {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+
+    .meta-line { font-size: 12px; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: 12px; }
+    .card-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; padding-top: 4px; }
+
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(15, 23, 42, 0.55);
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 900;
+    }
+    .modal-backdrop.show { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 540px;
+      padding: 20px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25);
+    }
+    .modal h2 { margin: 0 0 12px; font-size: 18px; }
+    .field { margin-bottom: 12px; }
+    .field label { display: block; font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-muted); }
+    input[type="text"], input[type="password"], textarea {
+      width: 100%;
+      padding: 8px 10px;
+      font-size: 13px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-family: inherit;
+    }
+    textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; min-height: 130px; resize: vertical; }
+    .hint { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+    .file-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="title-group">
+        <h1>Gemini Web2API Accounts <span class="version-pill" id="versionBadge">loading...</span></h1>
+        <p class="subtitle">Manage isolated Gemini accounts, inspect cookie health, and copy account-specific API base URLs.</p>
+      </div>
+      <div class="header-actions">
+        <button id="refreshBtn">Refresh</button>
+        <button id="addAccountBtn" class="primary">+ Add Account</button>
+      </div>
+    </header>
+
+    <div id="authBanner" class="auth-banner">
+      <strong>Authentication Required:</strong> Enter your <code>bridge_token</code> or an API key from <code>config.json</code> to manage accounts.
+      <div class="auth-row">
+        <input type="password" id="authTokenInput" placeholder="Bridge token or API key...">
+        <button id="saveAuthBtn" class="primary">Unlock</button>
+      </div>
+    </div>
+
+    <div class="stats-bar">
+      <div class="stat-card"><div class="stat-label">Total Accounts</div><div class="stat-value" id="statTotal">-</div></div>
+      <div class="stat-card"><div class="stat-label">Cookies Ready</div><div class="stat-value" id="statReady">-</div></div>
+      <div class="stat-card"><div class="stat-label">Expired / Auth Error</div><div class="stat-value" id="statExpired">-</div></div>
+      <div class="stat-card"><div class="stat-label">Missing Cookies</div><div class="stat-value" id="statMissing">-</div></div>
+    </div>
+
+    <div id="accountsGrid" class="grid"></div>
+  </div>
+
+  <!-- Add Account Modal -->
+  <div id="addModal" class="modal-backdrop">
+    <div class="modal">
+      <h2>Add Isolated Account</h2>
+      <div class="field">
+        <label for="newAccId">Account ID (used in API URL)</label>
+        <input type="text" id="newAccId" placeholder="e.g. work, personal, acc2">
+        <div class="hint">Lowercase letters, digits, '-' or '_'. API Base URL will be: <code id="urlPreview">/a/&lt;id&gt;/v1</code></div>
+      </div>
+      <div class="field">
+        <label for="newAccLabel">Display Label (optional)</label>
+        <input type="text" id="newAccLabel" placeholder="e.g. Work Gemini Account">
+      </div>
+      <div class="field">
+        <label for="newAccCookie">Cookies (optional — paste cookie.json or raw Cookie header)</label>
+        <div class="file-row">
+          <input type="file" id="newAccFile" accept=".json,.txt">
+        </div>
+        <textarea id="newAccCookie" placeholder='{"cookie": "SID=...; SAPISID=...; __Secure-1PSID=...", "sapisid": "..."}'></textarea>
+        <div class="hint">You can also leave this blank and sync cookies later via the Chrome extension.</div>
+      </div>
+      <div id="addModalError" class="error-box" style="display:none;"></div>
+      <div class="modal-actions">
+        <button id="cancelAddBtn">Cancel</button>
+        <button id="confirmAddBtn" class="primary">Create Account</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Update Cookies Modal -->
+  <div id="cookieModal" class="modal-backdrop">
+    <div class="modal">
+      <h2>Update Cookies — <span id="cookieModalAccName"></span></h2>
+      <div class="field">
+        <label for="updateCookieInput">Paste cookie.json or raw Cookie header string</label>
+        <div class="file-row">
+          <input type="file" id="updateCookieFile" accept=".json,.txt">
+        </div>
+        <textarea id="updateCookieInput" placeholder='{"cookie": "SID=...; SAPISID=...; __Secure-1PSID=...", "sapisid": "..."}'></textarea>
+      </div>
+      <div id="cookieModalError" class="error-box" style="display:none;"></div>
+      <div class="modal-actions">
+        <button id="cancelCookieBtn">Cancel</button>
+        <button id="confirmCookieBtn" class="primary">Save Cookies</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    const ORIGIN = window.location.origin;
+    const STORAGE_KEY = "gemini_web2api_admin_token";
+    let adminToken = localStorage.getItem(STORAGE_KEY) || "";
+    let activeCookieAccId = null;
+
+    const authBanner = document.getElementById("authBanner");
+    const authTokenInput = document.getElementById("authTokenInput");
+    const accountsGrid = document.getElementById("accountsGrid");
+    const toastEl = document.getElementById("toast");
+    let toastTimer = null;
+
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add("show");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove("show"), 2400);
+    }
+
+    function authHeaders(extra) {
+      const h = Object.assign({}, extra || {});
+      if (adminToken) {
+        h["X-Bridge-Token"] = adminToken;
+        h["Authorization"] = "Bearer " + adminToken;
+      }
+      return h;
+    }
+
+    async function apiFetch(path, opts) {
+      const o = Object.assign({}, opts || {});
+      o.headers = authHeaders(o.headers);
+      const res = await fetch(path, o);
+      if (res.status === 401) {
+        authBanner.classList.add("show");
+        throw new Error("Unauthorized — please enter your bridge_token or API key above.");
+      }
+      authBanner.classList.remove("show");
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const msg = (data && (data.error && data.error.message || data.error)) || ("HTTP " + res.status);
+        throw new Error(msg);
+      }
+      return data;
+    }
+
+    function escapeHtml(s) {
+      return String(s || "").replace(/[&<>"']/g, (c) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+      }[c]));
+    }
+
+    function formatAge(iso) {
+      if (!iso) return "never";
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return iso;
+      const diff = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      if (diff < 60) return diff + "s ago";
+      if (diff < 3600) return Math.floor(diff / 60) + "m ago";
+      if (diff < 86400) return Math.floor(diff / 3600) + "h ago";
+      return Math.floor(diff / 86400) + "d ago";
+    }
+
+    function copyText(text, label) {
+      navigator.clipboard.writeText(text).then(() => {
+        showToast("Copied " + label);
+      }).catch(() => {
+        showToast("Copy failed");
+      });
+    }
+
+    function renderAccounts(list) {
+      document.getElementById("statTotal").textContent = list.length;
+      document.getElementById("statReady").textContent = list.filter(a => a.cookie_status === "ready").length;
+      document.getElementById("statExpired").textContent = list.filter(a => a.cookie_status === "expired").length;
+      document.getElementById("statMissing").textContent = list.filter(a => a.cookie_status === "missing").length;
+
+      accountsGrid.innerHTML = list.map((acc) => {
+        const openaiUrl = ORIGIN + acc.api_base_path;
+        const googleUrl = ORIGIN + acc.google_base_path;
+        const extUrl = ORIGIN + (acc.bridge_base_path || "");
+        const statusLabel = acc.cookie_status === "ready" ? "Cookies Ready"
+          : acc.cookie_status === "expired" ? "Session Expired"
+          : "No Cookies";
+        const originHost = (acc.synced_origin || acc.configured_base_url || "").replace(/^https?:\/\//, "");
+        const syncTime = acc.cookie_last_sync || acc.cookie_updated_at;
+
+        const chips = [
+          `<span class="chip ${acc.has_sapisid ? "ok" : ""}">SAPISID ${acc.has_sapisid ? "✓" : "✗"}</span>`,
+          `<span class="chip ${acc.has_psid ? "ok" : ""}">1PSID ${acc.has_psid ? "✓" : "✗"}</span>`,
+          `<span class="chip ${acc.has_xsrf ? "ok" : ""}">XSRF ${acc.has_xsrf ? "✓" : "–"}</span>`,
+          `<span class="chip ${acc.direct_mode_usable ? "ok" : ""}">Direct ${acc.direct_mode_usable ? "Ready" : "Off"}</span>`,
+          `<span class="chip ${acc.bridge_connected ? "ok" : ""}">Bridge ${acc.bridge_connected ? (acc.bridge_frozen ? "Frozen" : "Online") : "Offline"}</span>`
+        ];
+        if (acc.has_discovery_template) {
+          chips.push(`<span class="chip ok">Enterprise Template ✓</span>`);
+        }
+        if (acc.auth_user) {
+          chips.push(`<span class="chip">/u/${escapeHtml(acc.auth_user)}</span>`);
+        }
+
+        return `
+          <div class="card">
+            <div class="card-head">
+              <div class="acc-name">
+                <span>${escapeHtml(acc.label || acc.id)}</span>
+                <span class="acc-id">${escapeHtml(acc.id)}</span>
+              </div>
+              <span class="badge ${escapeHtml(acc.cookie_status)}">${statusLabel}</span>
+            </div>
+
+            ${acc.auth_error ? `<div class="error-box"><strong>Auth error:</strong> ${escapeHtml(acc.auth_error)}</div>` : ""}
+
+            <div class="chips">${chips.join("")}</div>
+
+            <div class="links-box">
+              <div class="link-row">
+                <span class="link-label">OpenAI Base URL</span>
+                <span class="link-url" title="${escapeHtml(openaiUrl)}">${escapeHtml(openaiUrl)}</span>
+                <button class="sm" data-copy="${escapeHtml(openaiUrl)}" data-copy-label="OpenAI URL">Copy</button>
+              </div>
+              <div class="link-row">
+                <span class="link-label">Google Base URL</span>
+                <span class="link-url" title="${escapeHtml(googleUrl)}">${escapeHtml(googleUrl)}</span>
+                <button class="sm" data-copy="${escapeHtml(googleUrl)}" data-copy-label="Google URL">Copy</button>
+              </div>
+              <div class="link-row">
+                <span class="link-label">Extension Server</span>
+                <span class="link-url" title="${escapeHtml(extUrl)}">${escapeHtml(extUrl)}</span>
+                <button class="sm" data-copy="${escapeHtml(extUrl)}" data-copy-label="Extension URL">Copy</button>
+              </div>
+            </div>
+
+            <div class="meta-line">
+              <span>Origin: <strong>${escapeHtml(originHost || "unknown")}</strong></span>
+              <span>Updated: <strong>${escapeHtml(formatAge(syncTime))}</strong></span>
+            </div>
+
+            <div class="card-actions">
+              <button class="primary sm" data-update-cookies="${escapeHtml(acc.id)}">Update Cookies</button>
+              <button class="sm" data-clear-cookies="${escapeHtml(acc.id)}" ${acc.cookies_ready ? "" : "disabled"}>Clear Cookies</button>
+              ${acc.is_default ? "" : `<button class="danger sm" data-delete-account="${escapeHtml(acc.id)}">Delete Account</button>`}
+            </div>
+          </div>
+        `;
+      }).join("");
+    }
+
+    async function loadAccounts() {
+      try {
+        const data = await apiFetch("/api/accounts");
+        if (data.version) {
+          document.getElementById("versionBadge").textContent = data.version;
+        }
+        renderAccounts(data.accounts || []);
+      } catch (err) {
+        accountsGrid.innerHTML = `<div class="error-box">${escapeHtml(err.message)}</div>`;
+      }
+    }
+
+    // Event delegation for card actions
+    accountsGrid.addEventListener("click", async (e) => {
+      const btn = e.target.closest("button");
+      if (!btn) return;
+
+      if (btn.dataset.copy) {
+        copyText(btn.dataset.copy, btn.dataset.copyLabel || "link");
+        return;
+      }
+      if (btn.dataset.updateCookies) {
+        activeCookieAccId = btn.dataset.updateCookies;
+        document.getElementById("cookieModalAccName").textContent = activeCookieAccId;
+        document.getElementById("updateCookieInput").value = "";
+        document.getElementById("updateCookieFile").value = "";
+        document.getElementById("cookieModalError").style.display = "none";
+        document.getElementById("cookieModal").classList.add("show");
+        return;
+      }
+      if (btn.dataset.clearCookies) {
+        const id = btn.dataset.clearCookies;
+        if (!confirm(`Clear stored cookies for account "${id}"?`)) return;
+        try {
+          await apiFetch(`/api/accounts/${encodeURIComponent(id)}/cookies`, { method: "DELETE" });
+          showToast(`Cleared cookies for ${id}`);
+          loadAccounts();
+        } catch (err) {
+          showToast(err.message);
+        }
+        return;
+      }
+      if (btn.dataset.deleteAccount) {
+        const id = btn.dataset.deleteAccount;
+        if (!confirm(`Delete account "${id}" and all of its isolated cookies/templates?`)) return;
+        try {
+          await apiFetch(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+          showToast(`Deleted account ${id}`);
+          loadAccounts();
+        } catch (err) {
+          showToast(err.message);
+        }
+      }
+    });
+
+    // Auth unlock
+    document.getElementById("saveAuthBtn").addEventListener("click", () => {
+      adminToken = authTokenInput.value.trim();
+      localStorage.setItem(STORAGE_KEY, adminToken);
+      loadAccounts();
+    });
+    document.getElementById("refreshBtn").addEventListener("click", loadAccounts);
+
+    // Add Account modal
+    const addModal = document.getElementById("addModal");
+    const newAccId = document.getElementById("newAccId");
+    const urlPreview = document.getElementById("urlPreview");
+
+    newAccId.addEventListener("input", () => {
+      const v = newAccId.value.trim().toLowerCase() || "<id>";
+      urlPreview.textContent = ORIGIN + "/a/" + v + "/v1";
+    });
+
+    document.getElementById("addAccountBtn").addEventListener("click", () => {
+      newAccId.value = "";
+      document.getElementById("newAccLabel").value = "";
+      document.getElementById("newAccCookie").value = "";
+      document.getElementById("newAccFile").value = "";
+      document.getElementById("addModalError").style.display = "none";
+      urlPreview.textContent = ORIGIN + "/a/<id>/v1";
+      addModal.classList.add("show");
+      newAccId.focus();
+    });
+    document.getElementById("cancelAddBtn").addEventListener("click", () => addModal.classList.remove("show"));
+
+    function bindFileToTextarea(fileInputId, textareaId) {
+      document.getElementById(fileInputId).addEventListener("change", async (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (!file) return;
+        document.getElementById(textareaId).value = await file.text();
+      });
+    }
+    bindFileToTextarea("newAccFile", "newAccCookie");
+    bindFileToTextarea("updateCookieFile", "updateCookieInput");
+
+    document.getElementById("confirmAddBtn").addEventListener("click", async () => {
+      const errEl = document.getElementById("addModalError");
+      errEl.style.display = "none";
+      const id = newAccId.value.trim().toLowerCase();
+      const label = document.getElementById("newAccLabel").value.trim();
+      const raw = document.getElementById("newAccCookie").value.trim();
+      try {
+        await apiFetch("/api/accounts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id, label, raw })
+        });
+        addModal.classList.remove("show");
+        showToast(`Created account "${id}"`);
+        loadAccounts();
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.style.display = "block";
+      }
+    });
+
+    // Update Cookies modal
+    const cookieModal = document.getElementById("cookieModal");
+    document.getElementById("cancelCookieBtn").addEventListener("click", () => cookieModal.classList.remove("show"));
+    document.getElementById("confirmCookieBtn").addEventListener("click", async () => {
+      const errEl = document.getElementById("cookieModalError");
+      errEl.style.display = "none";
+      const raw = document.getElementById("updateCookieInput").value.trim();
+      try {
+        await apiFetch(`/api/accounts/${encodeURIComponent(activeCookieAccId)}/cookies`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ raw })
+        });
+        cookieModal.classList.remove("show");
+        showToast(`Updated cookies for "${activeCookieAccId}"`);
+        loadAccounts();
+      } catch (err) {
+        errEl.textContent = err.message;
+        errEl.style.display = "block";
+      }
+    });
+
+    // Initial load + periodic refresh
+    loadAccounts();
+    setInterval(loadAccounts, 15000);
+  </script>
+</body>
+</html>

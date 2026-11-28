@@ -27,6 +27,7 @@
     "sk-gemini"
   ],
   "cookie_file": null,
+  "accounts_dir": "",
   "proxy": null,
   "log_requests": true,
   "impersonate": "",
