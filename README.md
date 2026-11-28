@@ -209,6 +209,18 @@ Supports Google native API endpoints:
 
 ## WorkBuddy / MCP compatibility
 
+### Tool-call format: one rule, not two
+
+WorkBuddy's own system prompt says *"Always narrate before a tool call"*; the proxy used to say *"Output ONLY the tool_call block(s)"*. A model told both rules negotiates them out loud, and that deliberation lands in the answer — `Let me check…`, `Wait—should I output only the block?`, a draft block before the real one.
+
+The preamble now matches the client: **a short sentence before the block is fine, nothing after it**, and planning/self-checks must never be written into the answer. Leading prose is emitted as normal content (the block is still what becomes `tool_calls`), so both sides get what they asked for.
+
+If the model calls a tool the request never declared, the log says so instead of leaving a broken turn unexplained:
+
+```
+MODEL TOOL WARNING: the model called "resolve_issue" which this request did not declare (26 declared: …) — the client cannot run it
+```
+
 Built for agent runtimes that drive tools, connectors, skills and MCP servers (WorkBuddy, Claude-style agents, the OpenAI SDKs):
 
 | Feature | Behaviour |
@@ -557,6 +569,12 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 Trimming keeps the head (system prompt, instructions, attached-file preamble) and the tail (recent turns, the current question), replaces the middle with a one-line notice so the model knows the history is partial, and never cuts the current question. Set `"enterprise_max_prompt_chars"` to skip the single learn-by-failing round trip.
 
 Two rules keep this from eating a conversation alive:
+
+- **A big prompt gets no session at all.** An agent loop re-sends its whole history (hundreds of KB), so a session adds no memory — only its own growing history against the same limit. Above `"enterprise_session_max_prompt_chars"` (default 32 KB) the request goes out sessionless, and a conversation whose session was refused once is not offered one again:
+
+  ```
+  Enterprise: no session for conversation 6574ddca — the prompt already carries the conversation; a session is reused only while the prompt is small
+  ```
 
 - **A session is dropped before a prompt is trimmed.** A session's own history counts towards the tenant's limit and grows by a whole prompt every turn, so a long-running session eventually refuses every request however small the prompt is. On such a refusal the session is cleared and the same (untrimmed) prompt is retried — the client re-sends its history anyway:
 

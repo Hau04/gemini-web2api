@@ -108,6 +108,11 @@ type Config struct {
 	// (including MCP connector tools) are enabled. Empty uses the toolsSpec from
 	// the captured template, or the captured default.
 	DiscoveryEngineToolsSpec string `json:"discovery_engine_tools_spec"`
+	// EnterpriseSessionMaxPromptChars is the prompt size above which no Discovery
+	// Engine session is attached: the prompt already carries the conversation, and
+	// the session's own history would only push the request towards the tenant's
+	// limit. 0 uses the default (32 KB).
+	EnterpriseSessionMaxPromptChars int `json:"enterprise_session_max_prompt_chars"`
 	// EnterpriseMaxPromptChars caps the prompt sent to the Discovery Engine
 	// streamAssist endpoint. 0 learns the tenant's own limit from a
 	// PROMPT_TOO_LARGE refusal and remembers it.
@@ -187,56 +192,57 @@ func Load(path string) (Config, error) {
 	// but standard unmarshal over struct fields handles JSON null for strings by leaving existing or setting zero-value if unmarshaling map/struct.
 	// Let's ensure string fields default properly if JSON has explicitly `null`.
 	var aux struct {
-		Port                           *int              `json:"port"`
-		Host                           *string           `json:"host"`
-		RetryAttempts                  *int              `json:"retry_attempts"`
-		RetryDelaySec                  *int              `json:"retry_delay_sec"`
-		RequestTimeoutSec              *int              `json:"request_timeout_sec"`
-		GeminiBL                       *string           `json:"gemini_bl"`
-		AuthUser                       *string           `json:"auth_user"`
-		XSRFToken                      *string           `json:"xsrf_token"`
-		DefaultModel                   *string           `json:"default_model"`
-		ToolModel                      *string           `json:"tool_model"`
-		LogRequests                    *bool             `json:"log_requests"`
-		CookieFile                     *string           `json:"cookie_file"`
-		Proxy                          *string           `json:"proxy"`
-		APIKeys                        *[]string         `json:"api_keys"`
-		Impersonate                    *string           `json:"impersonate"`
-		TemporaryChats                 *bool             `json:"temporary_chats"`
-		BaseURL                        *string           `json:"base_url"`
-		BridgeMinIntervalMs            *int              `json:"bridge_min_interval_ms"`
-		BridgeJitterMs                 *int              `json:"bridge_jitter_ms"`
-		BridgeMaxPer10Min              *int              `json:"bridge_max_per_10min"`
-		BridgeMaxPerHour               *int              `json:"bridge_max_per_hour"`
-		BridgePacingStateFile          *string           `json:"bridge_pacing_state_file"`
-		BridgeAutoUploadLocalFiles     *bool             `json:"bridge_auto_upload_local_files"`
-		BridgeLargeCodeUploadBytes     *int              `json:"bridge_large_code_upload_bytes"`
-		BridgeSpilloverChars           *int              `json:"bridge_spillover_chars"`
-		PreventDeepResearch            *bool             `json:"prevent_deep_research"`
-		BridgeDeltaContext             *bool             `json:"bridge_delta_context"`
-		BridgeAutoNewChat              *bool             `json:"bridge_auto_new_chat"`
-		BridgeNoContentTimeoutSec      *int              `json:"bridge_no_content_timeout_sec"`
-		BridgePickupTimeoutSec         *int              `json:"bridge_pickup_timeout_sec"`
-		BridgeToken                    *string           `json:"bridge_token"`
-		NotifyWebhook                  *string           `json:"notify_webhook"`
-		NotifyFormat                   *string           `json:"notify_format"`
-		DiscoveryEngineEndpoint        *string           `json:"discovery_engine_endpoint"`
-		DiscoveryEngineConfigID        *string           `json:"discovery_engine_config_id"`
-		DiscoveryEngineServerToken     *string           `json:"discovery_engine_server_token"`
-		DiscoveryEngineUploadEndpoint  *string           `json:"discovery_engine_upload_endpoint"`
-		DiscoveryEngineSession         *string           `json:"discovery_engine_session"`
-		DiscoveryEngineUploadCacheSec  *int              `json:"discovery_engine_upload_cache_sec"`
-		DiscoveryEngineCsesidx         *string           `json:"discovery_engine_csesidx"`
-		DiscoveryEngineLocation        *string           `json:"discovery_engine_location"`
-		DiscoveryEngineModels          map[string]string `json:"discovery_engine_models"`
-		DiscoveryEngineDefaultModelID  *string           `json:"discovery_engine_default_model_id"`
-		DiscoveryEngineProbeModels     *bool             `json:"discovery_engine_probe_models"`
-		EnterpriseAutoAttachLocalFiles *bool             `json:"enterprise_auto_attach_local_files"`
-		EnterpriseAutoAttachMinBytes   *int              `json:"enterprise_auto_attach_min_bytes"`
-		EnterpriseAttachLargePrompt    *bool             `json:"enterprise_attach_large_prompt"`
-		EnterpriseMirrorTextInline     *bool             `json:"enterprise_mirror_text_inline"`
-		EnterpriseMaxPromptChars       *int              `json:"enterprise_max_prompt_chars"`
-		DiscoveryEngineToolsSpec       *string           `json:"discovery_engine_tools_spec"`
+		Port                            *int              `json:"port"`
+		Host                            *string           `json:"host"`
+		RetryAttempts                   *int              `json:"retry_attempts"`
+		RetryDelaySec                   *int              `json:"retry_delay_sec"`
+		RequestTimeoutSec               *int              `json:"request_timeout_sec"`
+		GeminiBL                        *string           `json:"gemini_bl"`
+		AuthUser                        *string           `json:"auth_user"`
+		XSRFToken                       *string           `json:"xsrf_token"`
+		DefaultModel                    *string           `json:"default_model"`
+		ToolModel                       *string           `json:"tool_model"`
+		LogRequests                     *bool             `json:"log_requests"`
+		CookieFile                      *string           `json:"cookie_file"`
+		Proxy                           *string           `json:"proxy"`
+		APIKeys                         *[]string         `json:"api_keys"`
+		Impersonate                     *string           `json:"impersonate"`
+		TemporaryChats                  *bool             `json:"temporary_chats"`
+		BaseURL                         *string           `json:"base_url"`
+		BridgeMinIntervalMs             *int              `json:"bridge_min_interval_ms"`
+		BridgeJitterMs                  *int              `json:"bridge_jitter_ms"`
+		BridgeMaxPer10Min               *int              `json:"bridge_max_per_10min"`
+		BridgeMaxPerHour                *int              `json:"bridge_max_per_hour"`
+		BridgePacingStateFile           *string           `json:"bridge_pacing_state_file"`
+		BridgeAutoUploadLocalFiles      *bool             `json:"bridge_auto_upload_local_files"`
+		BridgeLargeCodeUploadBytes      *int              `json:"bridge_large_code_upload_bytes"`
+		BridgeSpilloverChars            *int              `json:"bridge_spillover_chars"`
+		PreventDeepResearch             *bool             `json:"prevent_deep_research"`
+		BridgeDeltaContext              *bool             `json:"bridge_delta_context"`
+		BridgeAutoNewChat               *bool             `json:"bridge_auto_new_chat"`
+		BridgeNoContentTimeoutSec       *int              `json:"bridge_no_content_timeout_sec"`
+		BridgePickupTimeoutSec          *int              `json:"bridge_pickup_timeout_sec"`
+		BridgeToken                     *string           `json:"bridge_token"`
+		NotifyWebhook                   *string           `json:"notify_webhook"`
+		NotifyFormat                    *string           `json:"notify_format"`
+		DiscoveryEngineEndpoint         *string           `json:"discovery_engine_endpoint"`
+		DiscoveryEngineConfigID         *string           `json:"discovery_engine_config_id"`
+		DiscoveryEngineServerToken      *string           `json:"discovery_engine_server_token"`
+		DiscoveryEngineUploadEndpoint   *string           `json:"discovery_engine_upload_endpoint"`
+		DiscoveryEngineSession          *string           `json:"discovery_engine_session"`
+		DiscoveryEngineUploadCacheSec   *int              `json:"discovery_engine_upload_cache_sec"`
+		DiscoveryEngineCsesidx          *string           `json:"discovery_engine_csesidx"`
+		DiscoveryEngineLocation         *string           `json:"discovery_engine_location"`
+		DiscoveryEngineModels           map[string]string `json:"discovery_engine_models"`
+		DiscoveryEngineDefaultModelID   *string           `json:"discovery_engine_default_model_id"`
+		DiscoveryEngineProbeModels      *bool             `json:"discovery_engine_probe_models"`
+		EnterpriseAutoAttachLocalFiles  *bool             `json:"enterprise_auto_attach_local_files"`
+		EnterpriseAutoAttachMinBytes    *int              `json:"enterprise_auto_attach_min_bytes"`
+		EnterpriseAttachLargePrompt     *bool             `json:"enterprise_attach_large_prompt"`
+		EnterpriseMirrorTextInline      *bool             `json:"enterprise_mirror_text_inline"`
+		EnterpriseMaxPromptChars        *int              `json:"enterprise_max_prompt_chars"`
+		EnterpriseSessionMaxPromptChars *int              `json:"enterprise_session_max_prompt_chars"`
+		DiscoveryEngineToolsSpec        *string           `json:"discovery_engine_tools_spec"`
 	}
 
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -383,6 +389,9 @@ func Load(path string) (Config, error) {
 	}
 	if aux.DiscoveryEngineToolsSpec != nil {
 		cfg.DiscoveryEngineToolsSpec = *aux.DiscoveryEngineToolsSpec
+	}
+	if aux.EnterpriseSessionMaxPromptChars != nil {
+		cfg.EnterpriseSessionMaxPromptChars = *aux.EnterpriseSessionMaxPromptChars
 	}
 	if aux.EnterpriseMaxPromptChars != nil {
 		cfg.EnterpriseMaxPromptChars = *aux.EnterpriseMaxPromptChars

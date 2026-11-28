@@ -550,6 +550,12 @@ Enterprise: prompt trimmed from 305089 to 114400 chars (oldest turns omitted) to
 
 两条规则避免把对话裁到窒息：
 
+- **大 prompt 干脆不带会话。** 代理循环每轮都会重发完整历史（几百 KB），会话提供不了额外记忆，只会把它自己的历史也压到同一个上限上。超过 `"enterprise_session_max_prompt_chars"`（默认 32 KB）就完全不带会话；某个会话被拒过一次后，该对话之后也不再尝试：
+
+  ```
+  Enterprise: no session for conversation 6574ddca — the prompt already carries the conversation; a session is reused only while the prompt is small
+  ```
+
 - **先换会话，再裁 prompt。** 会话自身的历史也计入租户的上限，并且每轮都增加一整个 prompt，所以长会话最终无论 prompt 多小都会被拒。遇到这种拒绝时，先清掉会话、用**未裁剪**的同一 prompt 重试 —— 客户端本来就会重发历史：
 
   ```

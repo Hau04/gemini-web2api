@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -441,4 +442,38 @@ func stripGoogleMediaTools(req *models.GoogleGenerateRequest) []string {
 	}
 	req.Tools = keptTools
 	return removed
+}
+
+// warnUndeclaredToolCalls names tool calls the model invented.
+//
+// An explicit ```tool_call block is passed through even when its name is not in
+// the request's tool list (clients may proxy arbitrary tools), so a hallucinated
+// name reaches the client as a call it cannot run — the turn looks broken with no
+// explanation anywhere. One log line makes that visible.
+func (a *App) warnUndeclaredToolCalls(tools []models.OpenAITool, calls []models.OpenAIToolCall) {
+	if a == nil || a.Logf == nil || len(calls) == 0 || len(tools) == 0 {
+		return
+	}
+	declared := format.AllowedToolNames(tools)
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" || declared[name] {
+			continue
+		}
+		a.Logf("MODEL TOOL WARNING: the model called %q, which this request did not declare (%d declared: %s) — the client cannot run it; check the tool list or the prompt",
+			name, len(declared), strings.Join(sortedKeys(declared, 8), ", "))
+	}
+}
+
+// sortedKeys returns up to limit map keys, sorted, for a readable log line.
+func sortedKeys(set map[string]bool, limit int) []string {
+	keys := make([]string, 0, len(set))
+	for key := range set {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	if len(keys) > limit {
+		keys = append(keys[:limit], "…")
+	}
+	return keys
 }

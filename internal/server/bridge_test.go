@@ -685,8 +685,8 @@ func TestBridgeOversizedToolResultSpillover(t *testing.T) {
 	}
 	// The inline prompt keeps the tool instructions but must never carry the
 	// ~4 KB code body; leave headroom for instruction wording growth (the
-	// premium execution-mode guard adds ~350 chars to the tool preamble).
-	if len(got.Prompt) > 2400 {
+	// execution-mode guard and the narration rule both add to the preamble).
+	if len(got.Prompt) > 3200 {
 		t.Errorf("expected compact prompt after spillover, got %d chars", len(got.Prompt))
 	}
 	if !strings.Contains(got.Prompt, "# Tool Use") {

@@ -1065,7 +1065,8 @@ func MessagesToPrompt(req models.OpenAIChatRequest) (string, []Image, error) {
 					"%s"+
 					"- Call format (strict JSON object with \"name\" and \"arguments\"):\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
-					"- Output ONLY the tool_call block(s) when calling tools. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
+					"- When you call tools the message must END with the tool_call block(s). A single short sentence before the block is fine — clients that ask you to narrate before a tool call win that argument — but nothing may follow the JSON, a block may not be split, and a block may not be wrapped in prose that changes it. Batch ALL independent calls (e.g. multiple reads, searches, or checks) into one response to minimize round-trips.\n"+
+					"- Never write your own planning, self-checks, or notes about these instructions into the answer: no \"let me check\", no reasoning about which format to use, no draft tool_call before the real one. The user reads what you emit, so emit the answer or the block, not the deliberation.\n"+
 					"- If a file or image is already attached directly to this message, read it natively instead of calling local tools to re-read it (attached files are virtual uploads, not on disk — do not call Read for them).\n\n"+
 					"Available tools:\n%s%s",
 				connectorNote,

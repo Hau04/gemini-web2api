@@ -612,9 +612,16 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 	// A prompt the tenant refuses as too large fails the whole turn, so the
 	// ceiling learned from an earlier refusal is applied before sending.
 	prompt = c.fitPrompt(prompt)
-	session = c.reuseOrCreateEnterpriseSession(session, convOpts)
-	if session != "" {
-		c.recordEnterpriseSession(session, convOpts)
+	// A big prompt already contains the conversation, and a session's own history
+	// counts against the same limit — attaching one only gets the request refused.
+	if skip, why := c.skipSessionForPrompt(len(prompt), conv.Key); skip {
+		c.logSessionSkipped(conv.Key, why, session)
+		session = ""
+	} else {
+		session = c.reuseOrCreateEnterpriseSession(session, convOpts)
+		if session != "" {
+			c.recordEnterpriseSession(session, convOpts)
+		}
 	}
 
 	fileIDsJSON := "[]"
@@ -730,7 +737,8 @@ func (c *Client) generateViaDiscoveryDirectStream(prompt string, fileIDs []strin
 				// is tried before cutting the user's content away.
 				if !sessionDropped && sessionJSON != "" {
 					sessionDropped = true
-					c.Logf("Direct Discovery Engine refused the prompt as too large (HTTP 400, %d chars) while a session was attached — the session's accumulated history is what became too large, so retrying in a fresh session instead of trimming the prompt", len(prompt))
+					c.Logf("Direct Discovery Engine refused the prompt as too large (HTTP 400, %d chars) while a session was attached — the session's accumulated history is what became too large, so retrying without one and leaving it out for this conversation from now on", len(prompt))
+					c.markSessionRefused(conv.Key)
 					c.clearEnterpriseSession()
 					session = ""
 					sessionJSON = ""
