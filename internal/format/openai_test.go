@@ -25,6 +25,46 @@ func TestParseToolCalls(t *testing.T) {
 	}
 }
 
+func TestParseToolCallsWithNestedBackticks(t *testing.T) {
+	fence := "\x60\x60\x60"
+	payload1 := `{"name":"Write","arguments":{"file_path":"README.md","content":"# Demo\n` + fence + `bash\necho hi\n` + fence + `\n"}}`
+	payload2 := `{"name":"Write","arguments":{"file_path":"README.zh-CN.md","content":"# 演示\n` + fence + `json\n{\"ok\":true}\n` + fence + `\n"}}`
+
+	// Reproduces the exact failure mode: leading prose immediately before the fence
+	// and multiple tool_call blocks whose JSON string values contain markdown fences.
+	raw := "Writing both READMEs now." + fence + "tool_call\n" + payload1 + "\n" + fence + "\n" + fence + "tool_call\n" + payload2 + "\n" + fence
+
+	clean, calls := ParseToolCalls(raw)
+	if len(calls) != 2 {
+		t.Fatalf("expected 2 tool calls with nested backticks, got %d (clean=%q)", len(calls), clean)
+	}
+	if clean != "Writing both READMEs now." {
+		t.Errorf("unexpected clean text: %q", clean)
+	}
+	for i, wantPath := range []string{"README.md", "README.zh-CN.md"} {
+		if calls[i].Function.Name != "Write" {
+			t.Errorf("call[%d] name = %q, want Write", i, calls[i].Function.Name)
+		}
+		var args map[string]string
+		if err := json.Unmarshal([]byte(calls[i].Function.Arguments), &args); err != nil {
+			t.Fatalf("call[%d] invalid JSON args: %v", i, err)
+		}
+		if args["file_path"] != wantPath {
+			t.Errorf("call[%d] file_path = %q, want %q", i, args["file_path"], wantPath)
+		}
+		if !strings.Contains(args["content"], fence) {
+			t.Errorf("call[%d] content lost nested backticks: %q", i, args["content"])
+		}
+	}
+
+	// Also verify json-fenced tool call with nested backticks when allowedTools is set.
+	jsonRaw := fence + "json\n" + payload1 + "\n" + fence
+	_, jsonCalls := ParseToolCallsWithAllowed(jsonRaw, map[string]bool{"Write": true})
+	if len(jsonCalls) != 1 || jsonCalls[0].Function.Name != "Write" {
+		t.Fatalf("expected 1 json-fenced Write call with nested backticks, got %+v", jsonCalls)
+	}
+}
+
 func TestMessagesToPrompt(t *testing.T) {
 	req := models.OpenAIChatRequest{
 		Messages: []models.OpenAIMessage{
