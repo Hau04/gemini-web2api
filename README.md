@@ -68,6 +68,28 @@ curl http://localhost:8081/v1/chat/completions \
   -d '{"model":"gemini-3.6-flash","messages":[{"role":"user","content":"Hello!"}]}'
 ```
 
+## Models
+
+Query `GET /v1/models` at any time for the live list, or use any model ID below:
+
+| Model ID | Aliases | Notes |
+| :--- | :--- | :--- |
+| `gemini-4-neon` | `neon`, `gemini-4-neon-thinking` | Frontier model (Gemini 4 Neon) |
+| `gemini-4-hydrogen` | `hydrogen` | High-speed frontier execution (Gemini 4 Hydrogen) |
+| `gemini-4-argon` | `argon`, `gemini-4` | Frontier model for complex tasks (Gemini 4 Argon) |
+| `gemini-4-carbon` | `carbon` | Frontier model (Gemini 4 Carbon) |
+| `gemini-3.8-flash` | — | Latest all-around Flash model |
+| `gemini-3.7-flash` | — | All-around Flash model |
+| `gemini-3.6-flash` | `gemini-3.5-flash` | Default all-around Flash model |
+| `gemini-3.5-flash-thinking` | — | Deep thinking mode (~20k chars output) |
+| `gemini-3.5-flash-thinking-lite` | — | Dynamic adaptive thinking |
+| `gemini-3.1-pro` | `gemini-3.1-pro-enhanced` | Pro model (requires signed-in cookie) |
+| `gemini-2.5-pro` | — | Gemini 2.5 Pro |
+| `gemini-flash-lite` | — | Lightweight fast model |
+| `gemini-auto` | — | Auto model selection |
+
+**Optional suffixes:** append `@think=0..4` (`0` deepest, `4` shallowest), `@new`, or `@continue` (e.g. `gemini-4-hydrogen@think=0@new`).
+
 ## Key Configuration (`config.json`)
 
 | Key | Description |
